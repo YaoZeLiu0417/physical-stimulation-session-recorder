@@ -1,0 +1,6 @@
+streamlit==1.37.1
+streamlit-webrtc==0.47.1
+aiortc==1.6.0
+av==12.2.0
+requests
+toml

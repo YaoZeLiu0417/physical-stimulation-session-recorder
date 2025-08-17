@@ -1,0 +1,19 @@
+# Python/venv
+.venv/
+__pycache__/
+*.pyc
+
+# 本地配置与密钥
+config.toml
+.streamlit/secrets.toml
+
+# 本地生成的录制文件
+recordings/
+*.mp4
+*.flv
+*_state.json
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
