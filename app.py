@@ -1,640 +1,378 @@
 # app.py
-# pyright: reportMissingImports=false
-"""
-实验干预录制 & 上传（NLP 采集 / 链接锁定 / 重试 / 免口令）
-- 被试用带签名链接 ?sid=...&exp=...&sig=... 直接进入（免口令，自动锁定被试编号）
-- 管理员仍可用 APP_PASSWORD_SHA256 口令进入
-- 录制：浏览器→服务器落盘(FLV)→(如有 ffmpeg 自动转 MP4)
-- 上传：百度网盘 precreate/superfile2/create 分片 + 指数退避重试
-- 上传成功后默认删除服务器本地副本（视频+JSON，可关闭）
-"""
+# pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
 import os
 import json
 import time
-import base64
 import hmac
 import hashlib
-import random
-import shutil
+import secrets
+import mimetypes
 import subprocess
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Dict, Any, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
-# —— TOML 读取更健壮：优先 stdlib tomllib（Py3.11+），其次 tomli，最后禁用并给出提示
-try:
-    import tomllib as toml  # Python 3.11+
-except Exception:  # pragma: no cover
-    try:
-        import tomli as toml  # 如果安装了 tomli（建议）
-    except Exception:
-        toml = None  # 线上没装 toml 包也不会报错，读本地 config.toml 时会提示
 import streamlit as st
 from streamlit.components.v1 import html
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+
+from streamlit_webrtc import (
+    webrtc_streamer,
+    WebRtcMode,
+    RTCConfiguration,
+)
 from aiortc.contrib.media import MediaRecorder
 
-# =========================
-# 基础：页面设置 & 工具函数
-# =========================
-st.set_page_config(
-    page_title="欢迎来到清华大学YMH-Lab",
-    page_icon="🎥",
-    layout="centered",
-)
+# ------------------------------
+# 常量 & 路径
+# ------------------------------
+APP_PASSWORD_SHA256 = str(os.getenv("APP_PASSWORD_SHA256") or st.secrets.get("APP_PASSWORD_SHA256", ""))
+LINK_SIGNING_KEY    = os.getenv("LINK_SIGNING_KEY") or st.secrets.get("LINK_SIGNING_KEY", "")
 
-def _safe_secret(key: str, default: str = "") -> str:
-    """优先从 st.secrets 读取；本地无 secrets.toml 时回退到环境变量。"""
+BASE_DIR   = Path(__file__).resolve().parent
+RECORD_DIR = (BASE_DIR / "records").resolve()
+RECORD_DIR.mkdir(exist_ok=True, parents=True)
+
+# ------------------------------
+# 页面设置
+# ------------------------------
+st.set_page_config(page_title="taVNS 干预日志", page_icon="🎥", layout="centered")
+
+
+# ------------------------------
+# 配置读取（优先 Secrets，回退到本地 config.toml）
+# ------------------------------
+def _read_toml_file(path: Path) -> Dict[str, Any]:
+    # 兼容 tomllib / tomli / toml 三种包的差异
     try:
-        return st.secrets[key]  # 本地无 secrets.toml 时可能抛异常
+        import tomllib  # Python 3.11+
+        with open(path, "rb") as f:
+            return tomllib.load(f)
     except Exception:
-        return os.getenv(key, default)
+        try:
+            import tomli  # type: ignore
+            with open(path, "rb") as f:
+                return tomli.load(f)  # type: ignore
+        except Exception:
+            import toml  # type: ignore
+            text = path.read_text(encoding="utf-8")
+            return toml.loads(text)  # type: ignore
 
-def _get_query_params() -> Dict[str, str]:
-    # 兼容不同 Streamlit 版本
-    try:
-        return dict(st.query_params)  # streamlit>=1.36
-    except Exception:
-        qp = st.experimental_get_query_params()
-        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in qp.items()}
+def load_baidu_conf() -> Dict[str, Any]:
+    if "baidu" in st.secrets:
+        b = st.secrets["baidu"]
+        return {
+            "app_key": b["app_key"],
+            "secret_key": b["secret_key"],
+            "refresh_token": b["refresh_token"],
+            "save_dir": b.get("save_dir", "/apps/collector"),
+        }
 
-ROOT = Path(__file__).resolve().parent
-REC_DIR = ROOT / "recordings"
-REC_DIR.mkdir(parents=True, exist_ok=True)
-CONF_PATH = ROOT / "config.toml"
-
-# ---- 读取配置：优先 Secrets，其次本地 config.toml（仅本地调试用） ----
-CFG: Dict[str, Any] = {}
-try:
-    if "baidu" in st.secrets:  # type: ignore[operator]
-        CFG = dict(st.secrets["baidu"])  # type: ignore[index]
-except Exception:
-    pass
-
-if not CFG and CONF_PATH.exists():
-    if toml is None:
-        st.error("读取 config.toml 需要 TOML 解析器。建议 Python≥3.11（内置 tomllib），或在本地安装 tomli。")
-        st.stop()
-    with open(CONF_PATH, "rb") as f:
-        loaded = toml.load(f)
-    CFG = loaded.get("baidu", {}) or {}
-
-AK = CFG.get("app_key", "")
-SK = CFG.get("secret_key", "")
-REDIR = CFG.get("redirect_uri", "http://localhost:8501/oauth/callback")
-SAVE_DIR = CFG.get("save_dir", "/apps/collector")
-
-if not AK or not SK:
-    st.error("未找到百度网盘 AK/SK。请在 Cloud 的 Secrets 填写 [baidu] 配置，或在本地提供 config.toml（不提交仓库）。")
+    cfg_path = Path("config.toml")
+    if not cfg_path.exists():
+        cfg_path = BASE_DIR / "config.toml"
+    if cfg_path.exists():
+        data = _read_toml_file(cfg_path)
+        if "baidu" in data:
+            return data["baidu"]
+    st.error("缺少 config.toml 或 Secrets 中的 [baidu] 配置。")
     st.stop()
 
-# =========================
-# 被试专属链接：签名校验（用于免口令与锁定 subject_id）
-# =========================
-LINK_SIGNING_KEY = _safe_secret("LINK_SIGNING_KEY", "")  # 在 Secrets/环境变量配置
+BAIDU = load_baidu_conf()
+APP_AK = BAIDU["app_key"]
+APP_SK = BAIDU["secret_key"]
+REFRESH_TOKEN = BAIDU["refresh_token"]
+SAVE_DIR = BAIDU.get("save_dir", "/apps/collector")
 
-def _b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
-def _sign_sid(sid: str, exp_ts: int) -> str:
-    mac = hmac.new(LINK_SIGNING_KEY.encode(), f"{sid}|{exp_ts}".encode(), hashlib.sha256).digest()
-    return _b64url(mac)
+# ------------------------------
+# 免口令签名链接 & 密码准入
+# ------------------------------
+def _hmac_sha256_hex(key: str, msg: str) -> str:
+    return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
-def verify_link_params() -> tuple[Optional[str], str]:
-    q = _get_query_params()
-    sid = q.get("sid", "")
-    exp_raw = q.get("exp", "")
-    sig = q.get("sig", "")
-    if not (sid and exp_raw and sig and LINK_SIGNING_KEY):
-        return None, "参数/密钥缺失"
+def gatekeeper():
     try:
-        exp = int(exp_raw)
+        q = st.query_params  # Streamlit 新接口
     except Exception:
-        return None, "exp 非法"
-    now = int(datetime.now(timezone.utc).timestamp())
-    if now > exp:
-        return None, "链接已过期"
-    expect = _sign_sid(sid, exp)
-    if not hmac.compare_digest(expect, sig):
-        return None, "签名不匹配"
-    return sid, ""
+        q = st.experimental_get_query_params()
 
-# =========================
-# 入口门禁：先验签（被试免口令），否则走口令
-# =========================
-def require_app_password():
-    # ① 验签成功（被试入口）→ 直接放行并锁定编号
-    sid, why = verify_link_params()
-    if sid:
-        st.session_state["authed"] = True
-        st.session_state["subject_id"] = sid
-        return
+    # —— 统一取首个值，并强制成 str —— 
+    sid: str = str(q.get("sid", [""])[0] if isinstance(q.get("sid"), list) else q.get("sid", ""))
+    exp: str = str(q.get("exp", [""])[0] if isinstance(q.get("exp"), list) else q.get("exp", ""))
+    sig: str = str(q.get("sig", [""])[0] if isinstance(q.get("sig"), list) else q.get("sig", ""))
 
-    # ② 否则需要口令（管理员/调试）
-    expected_hash = _safe_secret("APP_PASSWORD_SHA256", "")
-    if not expected_hash:
-        return  # 未配置口令则放行（仅内部/本地）
-    if st.session_state.get("authed", False):
+    if sid and exp and sig and LINK_SIGNING_KEY:
+        expected = _hmac_sha256_hex(LINK_SIGNING_KEY, f"{sid}:{exp}")
+        # 用 bytes，且把对方签名做 strip/lower 规范化，避免大小写/空白问题
+        if hmac.compare_digest(expected.encode("ascii"), sig.strip().lower().encode("ascii")):
+            st.session_state["authed"] = True
+            st.session_state.setdefault("default_sid", sid)
+            st.session_state.setdefault("default_exp", exp)
+
+    if st.session_state.get("authed"):
         return
 
     st.title("🔒 taVNS干预视频日志准入界面")
     st.warning("请输入访问密码以继续")
     pw = st.text_input("访问密码", type="password")
     if st.button("登录", type="primary"):
-        got = hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
-        if hmac.compare_digest(got, expected_hash):
+        got_hex = hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
+        # 同样用 bytes 做常量时间比较
+        if APP_PASSWORD_SHA256 and hmac.compare_digest(
+            got_hex.encode("ascii"), APP_PASSWORD_SHA256.strip().lower().encode("ascii")
+        ):
             st.session_state["authed"] = True
             st.rerun()
         else:
             st.error("密码错误"); st.stop()
     else:
-        # 避免未登录状态下页面继续渲染导致“闪退/反复初始化”
         st.stop()
 
-require_app_password()
+
+gatekeeper()
+
+
+# ------------------------------
+# UI - 基本信息
+# ------------------------------
 st.title("📓 taVNS 干预日志")
 
-# 公共 STUN
+col_a, col_b = st.columns(2)
+with col_a:
+    subject = st.text_input("被试编号", value=st.session_state.get("default_sid", ""))
+with col_b:
+    experiment = st.text_input("任务/实验标签", value=st.session_state.get("default_exp", ""))
+
+notes = st.text_area("访谈/思路/备注", placeholder="关键片段、被试反应、异常情况等…")
+delete_after_upload = st.checkbox("上传成功后删除本地文件", value=True)
+
+# ------------------------------
+# WebRTC 录制（浏览器 -> 服务器）
+# ------------------------------
 RTC_CFG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-# =========================
-# 百度网盘 API（分片 + 指数退避重试）
-# =========================
+def _make_rec_path() -> Path:
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = f"{subject or 'anon'}_{experiment or 'task'}_{ts}.mp4"
+    return (RECORD_DIR / base).resolve()
+
+# 将“输入流（浏览器传入）”直接录到文件
+def _recorder_factory():
+    path = _make_rec_path()
+    st.session_state["last_record_file"] = str(path)
+    return MediaRecorder(str(path))  # aiortc 使用 ffmpeg 写文件
+
+st.subheader("🎥 录制")
+ctx = webrtc_streamer(
+    key="recorder",
+    mode=WebRtcMode.SENDONLY,
+    rtc_configuration=RTC_CFG,
+    media_stream_constraints={"video": True, "audio": True},
+    in_recorder_factory=_recorder_factory,
+)
+
+# 小计时器（仅 UI）
+html(
+    """
+    <div id="rec-timer" style="font: 600 14px/1.6 ui-sans-serif,system-ui; margin-top:6px"></div>
+    <script>
+      let stPlaying = undefined;
+      function tick(){
+        const root = window.parent.document;
+        const btn = root.querySelector('button[kind="webrtc_start_stop"]') || root.querySelector('button[title*="Stop"]');
+        const playing = btn ? /Stop/i.test(btn.textContent) : false;
+        if (stPlaying !== playing){
+          stPlaying = playing;
+          window._recStart = playing ? Date.now() : undefined;
+        }
+        const d = document.getElementById("rec-timer");
+        if (!d) return;
+        if (window._recStart){
+          const s = Math.floor((Date.now() - window._recStart)/1000);
+          const mm = String(Math.floor(s/60)).padStart(2, '0');
+          const ss = String(s%60).padStart(2, '0');
+          d.textContent = "● 正在录制 " + mm + ":" + ss;
+          d.style.color = "#c00";
+        }else{
+          d.textContent = "未在录制";
+          d.style.color = "#666";
+        }
+      }
+      setInterval(tick, 500);
+      tick();
+    </script>
+    """,
+    height=22,
+)
+
+st.caption("点击上方组件的 Start/Stop 控件开始/停止。停止后文件会保存在服务器的 records/ 目录。")
+
+# ------------------------------
+# 辅助：列出本地视频
+# ------------------------------
+def list_local_videos(folder: Path) -> List[Path]:
+    exts = {".mp4", ".flv", ".webm", ".mkv"}
+    return sorted([p for p in folder.glob("*") if p.suffix.lower() in exts], key=lambda p: p.stat().st_mtime, reverse=True)
+
+# 保存一份元数据
+def write_meta_for(video: Path):
+    data = {
+        "subject": subject,
+        "experiment": experiment,
+        "notes": notes,
+        "filename": video.name,
+        "filesize": video.stat().st_size if video.exists() else 0,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    meta_path = video.with_suffix(".json")
+    meta_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ------------------------------
+# 百度网盘：OAuth & 分片上传
+# ------------------------------
 OAUTH_TOKEN_URL = "https://openapi.baidu.com/oauth/2.0/token"
 PRECREATE_URL   = "https://pan.baidu.com/rest/2.0/xpan/file?method=precreate"
 SUPERFILE2_URL  = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2"
 CREATE_URL      = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
 
-def _headers():
+def _headers() -> Dict[str, str]:
     return {"User-Agent": "exp-recorder/0.5"}
 
-def _post_with_retry(url: str, *, data=None, params=None, files=None,
-                     timeout: int = 60, max_retries: int = 4,
-                     backoff: float = 1.6) -> dict:
-    last_err: Exception | None = None
-    for i in range(max_retries):
-        try:
-            r = requests.post(url, data=data, params=params, files=files,
-                              headers=_headers(), timeout=timeout)
-            # 百度偶发 5xx/429，这里统一重试
-            if r.status_code >= 500 or r.status_code == 429:
-                raise requests.HTTPError(f"{r.status_code} {r.text[:200]}")
-            return r.json()
-        except Exception as e:
-            last_err = e
-            if i == max_retries - 1:
-                break
-            # 指数退避 + 抖动
-            time.sleep((backoff ** i) + random.random() * 0.5)
-    raise RuntimeError(f"请求失败（已重试 {max_retries} 次）：{last_err}")
-
-# ---------- 用 refresh_token 刷新 access_token ----------
-def ensure_token() -> str:
-    refresh_token = CFG.get("refresh_token", "")
-    if not refresh_token:
-        raise RuntimeError("缺少 refresh_token：请在 Secrets 的 [baidu] 中填写 refresh_token。")
-
-    resp = requests.post(
+def get_access_token() -> str:
+    r = requests.post(
         OAUTH_TOKEN_URL,
         data={
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": AK,
-            "client_secret": SK,
+            "refresh_token": REFRESH_TOKEN,
+            "client_id": APP_AK,
+            "client_secret": APP_SK,
         },
-        timeout=30,
         headers=_headers(),
+        timeout=60,
     )
-    j = resp.json()
-    if "access_token" not in j:
-        raise RuntimeError(f"刷新 access_token 失败：{j}")
+    r.raise_for_status()
+    return r.json()["access_token"]
 
-    # 若返回了新的 refresh_token，仅提示手动更新 Secrets（不写文件）
-    new_rt = j.get("refresh_token")
-    if new_rt and new_rt != refresh_token:
-        st.info("收到新的 refresh_token，请在 Cloud 的 Secrets 中更新（当前运行仍可继续）。")
+def _md5_bytes(b: bytes) -> str:
+    h = hashlib.md5()
+    h.update(b)
+    return h.hexdigest()
 
-    return j["access_token"]
+CHUNK = 4 * 1024 * 1024
 
-def upload_to_baidu(
-    local_path: Path,
-    remote_path: str,
-    chunk_size: int = 8 * 1024 * 1024,
-    progress_cb: Callable[[float, str], None] | None = None,
-) -> dict:
-    """三步上传：precreate -> superfile2(分片) -> create（带重试）。"""
-    token = ensure_token()
-    size = local_path.stat().st_size
-
-    # 分片 md5
-    part_md5s: List[str] = []
-    with local_path.open("rb") as f:
+def _iter_parts(p: Path) -> Iterable[bytes]:
+    with open(p, "rb") as f:
         while True:
-            buf = f.read(chunk_size)
+            buf = f.read(CHUNK)
             if not buf:
                 break
-            part_md5s.append(hashlib.md5(buf).hexdigest())
+            yield buf
 
-    # 1) precreate（含“秒传”）
-    pre = _post_with_retry(
+def upload_to_baidu(video: Path, *, save_root: str = SAVE_DIR) -> bool:
+    access_token = get_access_token()
+    size = video.stat().st_size
+    parts = list(_iter_parts(video))
+    block_list = [_md5_bytes(b) for b in parts]
+
+    # precreate
+    pre_r = requests.post(
         PRECREATE_URL,
+        params={"access_token": access_token},
         data={
-            "access_token": token, "path": remote_path, "size": size,
-            "isdir": 0, "autoinit": 1, "rtype": 3,
-            "block_list": json.dumps(part_md5s),
+            "path": f"{save_root.rstrip('/')}/{subject}/{datetime.now().strftime('%Y%m%d')}/{video.name}",
+            "size": str(size),
+            "isdir": "0",
+            "autoinit": "1",
+            "rtype": "3",
+            "block_list": json.dumps(block_list),
         },
+        headers=_headers(),
         timeout=60,
-        max_retries=4,
     )
-    # return_type==2 表示已存在 -> 秒传完成
-    if pre.get("return_type") == 2:
-        if progress_cb: progress_cb(1.0, "秒传完成")
-        return {"ok": True, "fast_upload": True, "path": pre.get("path")}
+    pre = pre_r.json()
+    if pre.get("errno", 0) != 0:
+        st.error(f"预创建失败：{pre}")
+        return False
 
-    uploadid = str(pre.get("uploadid", ""))  # 显式转换为 str，避免类型推断问题
+    uploadid = pre.get("uploadid")
     if not uploadid:
-        raise RuntimeError(f"precreate 无 uploadid：{pre}")
+        # 秒传
+        return True
 
-    need_idx = set(pre.get("block_list", list(range(len(part_md5s)))))
-    # 2) superfile2（需要的分片才传）
-    sent = 0
-    with local_path.open("rb") as f:
-        for idx in range(len(part_md5s)):
-            buf = f.read(chunk_size)
-            if idx not in need_idx:
-                sent += len(buf)
-                if progress_cb: progress_cb(sent/size, f"跳过已存在分片 {idx}")
-                continue
-            files = {"file": ("blob", buf)}
-            params = {
-                "access_token": token, "method": "upload", "type": "tmpfile",
-                "path": remote_path, "uploadid": uploadid, "partseq": idx
-            }
-            j = _post_with_retry(
-                SUPERFILE2_URL, params=params, files=files,
-                timeout=120, max_retries=4
-            )
-            if "md5" not in j:
-                raise RuntimeError(f"分片 {idx} 上传失败：{j}")
-            sent += len(buf)
-            if progress_cb: progress_cb(sent/size, f"已上传分片 {idx}")
+    # superfile2
+    for i, b in enumerate(parts):
+        r = requests.post(
+            SUPERFILE2_URL,
+            params={
+                "access_token": access_token,
+                "method": "upload",
+                "path": pre.get("path", video.name),
+                "type": "tmpfile",
+                "uploadid": uploadid,
+                "partseq": str(i),
+            },
+            files={"file": ("blob", b)},
+            headers=_headers(),
+            timeout=300,
+        )
+        if r.status_code != 200:
+            st.error(f"分片 {i+1} 上传失败：{r.text}")
+            return False
+        st.write(f"已上传分片 {i+1}/{len(parts)}")
 
-    # 3) create
-    create = _post_with_retry(
+    # create
+    fin = requests.post(
         CREATE_URL,
+        params={"access_token": access_token},
         data={
-            "access_token": token, "path": remote_path, "size": size,
-            "isdir": 0, "rtype": 3, "uploadid": uploadid,
-            "block_list": json.dumps(part_md5s),
+            "path": pre.get("path", video.name),
+            "size": str(size),
+            "isdir": "0",
+            "rtype": "3",
+            "uploadid": uploadid,
+            "block_list": json.dumps(block_list),
         },
-        timeout=60,
-        max_retries=4,
+        headers=_headers(),
+        timeout=120,
     )
-    if "fs_id" not in create:
-        raise RuntimeError(f"创建文件失败：{create}")
-    if progress_cb: progress_cb(1.0, "合并完成")
-    return {"ok": True, "fast_upload": False, "result": create}
+    if fin.status_code != 200:
+        st.error(f"合并失败：{fin.text}")
+        return False
+    return True
 
-# =========================
-# 转码：FLV/WebM -> MP4（ffmpeg）
-# =========================
-def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
 
-def transcode_to_mp4(src: Path) -> Optional[Path]:
-    if not has_ffmpeg():
-        return None
-    dst = src.with_suffix(".mp4")
-    cmd = [
-        "ffmpeg", "-y", "-i", str(src),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(dst),
-    ]
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return dst if dst.exists() else None
-    except Exception:
-        return None
+# ------------------------------
+# 上传区
+# ------------------------------
+st.subheader("☁️ 上传到网盘（百度）")
 
-# =========================
-# ① 当日状态（与 app_original.py 布局一致）
-# =========================
-st.subheader("① 当日状态")
-
-locked_sid, why_not = verify_link_params()
-if locked_sid:
-    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_sid, disabled=True)
+videos = list_local_videos(RECORD_DIR)
+if not videos:
+    st.info("还没有录制文件。点击上面的 Start 进行录制。")
 else:
-    subject_id = st.text_input("来访者编号", value=st.session_state.get("subject_id", "sub-001"))
-    if why_not and LINK_SIGNING_KEY:
-        st.caption(f"链接未锁定：{why_not}（当前可手动输入被试编号）")
-st.session_state["subject_id"] = subject_id
-
-st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
-
-c21, c22, c23 = st.columns(3)
-sleep_hours = c21.number_input("昨夜睡眠（小时）", 0.0, 24.0, 7.0, 0.5)
-mood        = c22.slider("当前心境（1=很差，9=很好）", 1, 9, 5)
-stress      = c23.slider("当前压力（1=很低，9=很高）", 1, 9, 4)
-
-c31, c32, c33 = st.columns(3)
-pain         = c31.slider("身体不适/疼痛（0=无，10=最剧烈）", 0, 10, 1)
-urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, 0)
-coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, 3)
-
-c41, c42 = st.columns(2)
-caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], index=1)
-exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], index=1)
-
-tags = st.multiselect(
-    "今天我想要描述的内容涉及...(请选择)",
-    ["情绪波动", "睡眠", "人际", "学业/工作压力", "身体不适", "药物相关", "积极事件", "其他"],
-    default=[],
-)
-
-narrative = st.text_area(
-    "当日状态叙述（自由输入，尽量详细）",
-    height=220,
-    placeholder="例：今天发生了什么？情绪何时变化？出现冲动时做了什么？哪些方法有效？有哪些支持？",
-)
-triggers = st.text_area(
-    "今天发生了不如意的事情，这件事的与（触发因素/情境）....有关",
-    height=120,
-    placeholder="例：人际冲突、学业/工作、躯体不适、环境刺激、回忆/想法等；也可留空。",
-)
-coping_used = st.multiselect(
-    "面对今天的不如意，我的应对方式是...（可多选）",
-    ["转移注意", "呼吸放松/冥想", "运动", "写作/绘画", "联系他人", "专业求助", "其他"],
-    default=[],
-)
-
-st.session_state["state_payload"] = {
-    "schema_version": 3,
-    "subject_id": subject_id,
-    "timestamp_client_open_iso": datetime.now().isoformat(timespec="seconds"),
-    "sleep_hours": float(sleep_hours),
-    "mood_1to9": int(mood),
-    "stress_1to9": int(stress),
-    "pain_0to10": int(pain),
-    "nssi_urge_0to10": int(urge),
-    "coping_effect_1to5": int(coping_eff),
-    "caffeine": caffeine,
-    "exercise": exercise,
-    "tags": tags,
-    "coping_used": coping_used,
-    "narrative": narrative or "",
-    "triggers": triggers or "",
-}
-
-# =========================
-# ② 录制视频（与 app_original.py 一致）
-# =========================
-st.subheader("② 录制视频")
-
-MAX_RECORD_MIN = 20  # 超过会在前端提示，可自行调整
-
-ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-base_name = f"{subject_id}_{ts}"
-flv_path = REC_DIR / f"{base_name}.flv"
-st.session_state.setdefault("recorder_out_path", str(flv_path))
-st.session_state.setdefault("recorder_format", "flv")
-
-st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测到 ffmpeg 将自动转为 MP4）。")
-
-def out_recorder_factory():
-    # 避免重复初始化造成“闪退”：只在开始录制时写入这些状态
-    st.session_state["recorder_out_path"] = str(flv_path)
-    st.session_state["recorder_format"] = "flv"
-    st.session_state["record_started_at_iso"] = datetime.now().isoformat(timespec="seconds")
-    return MediaRecorder(st.session_state["recorder_out_path"], format="flv")
-
-webrtc_ctx = webrtc_streamer(
-    key="recorder",                             # 固定 key，避免组件反复卸载/重建
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration=RTC_CFG,
-    media_stream_constraints={"video": True, "audio": True},
-    out_recorder_factory=out_recorder_factory,
-)
-
-# 前端 JS 计时（只在 playing 时渲染）
-if webrtc_ctx and webrtc_ctx.state.playing:
-    html(
-        f"""
-        <div style="font-size:16px;margin:6px 0;">
-          ⏱️ 正在录制：<span id="dur">00:00</span>
-          <span id="warn" style="color:#d97706;font-weight:600;margin-left:8px;"></span>
-        </div>
-        <script>
-        const start = Date.now();
-        const warnAt = {MAX_RECORD_MIN} * 60;
-        setInterval(() => {{
-          const s = Math.floor((Date.now() - start) / 1000);
-          const m = String(Math.floor(s/60)).padStart(2,'0');
-          const sec = String(s%60).padStart(2,'0');
-          document.getElementById('dur').innerText = m + ":" + sec;
-          if (s > warnAt && document.getElementById('warn').innerText === "") {{
-            document.getElementById('warn').innerText = "（提示：已超过建议录制时长）";
-          }}
-        }}, 500);
-        </script>
-        """,
-        height=30,
-    )
-
-# =========================
-# ③ 查看与上传（与 app_original.py 一致，加入更稳健的上传实现）
-# =========================
-st.subheader("③ 查看与上传")
-
-if "last_saved" not in st.session_state:
-    st.session_state.last_saved = None
-
-out_path_str = st.session_state.get("recorder_out_path")
-out_file = Path(out_path_str) if out_path_str else None
-
-if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists():
-    just_finished = st.session_state.last_saved != str(out_file)
-    if just_finished:
-        st.session_state.last_saved = str(out_file)
-        st.session_state["record_ended_at_iso"] = datetime.now().isoformat(timespec="seconds")
-        st.info("正在尝试将 FLV 转码为 MP4…（需要本机已安装 ffmpeg）")
-        mp4_path = transcode_to_mp4(out_file)
-        if mp4_path and mp4_path.exists():
-            st.success(f"转码成功：{mp4_path.name}")
-            st.session_state["recorder_converted_mp4"] = str(mp4_path)
-        else:
-            st.warning("未检测到 ffmpeg 或转码失败，将保留 FLV。")
-            st.session_state["recorder_converted_mp4"] = None
-
-    final_play = Path(st.session_state.get("recorder_converted_mp4") or out_file)
-    st.success(f"录制完成，文件：{final_play.name}")
-    st.video(str(final_play))
-
-    # 状态 JSON（包含“被试思路/叙述”等）
-    state = st.session_state.get("state_payload", {}) or {}
-    meta = {
-        **state,
-        "file_basename": base_name,
-        "video_filename": final_play.name,
-        "record_started_at_iso": st.session_state.get("record_started_at_iso", ""),
-        "record_ended_at_iso": st.session_state.get("record_ended_at_iso", ""),
-        "server_time_generated_iso": datetime.now().isoformat(timespec="seconds"),
-    }
-    meta_path = REC_DIR / f"{base_name}_state.json"
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    st.caption(f"已生成状态文件：{meta_path.name}（上传时将与视频一并上传）")
-
-    delete_after_upload = st.checkbox(
-        "上传成功后删除服务器本地副本（视频与JSON，推荐）",
-        value=True,
-        help="建议开启：上传成功后删除本机/服务器文件，仅保留网盘副本。",
-        key="del_after_upload_recent",
-    )
-
-    # 远端保存路径
-    date_str = datetime.now().strftime("%Y%m%d")
-    remote_dir = f"{SAVE_DIR}/{subject_id}/{date_str}"
-    remote_video = f"{remote_dir}/{final_play.name}"
-    remote_json  = f"{remote_dir}/{meta_path.name}"
-    st.write("将要上传到网盘目录：", f"`{remote_dir}`")
-
-    c1, c2 = st.columns([1, 1])
-    if c1.button("⬆️ 上传视频 + 状态JSON 到百度网盘", type="primary"):
-        prog = st.progress(0, text="上传视频中…")
-        def on_prog_v(p: float, msg: str):
-            prog.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
-        try:
-            res_v = upload_to_baidu(final_play, remote_video, progress_cb=on_prog_v)
-            prog.progress(1.0, text="[视频] 上传完成 ✔")
-            st.success("视频上传成功")
-            st.json(res_v)
-
-            prog2 = st.progress(0, text="上传状态JSON中…")
-            def on_prog_j(p: float, msg: str):
-                prog2.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-            res_j = upload_to_baidu(meta_path, remote_json, progress_cb=on_prog_j)
-            prog2.progress(1.0, text="[JSON] 上传完成 ✔")
-            st.success("状态JSON上传成功")
-            st.json(res_j)
-
+    vid = st.selectbox("选择一个待上传的文件", options=videos, format_func=lambda p: f"{p.name}（{round(p.stat().st_size/1024/1024,2)} MB）")
+    if st.button("开始上传", type="primary"):
+        write_meta_for(vid)
+        with st.spinner("上传中…"):
+            ok = upload_to_baidu(vid)
+        if ok:
+            st.success("上传成功！")
             if delete_after_upload:
                 try:
-                    final_play.unlink(missing_ok=True)
-                    if final_play.suffix.lower() == ".mp4" and out_file.exists():
-                        out_file.unlink(missing_ok=True)
-                    elif final_play.suffix.lower() == ".flv":
-                        maybe_mp4 = final_play.with_suffix(".mp4")
-                        maybe_mp4.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
-                    st.caption("已从服务器删除本地副本（视频与JSON）。")
-                except Exception:
-                    pass
+                    vid.unlink(missing_ok=True)
+                    mp4_json = vid.with_suffix(".json")
+                    if mp4_json.exists():
+                        mp4_json.unlink()
+                except Exception as e:
+                    st.warning(f"清理本地文件失败：{e}")
+        else:
+            st.error("上传失败，请稍后重试。")
 
-        except Exception as e:
-            prog.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
-
-    if c2.button("🔁 重新录制"):
-        st.session_state.last_saved = None
-        st.session_state["recorder_converted_mp4"] = None
-        st.rerun()
-else:
-    if webrtc_ctx and webrtc_ctx.state.playing:
-        st.info("录制进行中… 点击 STOP 结束并进入上传。")
-    else:
-        st.info("录制未开始。点击 START 开始录制。")
-
-# =========================
-# ④ 历史文件上传（复用页面状态 JSON 可选）
-# =========================
 st.divider()
-st.subheader("④ 从 recordings 目录选择历史文件上传")
-
-files = sorted(
-    [p for p in REC_DIR.glob("*") if p.suffix.lower() in [".mp4", ".flv"]],
-    key=lambda p: p.stat().st_mtime,
-    reverse=True,
-)
-if not files:
-    st.caption("recordings/ 目录尚无 .mp4/.flv 文件。完成一次录制后这里会列出文件。")
-else:
-    picked = st.selectbox("选择要上传的历史视频：", files, format_func=lambda p: p.name)
-
-    upload_state_too = st.checkbox("同时生成并上传“当前页面的状态JSON”", value=False)
-
-    delete_after_upload_hist = st.checkbox(
-        "上传成功后删除该本地视频文件（历史）", value=True, key="del_after_upload_history"
-    )
-
-    sid_hist = st.session_state.get("subject_id", "sub-unknown")
-    date_str2 = datetime.now().strftime("%Y%m%d")
-    remote_dir2 = f"{SAVE_DIR}/{sid_hist}/{date_str2}"
-    remote_video2 = f"{remote_dir2}/{picked.name}"
-    st.write("将要上传到：", f"`{remote_dir2}`")
-
-    go_hist = st.button("开始上传（历史视频）")
-    if go_hist:
-        prog2 = st.progress(0, text="上传历史视频中…")
-        def on_prog2(p: float, msg: str):
-            prog2.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
-        try:
-            res2 = upload_to_baidu(picked, remote_video2, progress_cb=on_prog2)
-            prog2.progress(1.0, text="[视频] 上传完成 ✔")
-            st.success("历史视频上传成功！")
-            st.json(res2)
-
-            if upload_state_too:
-                base2 = Path(picked).stem
-                meta2 = st.session_state.get("state_payload", {}) or {}
-                meta2 = {
-                    **meta2,
-                    "file_basename": base2,
-                    "video_filename": picked.name,
-                    "timestamp_iso_generated": datetime.now().isoformat(timespec="seconds"),
-                }
-                meta_path2 = REC_DIR / f"{base2}_state.json"
-                meta_path2.write_text(json.dumps(meta2, ensure_ascii=False, indent=2), encoding="utf-8")
-                prog3 = st.progress(0, text="上传历史状态JSON中…")
-                def on_prog3(p: float, msg: str):
-                    prog3.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-                res3 = upload_to_baidu(meta_path2, f"{remote_dir2}/{meta_path2.name}", progress_cb=on_prog3)
-                prog3.progress(1.0, text="[JSON] 上传完成 ✔")
-                st.success("历史状态JSON上传成功！")
-                st.json(res3)
-                try:
-                    meta_path2.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-            if delete_after_upload_hist:
-                try:
-                    picked.unlink(missing_ok=True)
-                    st.caption("已从服务器删除该本地视频（历史）。")
-                except Exception:
-                    pass
-
-        except Exception as e:
-            prog2.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
-
-# =========================
-# 页脚提示
-# =========================
-with st.expander("⚙️ 使用 & 运维提示"):
-    st.markdown(
-        f"""
-- **被试免口令**：使用签名链接 `?sid=...&exp=...&sig=...` 进入时自动放行并锁定“被试编号”。
-- **管理员口令**：`APP_PASSWORD_SHA256`（口令的 SHA-256），可通过环境变量或 Secrets 配置。
-- **录制**：浏览器 → 服务器落盘（FLV）；如检测到 **ffmpeg**，停止后自动转为 **MP4(H.264/AAC)**。
-- **上传**：分片 + 指数退避重试；失败不会删本地文件，可稍后重试。
-- **清理**：默认“上传成功即删除本地副本（视频+JSON）”，可取消勾选保留本地。
-- **网盘路径**：`{SAVE_DIR}/<被试>/<YYYYMMDD>/视频与同名_state.json`。
-- **Token 刷新**：每次上传前自动用 `refresh_token` 换取 `access_token`；若百度返回新的 `refresh_token`，页面会提示你去 Secrets 手动更新。
-        """
-    )
+st.caption("如果你看到 Pylance 的 `tomli`/`ClientSettings` 报错，这是类型提示与依赖差异导致的静态分析提示。此版本已移除 ClientSettings，并兼容 tomllib/tomli/toml 三种解析方式。")
