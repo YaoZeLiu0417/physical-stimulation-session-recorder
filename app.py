@@ -259,7 +259,7 @@ def upload_to_baidu(
     if not uploadid:
         raise RuntimeError(f"precreate 无 uploadid：{pre}")
 
-    need_idx = set(pre.get("block_list", list(range(len(part_md5s))))))
+    need_idx = set(pre.get("block_list", list(range(len(part_md5s)))))
     # 2) superfile2（需要的分片才传）
     sent = 0
     with local_path.open("rb") as f:
