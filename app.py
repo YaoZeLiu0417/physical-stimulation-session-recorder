@@ -110,7 +110,7 @@ def require_app_password():
     if st.session_state.get("authed", False):
         return
 
-    st.title("🔒 受保护的页面")
+    st.title("🔒 taVNS干预视频日志准入界面")
     st.warning("请输入访问密码以继续")
     pw = st.text_input("访问密码", type="password")
     if st.button("登录", type="primary"):
@@ -126,7 +126,7 @@ def require_app_password():
 
 require_app_password()
 
-st.title("🎥 实验干预录制 & 上传（NLP 采集 / 链接锁定 / 重试）")
+st.title("📓 taVNS 干预日志")
 
 # =========================
 # 网盘配置（config.toml）
@@ -307,21 +307,21 @@ def transcode_to_mp4(src: Path) -> Optional[Path]:
         return None
 
 # =========================
-# ① 被试与当日状态（NLP 友好采集）
+# ① 被试与当日状态
 # =========================
-st.subheader("① 被试与当日状态（NLP 友好）")
+st.subheader("① 当日状态")
 
 # 链接锁定 subject_id（若验签通过则禁用输入框）
 locked_sid, why_not = verify_link_params()
 if locked_sid:
-    subject_id = st.text_input("被试编号（已由链接锁定）", value=locked_sid, disabled=True)
+    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_sid, disabled=True)
 else:
-    subject_id = st.text_input("被试编号", value=st.session_state.get("subject_id", "sub-001"))
+    subject_id = st.text_input("来访者编号", value=st.session_state.get("subject_id", "sub-001"))
     if why_not and LINK_SIGNING_KEY:
         st.caption(f"链接未锁定：{why_not}（当前可手动输入被试编号）")
 st.session_state["subject_id"] = subject_id
 
-st.caption("说明：尽量用你的语言详述当天体验，文本越丰富越有利于后续 NLP 分析。")
+st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
 c21, c22, c23 = st.columns(3)
 sleep_hours = c21.number_input("昨夜睡眠（小时）", 0.0, 24.0, 7.0, 0.5)
@@ -334,27 +334,27 @@ urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, 0)
 coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, 3)
 
 c41, c42 = st.columns(2)
-caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "中等", "较多"], index=1)
-exercise = c42.selectbox("近24小时运动量", ["无", "轻度", "中等", "剧烈"], index=1)
+caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], index=1)
+exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], index=1)
 
 tags = st.multiselect(
-    "可选标签（便于检索/分层统计）",
+    "今天我想要描述的内容涉及...(请选择)",
     ["情绪波动", "睡眠", "人际", "学业/工作压力", "身体不适", "药物相关", "积极事件", "其他"],
     default=[],
 )
 
 narrative = st.text_area(
-    "当日状态叙述（自由文本，尽量详细）",
+    "当日状态叙述（自由输入，尽量详细）",
     height=220,
     placeholder="例：今天发生了什么？情绪何时变化？出现冲动时做了什么？哪些方法有效？有哪些支持？",
 )
 triggers = st.text_area(
-    "触发因素/情境（可选）",
+    "今天发生了不如意的事情，这件事的与（触发因素/情境）....有关",
     height=120,
     placeholder="例：人际冲突、学业/工作、躯体不适、环境刺激、回忆/想法等；也可留空。",
 )
 coping_used = st.multiselect(
-    "今日使用的应对方式（可多选）",
+    "面对今天的不如意，我的应对方式是...（可多选）",
     ["转移注意", "呼吸放松/冥想", "运动", "写作/绘画", "联系他人", "专业求助", "其他"],
     default=[],
 )
