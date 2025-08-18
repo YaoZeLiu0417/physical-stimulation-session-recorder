@@ -486,6 +486,7 @@ if st.button("🚀 开始上传"):
             client.create(remote_path, size, part_md5s, uploadid, on_prog)  # ← 现在是 str 了
             on_prog(1.0, "完成")
 
+
         # 清理本地分片
         for p in parts:
             try: p.unlink(missing_ok=True)
