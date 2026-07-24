@@ -276,6 +276,96 @@ def test_concurrent_get_or_create_returns_one_record_and_one_initial_file(tmp_pa
     assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
 
 
+def test_concurrent_initial_saves_for_one_day_allow_only_one_record(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    seed_store = DailyRecordStore(tmp_path / "seed")
+    first = seed_store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    second = deepcopy(first)
+    second["record_id"] = "sub-001_20260724_deadbeef"
+    scanned_empty = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+    original_latest = store._latest_unlocked
+
+    def pause_first_empty_scan(subject_id, record_date):
+        nonlocal calls
+        result = original_latest(subject_id, record_date)
+        with calls_lock:
+            calls += 1
+            is_first = calls == 1
+        if is_first:
+            scanned_empty.set()
+            assert release_first.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(store, "_latest_unlocked", pause_first_empty_scan)
+    outcomes = []
+
+    def save_candidate(record):
+        try:
+            store.save(record)
+            outcomes.append("saved")
+        except RecordConflictError:
+            outcomes.append("conflict")
+
+    first_thread = threading.Thread(target=save_candidate, args=(first,))
+    second_thread = threading.Thread(target=save_candidate, args=(second,))
+    first_thread.start()
+    assert scanned_empty.wait(timeout=2)
+    second_thread.start()
+    release_first.set()
+    first_thread.join()
+    second_thread.join()
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+    assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
+
+
+def test_get_or_create_and_initial_save_share_one_day_lock(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    seed_store = DailyRecordStore(tmp_path / "seed")
+    candidate = seed_store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    scanned_empty = threading.Event()
+    release_first = threading.Event()
+    original_latest = store._latest_unlocked
+    calls = 0
+
+    def pause_first_empty_scan(subject_id, record_date):
+        nonlocal calls
+        result = original_latest(subject_id, record_date)
+        calls += 1
+        if calls == 1:
+            scanned_empty.set()
+            assert release_first.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(store, "_latest_unlocked", pause_first_empty_scan)
+    outcomes = []
+
+    def create():
+        outcomes.append(store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7))
+
+    def save():
+        try:
+            store.save(candidate)
+            outcomes.append("saved")
+        except RecordConflictError:
+            outcomes.append("conflict")
+
+    creator = threading.Thread(target=create)
+    saver = threading.Thread(target=save)
+    creator.start()
+    assert scanned_empty.wait(timeout=2)
+    saver.start()
+    release_first.set()
+    creator.join()
+    saver.join()
+
+    assert "conflict" in outcomes
+    assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
+
+
 def test_stale_competing_draft_cannot_overwrite_newer_save(tmp_path):
     store = DailyRecordStore(tmp_path)
     base = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)

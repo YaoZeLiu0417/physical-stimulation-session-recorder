@@ -107,6 +107,13 @@ class DailyRecordStore:
         date_key = record_date.strftime("%Y%m%d")
         return sorted(self.root.glob(f"{safe_subject_id}_{date_key}_*_r*_state.json"))
 
+    @staticmethod
+    def _day_lock_token(subject_id: str, record_date: date) -> str:
+        safe_subject_id = validate_subject_id(subject_id)
+        if not isinstance(record_date, date):
+            raise ValueError("记录日期必须是 date 对象。")
+        return f"{safe_subject_id}_{record_date:%Y%m%d}"
+
     def _new_record(
         self, subject_id: str, record_date: date, intervention_day: int
     ) -> dict[str, Any]:
@@ -221,8 +228,7 @@ class DailyRecordStore:
         safe_subject_id = validate_subject_id(subject_id)
         if not isinstance(record_date, date):
             raise ValueError("记录日期必须是 date 对象。")
-        date_key = record_date.strftime("%Y%m%d")
-        with self._lock(f"{safe_subject_id}_{date_key}"):
+        with self._lock(self._day_lock_token(safe_subject_id, record_date)):
             latest = self._latest_unlocked(safe_subject_id, record_date)
             if latest is not None:
                 return latest
@@ -266,7 +272,7 @@ class DailyRecordStore:
 
     def save(self, record: dict[str, Any]) -> Path:
         subject_id, record_date, record_id, revision = self._identity_from_record(record)
-        with self._lock(record_id):
+        with self._lock(self._day_lock_token(subject_id, record_date)):
             latest = self._latest_unlocked(subject_id, record_date)
             if latest is None:
                 if revision != 1:
@@ -282,7 +288,7 @@ class DailyRecordStore:
 
     def revise(self, record: Mapping[str, Any]) -> dict[str, Any]:
         subject_id, record_date, record_id, revision = self._identity_from_record(record)
-        with self._lock(record_id):
+        with self._lock(self._day_lock_token(subject_id, record_date)):
             latest = self._latest_unlocked(subject_id, record_date)
             if latest is None:
                 raise RecordConflictError("找不到要修订的记录。")
