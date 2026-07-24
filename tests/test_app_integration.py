@@ -2,11 +2,15 @@ import ast
 import importlib
 import json
 import os
+import time
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
+from link_auth import sign_subject_link
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
 from record_store import DailyRecordStore, RecordArchivedError
 from upload_workflow import LocalCleanupError
@@ -52,6 +56,22 @@ def _record(day=6):
         },
         "upload": {"json": "pending", "video": "pending"},
     }
+
+
+def _visible_app_text(app: AppTest) -> str:
+    values = [str(app.main), str(app.sidebar)]
+    for collection_name in (
+        "title", "header", "subheader", "caption", "markdown", "text",
+        "info", "warning", "error", "success", "json", "metric", "code",
+        "dataframe", "table", "button", "radio", "slider", "number_input",
+        "text_area", "multiselect", "selectbox",
+    ):
+        for element in getattr(app, collection_name):
+            for attribute in ("value", "label", "help", "placeholder"):
+                value = getattr(element, attribute, None)
+                if value is not None:
+                    values.append(str(value))
+    return "\n".join(values)
 
 
 def _is_st_stop(node: ast.stmt) -> bool:
@@ -660,6 +680,68 @@ def test_upload_error_copy_separates_failure_from_cleanup_pending(tmp_path):
     assert str(tmp_path) not in admin_cleanup
 
 
+def test_uploaded_cleanup_recovery_requires_missing_video_and_preserves_retained_copy(
+    tmp_path,
+):
+    workflow = _workflow()
+    record = _record()
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    record["recording"] = {
+        "video_filename": f"{record['record_id']}.mp4",
+        "started_at_iso": "2026-07-24T10:00:00+00:00",
+        "ended_at_iso": "2026-07-24T10:01:00+00:00",
+        "format": "mp4",
+    }
+    json_path = tmp_path / f"{record['record_id']}_r3_state.json"
+    json_path.write_text("{}", encoding="utf-8")
+    video_path = tmp_path / record["recording"]["video_filename"]
+    video_path.write_bytes(b"retained administrator copy")
+
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+
+    video_path.unlink()
+    recovery = workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    )
+    assert recovery is not None
+    assert recovery.json_path == json_path
+    assert recovery.video_path == video_path
+    assert set(recovery.cleanup_paths) == {
+        tmp_path / f"{record['record_id']}.flv",
+    }
+
+    record["upload"] = {"json": "uploaded", "video": "failed"}
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+
+
+def test_app_runs_cleanup_only_recovery_before_constructing_recorder():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call)]
+    recovery_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "uploaded_cleanup_recovery"
+    )
+    cleanup_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "cleanup_uploaded_bundle"
+    )
+    recorder_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name) and call.func.id == "webrtc_streamer"
+    )
+
+    assert recovery_call.lineno < cleanup_call.lineno < recorder_call.lineno
+
+
 def test_app_participant_view_hides_operational_surfaces_and_raw_responses():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
     guard_index, participant_guard = _participant_history_guard(tree)
@@ -689,6 +771,73 @@ def test_app_participant_view_hides_operational_surfaces_and_raw_responses():
     del mutated.body[guard_index]
     with pytest.raises(AssertionError):
         _participant_history_guard(mutated)
+
+
+def test_production_participant_visible_tree_omits_sensitive_record_payload(
+    tmp_path, monkeypatch
+):
+    sentinel = "PRODUCTION-PARTICIPANT-PRIVATE-7F31"
+    record = _record(day=7)
+    record.update(
+        {
+            "derived_metrics": {"participant_score": f"{sentinel}:score"},
+            "safety_signals": {"risk_level": f"{sentinel}:risk"},
+            "remote_path": f"/remote/{sentinel}",
+            "local_path": str(tmp_path / sentinel / "record.mp4"),
+            "raw_upload_response": {"request_id": f"{sentinel}:response"},
+            "upload_history": [f"{sentinel}:history"],
+            "operations": f"{sentinel}:operations",
+        }
+    )
+
+    class FakeStore:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def get_or_create(self, subject_id, record_date, intervention_day):
+            return json.loads(json.dumps(record))
+
+        def path_for(self, current):
+            return self.root / f"{current['record_id']}_r3_state.json"
+
+        def save(self, current):
+            raise AssertionError("active recorder participant run must not save")
+
+    monkeypatch.setattr("record_store.DailyRecordStore", FakeStore)
+    monkeypatch.setattr(
+        "streamlit_webrtc.webrtc_streamer",
+        lambda *args, **kwargs: SimpleNamespace(
+            state=SimpleNamespace(playing=True)
+        ),
+    )
+    key = "production-app-test-key"
+    expiry = int(time.time()) + 3600
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.secrets["baidu"] = {
+        "app_key": "fake-app-key",
+        "secret_key": "fake-secret-key",
+        "save_dir": "/apps/test",
+    }
+    app.secrets["LINK_SIGNING_KEY"] = key
+    app.secrets["TRUSTED_INTERVENTION_DAYS"] = {"sub-001": 7}
+    app.query_params["sid"] = "sub-001"
+    app.query_params["exp"] = str(expiry)
+    app.query_params["sig"] = sign_subject_link(key, "sub-001", expiry)
+    app.query_params["visit"] = "daily"
+    app.run()
+
+    assert not app.exception
+    visible = _visible_app_text(app)
+    for forbidden in (
+        f"{sentinel}:score",
+        f"{sentinel}:risk",
+        f"/remote/{sentinel}",
+        str(tmp_path / sentinel),
+        f"{sentinel}:response",
+        f"{sentinel}:history",
+        f"{sentinel}:operations",
+    ):
+        assert forbidden not in visible
 
 
 def test_app_does_not_save_after_successful_bundle_cleanup():
@@ -940,6 +1089,69 @@ def test_recording_path_rejects_symlinks_hardlinks_and_rerecord_resume_suppressi
         record_id, None, None, None, None,
         recordings_dir=tmp_path, persisted_recording=persisted,
     ) is None
+
+
+def test_historical_upload_rejects_hardlink_before_callback_without_path_leak(
+    tmp_path,
+):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    external = tmp_path / "external-video.mp4"
+    external.write_bytes(b"external")
+    candidate = recordings_dir / "history.mp4"
+    os.link(external, candidate)
+    calls = []
+
+    with pytest.raises(workflow.UnsafeRecordingPathError) as captured:
+        workflow.upload_trusted_recording(
+            candidate,
+            recordings_dir=recordings_dir,
+            remote_path="/remote/history.mp4",
+            upload_fn=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+    assert str(external) not in str(captured.value)
+    assert str(candidate) not in str(captured.value)
+    assert workflow.trusted_recording_path(candidate, recordings_dir) is None
+
+
+def test_historical_upload_rejects_symlink_before_callback_when_supported(tmp_path):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    external = tmp_path / "external-video.mp4"
+    external.write_bytes(b"external")
+    candidate = recordings_dir / "history.mp4"
+    try:
+        candidate.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation is not permitted in this environment")
+    calls = []
+
+    with pytest.raises(workflow.UnsafeRecordingPathError) as captured:
+        workflow.upload_trusted_recording(
+            candidate,
+            recordings_dir=recordings_dir,
+            remote_path="/remote/history.mp4",
+            upload_fn=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+    assert str(external) not in str(captured.value)
+    assert str(candidate) not in str(captured.value)
+
+
+def test_app_filters_and_revalidates_historical_recordings_with_shared_validator():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    called_names = {
+        call.func.id
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    assert "trusted_recording_path" in called_names
+    assert "upload_trusted_recording" in called_names
 
 
 def test_remote_directory_uses_a_real_store_record_date_key(tmp_path):

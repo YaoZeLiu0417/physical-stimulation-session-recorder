@@ -70,6 +70,17 @@ def _cleanup_local_files(paths: tuple[Path, ...]) -> None:
             raise LocalCleanupError(path, paths[index:]) from exc
 
 
+def cleanup_uploaded_bundle(
+    json_path: Path,
+    video_path: Path,
+    *,
+    cleanup_paths: Iterable[Path] = (),
+) -> None:
+    """Retry local deletion after a bundle is already durably uploaded."""
+
+    _cleanup_local_files(_cleanup_candidates(json_path, video_path, cleanup_paths))
+
+
 def upload_record_bundle(
     json_path: Path,
     video_path: Path,
@@ -119,7 +130,8 @@ def upload_record_bundle(
         raise
 
     if delete_after_upload:
-        paths = _cleanup_candidates(json_path, video_path, cleanup_paths)
-        _cleanup_local_files(paths)
+        cleanup_uploaded_bundle(
+            json_path, video_path, cleanup_paths=cleanup_paths
+        )
 
     return dict(state)

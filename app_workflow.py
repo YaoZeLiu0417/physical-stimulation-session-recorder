@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -47,6 +47,17 @@ class CompletedRecording:
     started_at_iso: str
     ended_at_iso: str
     format: str
+
+
+@dataclass(frozen=True)
+class UploadedCleanupRecovery:
+    json_path: Path
+    video_path: Path
+    cleanup_paths: tuple[Path, ...]
+
+
+class UnsafeRecordingPathError(ValueError):
+    """Raised without exposing a rejected local path."""
 
 
 @dataclass(frozen=True)
@@ -149,11 +160,15 @@ def _parse_recording_times(
 
 
 def _safe_recording_path(
-    record_id: str, candidate: object, recordings_dir: Path
+    record_id: str,
+    candidate: object,
+    recordings_dir: Path,
+    *,
+    allowed_names: set[str] | None = None,
 ) -> Path | None:
     if not isinstance(candidate, Path):
         return None
-    allowed_names = {f"{record_id}.flv", f"{record_id}.mp4"}
+    allowed_names = allowed_names or {f"{record_id}.flv", f"{record_id}.mp4"}
     if candidate.name not in allowed_names:
         return None
     try:
@@ -185,6 +200,35 @@ def _safe_recording_path(
     except OSError:
         return None
     return candidate
+
+
+def trusted_recording_path(candidate: object, recordings_dir: Path) -> Path | None:
+    """Validate a historical recording under the trusted recordings root."""
+
+    if not isinstance(candidate, Path) or candidate.suffix.lower() not in {".mp4", ".flv"}:
+        return None
+    return _safe_recording_path(
+        "historical",
+        candidate,
+        recordings_dir,
+        allowed_names={candidate.name},
+    )
+
+
+def upload_trusted_recording(
+    candidate: object,
+    *,
+    recordings_dir: Path,
+    remote_path: str,
+    upload_fn: Callable[..., Any],
+    progress_cb: Any = None,
+) -> Any:
+    """Revalidate a historical recording immediately before invoking upload."""
+
+    trusted_path = trusted_recording_path(candidate, recordings_dir)
+    if trusted_path is None:
+        raise UnsafeRecordingPathError("Selected recording is unavailable or unsafe.")
+    return upload_fn(trusted_path, remote_path, progress_cb=progress_cb)
 
 
 def resolve_completed_recording(
@@ -223,6 +267,55 @@ def resolve_completed_recording(
     return CompletedRecording(
         persisted_path, *times, persisted_path.suffix.lstrip(".").lower()
     )
+
+
+def uploaded_cleanup_recovery(
+    record: Mapping[str, Any], *, json_path: Path, recordings_dir: Path
+) -> UploadedCleanupRecovery | None:
+    """Identify an uploaded bundle whose local deletion already removed its video."""
+
+    upload = record.get("upload")
+    recording = record.get("recording")
+    record_id = record.get("record_id")
+    if (
+        not isinstance(upload, Mapping)
+        or upload.get("json") != "uploaded"
+        or upload.get("video") != "uploaded"
+        or not isinstance(recording, Mapping)
+        or not isinstance(record_id, str)
+    ):
+        return None
+    filename = recording.get("video_filename")
+    allowed_names = {f"{record_id}.flv", f"{record_id}.mp4"}
+    if not isinstance(filename, str) or filename not in allowed_names:
+        return None
+    video_path = recordings_dir / filename
+    try:
+        root = recordings_dir.resolve()
+        if json_path.parent.resolve() != root:
+            return None
+        json_stat = os.lstat(json_path)
+        os.lstat(video_path)
+    except FileNotFoundError as exc:
+        if exc.filename is None or Path(exc.filename) != video_path:
+            return None
+    except (OSError, TypeError):
+        return None
+    else:
+        return None
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        not stat.S_ISREG(json_stat.st_mode)
+        or stat.S_ISLNK(json_stat.st_mode)
+        or json_stat.st_nlink != 1
+        or getattr(json_stat, "st_file_attributes", 0) & reparse_flag
+    ):
+        return None
+    cleanup_paths = tuple(
+        recordings_dir / candidate
+        for candidate in sorted(allowed_names - {filename})
+    )
+    return UploadedCleanupRecovery(json_path, video_path, cleanup_paths)
 
 
 def resolve_trusted_intervention_day(config: object, subject_id: str) -> int:

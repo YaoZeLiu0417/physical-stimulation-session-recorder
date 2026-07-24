@@ -53,7 +53,10 @@ from app_workflow import (
     resolve_completed_recording,
     resolve_trusted_intervention_day,
     support_needed,
+    trusted_recording_path,
     upload_ready_for_visit,
+    upload_trusted_recording,
+    uploaded_cleanup_recovery,
     persisted_support_needed,
     upload_failure_message,
 )
@@ -68,7 +71,11 @@ from record_store import (
     remote_record_dir,
     validate_subject_id,
 )
-from upload_workflow import LocalCleanupError, upload_record_bundle
+from upload_workflow import (
+    LocalCleanupError,
+    cleanup_uploaded_bundle,
+    upload_record_bundle,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -491,6 +498,29 @@ except ValueError:
     st.stop()
 st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
+cleanup_recovery = uploaded_cleanup_recovery(
+    record,
+    json_path=record_store.path_for(record),
+    recordings_dir=REC_DIR,
+)
+if cleanup_recovery is not None:
+    try:
+        cleanup_uploaded_bundle(
+            cleanup_recovery.json_path,
+            cleanup_recovery.video_path,
+            cleanup_paths=cleanup_recovery.cleanup_paths,
+        )
+    except LocalCleanupError as error:
+        LOGGER.warning(
+            "uploaded bundle cleanup pending record_id=%s exception_type=%s",
+            record["record_id"],
+            type(error).__name__,
+        )
+        st.warning(cleanup_pending_message(error, participant=is_participant))
+    else:
+        st.success("Upload completed and local cleanup finished.")
+    st.stop()
+
 context_defaults = daily_context_values(record)
 context_state_keys = daily_context_state_keys(record)
 for field_id, widget_key in context_state_keys.items():
@@ -851,8 +881,12 @@ with st.expander("使用 & 运维提示"):
     st.caption("管理员可使用历史文件上传工具。")
 
 files = sorted(
-    [p for p in REC_DIR.glob("*") if p.suffix.lower() in [".mp4", ".flv"]],
-    key=lambda p: p.stat().st_mtime,
+    [
+        trusted
+        for path in REC_DIR.glob("*")
+        if (trusted := trusted_recording_path(path, REC_DIR)) is not None
+    ],
+    key=lambda path: os.lstat(path).st_mtime,
     reverse=True,
 )
 if not files:
@@ -878,7 +912,13 @@ else:
         def on_prog2(p: float, msg: str):
             prog2.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
         try:
-            res2 = upload_to_baidu(picked, remote_video2, progress_cb=on_prog2)
+            res2 = upload_trusted_recording(
+                picked,
+                recordings_dir=REC_DIR,
+                remote_path=remote_video2,
+                upload_fn=upload_to_baidu,
+                progress_cb=on_prog2,
+            )
             prog2.progress(1.0, text="[视频] 上传完成 ✔")
             st.success("历史视频上传成功！")
             st.json(res2)

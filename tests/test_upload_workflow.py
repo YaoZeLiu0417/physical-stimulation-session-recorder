@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import upload_workflow
 from upload_workflow import LocalCleanupError, UploadResultError, upload_record_bundle
 
 
@@ -168,6 +169,53 @@ def test_success_with_deletion_disabled_keeps_all_local_files(tmp_path):
     assert json_path.exists()
     assert video_path.exists()
     assert raw_video_path.exists()
+
+
+def test_partial_cleanup_rerun_deletes_only_remaining_files_without_reupload(
+    tmp_path, monkeypatch
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    uploads = []
+    original_unlink = Path.unlink
+    failed_json_once = False
+
+    def upload(local_path, remote_path, *, progress_cb):
+        uploads.append((local_path, remote_path))
+
+    def fail_json_cleanup_once(path, *args, **kwargs):
+        nonlocal failed_json_once
+        if path == json_path and not failed_json_once:
+            failed_json_once = True
+            raise PermissionError("record JSON is busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_json_cleanup_once)
+    with pytest.raises(LocalCleanupError):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+        )
+
+    assert len(uploads) == 3
+    assert not raw_video_path.exists()
+    assert not video_path.exists()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == {
+        "json": "uploaded",
+        "video": "uploaded",
+    }
+
+    monkeypatch.undo()
+    upload_workflow.cleanup_uploaded_bundle(
+        json_path, video_path, cleanup_paths=(raw_video_path,)
+    )
+
+    assert len(uploads) == 3
+    assert not json_path.exists()
 
 
 def test_cleanup_deduplicates_paths_including_bundle_files(tmp_path, monkeypatch):
