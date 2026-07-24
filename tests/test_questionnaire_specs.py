@@ -1,3 +1,5 @@
+import pytest
+
 from questionnaire_specs import (
     DAILY_CORE,
     FASM_MOTIVES,
@@ -18,19 +20,56 @@ def test_daily_core_ids_and_required_fields():
     assert all(question.required for question in DAILY_CORE)
 
 
-def test_active_daily_questions_follow_boolean_answers():
-    active_ids = active_daily_question_ids(
-        {
-            "nssi_thought_present_24h": True,
-            "nssi_behavior_present_24h": False,
-            "suicide_thought_present_24h": False,
-        }
-    )
-
-    assert "nssi_thought_frequency_24h" in active_ids
-    assert "nssi_thought_intensity_24h" in active_ids
-    assert "nssi_cut_count_24h" not in active_ids
-    assert "suicide_thought_frequency_24h" not in active_ids
+@pytest.mark.parametrize(
+    ("answers", "expected_ids"),
+    [
+        ({}, [
+            "nssi_thought_present_24h",
+            "nssi_behavior_present_24h",
+            "suicide_thought_present_24h",
+            "nssi_urge_now",
+            "nssi_resistance_confidence_now",
+        ]),
+        ({"nssi_thought_present_24h": True}, [
+            "nssi_thought_present_24h",
+            "nssi_behavior_present_24h",
+            "suicide_thought_present_24h",
+            "nssi_urge_now",
+            "nssi_resistance_confidence_now",
+            "nssi_thought_frequency_24h",
+            "nssi_thought_intensity_24h",
+        ]),
+        ({"nssi_behavior_present_24h": True}, [
+            "nssi_thought_present_24h",
+            "nssi_behavior_present_24h",
+            "suicide_thought_present_24h",
+            "nssi_urge_now",
+            "nssi_resistance_confidence_now",
+            "nssi_cut_count_24h",
+            "nssi_burn_count_24h",
+            "nssi_scratch_count_24h",
+            "nssi_bite_count_24h",
+            "nssi_hit_object_count_24h",
+            "nssi_hit_self_count_24h",
+            "nssi_other_description_24h",
+            "nssi_other_count_24h",
+            "nssi_medical_care_24h",
+            "nssi_motives_24h",
+            "nssi_trigger_24h",
+            "nssi_coping_24h",
+        ]),
+        ({"suicide_thought_present_24h": True}, [
+            "nssi_thought_present_24h",
+            "nssi_behavior_present_24h",
+            "suicide_thought_present_24h",
+            "nssi_urge_now",
+            "nssi_resistance_confidence_now",
+            "suicide_thought_frequency_24h",
+        ]),
+    ],
+)
+def test_active_daily_questions_follow_each_controller(answers, expected_ids):
+    assert active_daily_question_ids(answers) == tuple(expected_ids)
 
 
 def test_weekly_due_only_on_scheduled_intervention_days():
