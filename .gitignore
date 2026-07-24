@@ -20,3 +20,6 @@ recordings/
 
 # Isolated feature worktrees
 .worktrees/
+
+# Local visual-design companion
+.superpowers/
