@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import json
 import time
-import base64
 import hmac
 import hashlib
 import random
@@ -30,6 +29,8 @@ import streamlit as st
 from streamlit.components.v1 import html
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from aiortc.contrib.media import MediaRecorder
+
+from link_auth import VerifiedLink, verify_subject_link
 
 # =========================
 # 基础：页面设置 & 工具函数
@@ -76,13 +77,6 @@ if not AK or not SK:
 # =========================
 LINK_SIGNING_KEY = _safe_secret("LINK_SIGNING_KEY", "")  # 在 Secrets/环境变量配置
 
-def _b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-
-def _sign_sid(sid: str, exp_ts: int) -> str:
-    mac = hmac.new(LINK_SIGNING_KEY.encode(), f"{sid}|{exp_ts}".encode(), hashlib.sha256).digest()
-    return _b64url(mac)
-
 def _get_query_params() -> Dict[str, str]:
     try:
         return dict(st.query_params)  # streamlit>=1.36
@@ -90,7 +84,7 @@ def _get_query_params() -> Dict[str, str]:
         qp = st.experimental_get_query_params()
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in qp.items()}
 
-def verify_link_params() -> tuple[Optional[str], str]:
+def verify_link_params() -> tuple[Optional[VerifiedLink], str]:
     q = _get_query_params()
     sid = q.get("sid", "")
     exp_raw = q.get("exp", "")
@@ -101,23 +95,28 @@ def verify_link_params() -> tuple[Optional[str], str]:
         exp = int(exp_raw)
     except Exception:
         return None, "exp 非法"
-    now = int(datetime.now(timezone.utc).timestamp())
-    if now > exp:
-        return None, "链接已过期"
-    expect = _sign_sid(sid, exp)
-    if not hmac.compare_digest(expect, sig):
-        return None, "签名不匹配"
-    return sid, ""
+    verified = verify_subject_link(
+        LINK_SIGNING_KEY,
+        sid,
+        exp,
+        sig,
+        q.get("visit", "daily"),
+        now=int(datetime.now(timezone.utc).timestamp()),
+    )
+    if verified is None:
+        return None, "签名或访视不匹配"
+    return verified, ""
 
 # =========================
 # 入口门禁：先验签（被试免口令），否则走口令
 # =========================
 def require_app_password():
     # ① 验签成功（被试入口）→ 直接放行并锁定编号
-    sid, why = verify_link_params()
-    if sid:
+    verified, why = verify_link_params()
+    if verified:
         st.session_state["authed"] = True
-        st.session_state["subject_id"] = sid
+        st.session_state["subject_id"] = verified.subject_id
+        st.session_state["visit"] = verified.visit
         return
 
     # ② 否则需要口令（管理员/调试）
