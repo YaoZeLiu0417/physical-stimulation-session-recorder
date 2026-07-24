@@ -1,5 +1,6 @@
 import os
 import sys
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
@@ -89,9 +90,24 @@ else:
 
 st.session_state.setdefault("fixture_save_calls", 0)
 st.session_state["fixture_record"] = record
-st.session_state["fixture_sensitive_sentinel"] = os.environ.get(
-    "QUESTIONNAIRE_FIXTURE_SENTINEL", ""
-)
+sentinel = os.environ.get("QUESTIONNAIRE_FIXTURE_SENTINEL", "")
+payload_record = deepcopy(record)
+payload_record["derived_metrics"] = {
+    **payload_record.get("derived_metrics", {}),
+    "participant_score": f"{sentinel}:score",
+}
+payload_record["safety_signals"] = {
+    **payload_record.get("safety_signals", {}),
+    "risk_level": f"{sentinel}:risk",
+}
+st.session_state["fixture_sensitive_payload"] = {
+    "record": payload_record,
+    "remote_path": f"/remote/{sentinel}",
+    "local_path": str(store_root.resolve()),
+    "raw_upload_response": {"request_id": f"{sentinel}:response"},
+    "upload_history": [f"{sentinel}:history"],
+    "operations": f"{sentinel}:operations",
+}
 state_keys = questionnaire_state_keys(state_namespace, visit)
 
 

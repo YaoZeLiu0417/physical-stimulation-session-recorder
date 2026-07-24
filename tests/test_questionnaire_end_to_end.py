@@ -2,8 +2,10 @@ import json
 import importlib
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
+from threading import Event
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -81,7 +83,7 @@ def _answer_and_continue(app, question, namespace, visit, value):
 
 
 def _visible_text(app) -> str:
-    values = []
+    values = [str(app.main), str(app.sidebar)]
     collection_names = (
         "title",
         "header",
@@ -93,6 +95,11 @@ def _visible_text(app) -> str:
         "warning",
         "error",
         "success",
+        "json",
+        "metric",
+        "code",
+        "dataframe",
+        "table",
         "button",
         "radio",
         "slider",
@@ -673,7 +680,18 @@ def test_browser_fixture_visible_tree_omits_sensitive_operational_text(
     app.query_params["scenario"] = "day7"
     app.run()
 
-    assert app.session_state["fixture_sensitive_sentinel"] == sentinel
+    payload = app.session_state["fixture_sensitive_payload"]
+    assert payload["record"]["derived_metrics"]["participant_score"] == (
+        f"{sentinel}:score"
+    )
+    assert payload["record"]["safety_signals"]["risk_level"] == (
+        f"{sentinel}:risk"
+    )
+    assert payload["remote_path"] == f"/remote/{sentinel}"
+    assert payload["local_path"].startswith(str(store_root.resolve()))
+    assert payload["raw_upload_response"]["request_id"] == f"{sentinel}:response"
+    assert payload["upload_history"] == [f"{sentinel}:history"]
+    assert payload["operations"] == f"{sentinel}:operations"
     visible = _visible_text(app)
     forbidden = (
         "score",
@@ -688,6 +706,37 @@ def test_browser_fixture_visible_tree_omits_sensitive_operational_text(
         "运维信息",
     )
     assert all(value.casefold() not in visible.casefold() for value in forbidden)
+
+
+def test_visible_text_collector_captures_structured_render_channels(tmp_path):
+    sentinel = "VISIBLE-COLLECTOR-SENTINEL-93C2"
+    app_path = tmp_path / "visible_channels.py"
+    app_path.write_text(
+        "\n".join(
+            (
+                "import streamlit as st",
+                f"sentinel = {sentinel!r}",
+                'st.json({"value": sentinel + ":json"})',
+                'st.metric(sentinel + ":metric-label", sentinel + ":metric-value")',
+                'st.code(sentinel + ":code")',
+                'st.dataframe([{"value": sentinel + ":dataframe"}])',
+                'st.table([{"value": sentinel + ":table"}])',
+            )
+        ),
+        encoding="utf-8",
+    )
+    app = AppTest.from_file(str(app_path), default_timeout=10).run()
+
+    visible = _visible_text(app)
+    for suffix in (
+        ":json",
+        ":metric-label",
+        ":metric-value",
+        ":code",
+        ":dataframe",
+        ":table",
+    ):
+        assert f"{sentinel}{suffix}" in visible
 
 
 def test_browser_fixture_does_not_publish_internal_store_in_environment(monkeypatch):
@@ -742,3 +791,62 @@ def test_fixture_storage_registers_internal_cleanup_but_not_explicit_root(
     assert storage.resolve_store_root(str(explicit)) == explicit
     assert automatic_registrations == [automatic]
     assert explicit.is_dir()
+
+
+def test_fixture_store_initializes_once_under_concurrent_first_access(
+    tmp_path, monkeypatch
+):
+    monkeypatch.syspath_prepend(str(FIXTURE.parent))
+    storage = importlib.import_module("questionnaire_fixture_storage")
+    monkeypatch.setattr(storage, "_internal_root", None)
+    first_entered = Event()
+    second_entered = Event()
+    release_creation = Event()
+    second_started = Event()
+    created_roots = []
+    registrations = []
+
+    def controlled_mkdtemp(**kwargs):
+        index = len(created_roots)
+        root = tmp_path / f"internal-{index}"
+        created_roots.append(root)
+        (first_entered if index == 0 else second_entered).set()
+        assert release_creation.wait(timeout=2)
+        root.mkdir()
+        return str(root)
+
+    monkeypatch.setattr(storage.tempfile, "mkdtemp", controlled_mkdtemp)
+    monkeypatch.setattr(
+        storage,
+        "register_process_cleanup",
+        lambda root: registrations.append(root),
+    )
+
+    def second_resolve():
+        second_started.set()
+        return storage.resolve_store_root(None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(storage.resolve_store_root, None)
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(second_resolve)
+        assert second_started.wait(timeout=2)
+        second_initialized = second_entered.wait(timeout=0.5)
+        release_creation.set()
+        results = [first.result(timeout=2), second.result(timeout=2)]
+
+    assert second_initialized is False
+    assert created_roots == [tmp_path / "internal-0"]
+    assert registrations == created_roots
+    assert results == [created_roots[0], created_roots[0]]
+
+    class FailingLock:
+        def __enter__(self):
+            raise AssertionError("explicit roots must not acquire the internal lock")
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(storage, "_internal_root_lock", FailingLock(), raising=False)
+    explicit = tmp_path / "caller-owned-concurrent"
+    assert storage.resolve_store_root(str(explicit)) == explicit

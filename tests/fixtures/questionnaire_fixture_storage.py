@@ -5,11 +5,13 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
 
 
 RUN_TOKEN_PATTERN = re.compile(r"[0-9a-f]{16}")
 SCENARIO_NAMES = frozenset({"default", "day1", "day7", "V5"})
 _internal_root: Path | None = None
+_internal_root_lock = Lock()
 
 
 def valid_run_token(value: object) -> bool:
@@ -32,8 +34,12 @@ def resolve_store_root(configured_root: str | None) -> Path:
 
     global _internal_root
     if _internal_root is None:
-        _internal_root = Path(tempfile.mkdtemp(prefix="questionnaire-browser-qa-"))
-        register_process_cleanup(_internal_root)
+        with _internal_root_lock:
+            if _internal_root is None:
+                _internal_root = Path(
+                    tempfile.mkdtemp(prefix="questionnaire-browser-qa-")
+                )
+                register_process_cleanup(_internal_root)
     return _internal_root
 
 
