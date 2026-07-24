@@ -7,7 +7,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from questionnaire_specs import (
     weekly_due,
 )
 from questionnaire_ui import build_field_status, build_formal_field_status
-from record_store import validate_subject_id
+from record_store import RecordArchivedError, validate_subject_id
 from upload_workflow import LocalCleanupError
 
 
@@ -49,6 +49,12 @@ class CompletedRecording:
     format: str
 
 
+@dataclass(frozen=True)
+class AdminInterventionStateKeys:
+    selection: str
+    confirmation: str
+
+
 def validate_intervention_day(value: object) -> int:
     if type(value) is not int:
         raise ValueError("intervention day must be an integer from 1 to 28")
@@ -63,6 +69,19 @@ def confirm_admin_intervention_day(value: object, *, confirmed: bool) -> int | N
 
     day = validate_intervention_day(value)
     return day if confirmed else None
+
+
+def admin_intervention_state_keys(
+    subject_id: str, record_date: date
+) -> AdminInterventionStateKeys:
+    safe_subject_id = validate_subject_id(subject_id)
+    if not isinstance(record_date, date):
+        raise ValueError("record date must be a date")
+    namespace = f"{safe_subject_id}::{record_date.isoformat()}"
+    return AdminInterventionStateKeys(
+        selection=f"admin_intervention_day::{namespace}",
+        confirmation=f"admin_intervention_day_confirmed::{namespace}",
+    )
 
 
 def ensure_record_intervention_day(record: Mapping[str, Any], expected_day: object) -> int:
@@ -123,7 +142,10 @@ def _parse_recording_times(
         return None
     if not valid_order:
         return None
-    return started_at_iso, ended_at_iso
+    return (
+        started.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        ended.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
 
 
 def _safe_recording_path(
@@ -276,6 +298,7 @@ def questionnaire_visit_complete(record: Mapping[str, Any], visit: str) -> bool:
 
 def mark_questionnaire_visit_complete(record: dict[str, Any], visit: str) -> None:
     completion = record.setdefault("completion", {})
+    completion["status"] = "complete"
     completion.setdefault("questionnaire_visits", {})[visit] = {
         "status": "complete",
         "revision": record["revision"],
@@ -286,6 +309,41 @@ def upload_ready_for_visit(record: Mapping[str, Any], visit: str) -> bool:
     """Return whether this record/revision has a completed questionnaire visit."""
 
     return questionnaire_visit_complete(record, visit)
+
+
+def persisted_support_needed(record: Mapping[str, Any], visit: str) -> bool:
+    completion = record.get("completion", {})
+    answered_by_visit = (
+        completion.get("answered_field_ids", {})
+        if isinstance(completion, Mapping)
+        else {}
+    )
+    answered = answered_by_visit.get(visit, []) if isinstance(answered_by_visit, Mapping) else []
+    return support_needed(
+        visit,
+        questionnaire_answers(record, visit),
+        set(answered) if isinstance(answered, list) else set(),
+        int(record["intervention_day"]),
+    )
+
+
+def archived_record_is_completed(
+    error: RecordArchivedError, expected_intervention_day: object
+) -> bool:
+    return (
+        type(expected_intervention_day) is int
+        and error.intervention_day == expected_intervention_day
+        and error.completion_status == "complete"
+        and error.lifecycle in {"complete", "uploaded"}
+    )
+
+
+def archived_record_success_message(
+    error: RecordArchivedError, expected_intervention_day: object
+) -> str | None:
+    if not archived_record_is_completed(error, expected_intervention_day):
+        return None
+    return f"本次记录已完成（记录编号：{error.record_id}）。"
 
 
 def persist_daily_questionnaire(
@@ -343,23 +401,24 @@ def persist_daily_questionnaire(
 
     safety_signals = record.setdefault("safety_signals", {})
     daily_safety_keys = {
-        "nssi_thought_present_24h",
-        "nssi_thought_frequency_24h",
-        "nssi_behavior_present_24h",
-        "nssi_medical_care_24h",
         "suicide_thought_present_24h",
         "suicide_thought_frequency_24h",
+        "medical_care_required_24h",
+        "nssi_medical_care_24h",
     }
     safety_signals.pop("daily", None)
     for field_id in daily_safety_keys:
         safety_signals.pop(field_id, None)
-    safety_signals.update(
-        {
-            field_id: filtered[field_id]
-            for field_id in daily_safety_keys
-            if field_id in filtered
-        }
-    )
+    for field_id in (
+        "suicide_thought_present_24h",
+        "suicide_thought_frequency_24h",
+    ):
+        if field_id in filtered:
+            safety_signals[field_id] = filtered[field_id]
+    if "nssi_medical_care_24h" in filtered:
+        safety_signals["medical_care_required_24h"] = filtered[
+            "nssi_medical_care_24h"
+        ]
 
     _store_completion(record, "daily", filtered, current_step)
     return filtered

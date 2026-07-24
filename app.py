@@ -38,6 +38,8 @@ from link_auth import (
     verify_subject_link,
 )
 from app_workflow import (
+    admin_intervention_state_keys,
+    archived_record_success_message,
     cleanup_pending_message,
     confirm_admin_intervention_day,
     daily_context_state_keys,
@@ -52,6 +54,7 @@ from app_workflow import (
     resolve_trusted_intervention_day,
     support_needed,
     upload_ready_for_visit,
+    persisted_support_needed,
     upload_failure_message,
 )
 from questionnaire_specs import VISIT_INSTRUMENT_IDS
@@ -59,12 +62,16 @@ from questionnaire_ui import questionnaire_state_keys, render_questionnaire
 from record_store import (
     DailyRecordStore,
     RecordConflictError,
+    RecordArchivedError,
     RecordCorruptionError,
     RecordLockError,
     remote_record_dir,
     validate_subject_id,
 )
 from upload_workflow import LocalCleanupError, upload_record_bundle
+
+
+LOGGER = logging.getLogger(__name__)
 
 # =========================
 # 基础：页面设置 & 工具函数
@@ -423,20 +430,18 @@ if is_participant:
         st.error("无法确认本次干预日期，请联系研究团队。")
         st.stop()
 else:
-    admin_day_confirmation_key = (
-        f"admin_intervention_day_confirmed::{safe_subject_id}::{record_date.isoformat()}"
-    )
+    admin_day_state_keys = admin_intervention_state_keys(safe_subject_id, record_date)
     intervention_day = st.number_input(
         "干预第几天",
         min_value=1,
         max_value=28,
-        value=int(st.session_state.get(f"admin_intervention_day::{safe_subject_id}", 1)),
+        value=int(st.session_state.get(admin_day_state_keys.selection, 1)),
         step=1,
-        key=f"admin_intervention_day::{safe_subject_id}",
+        key=admin_day_state_keys.selection,
     )
-    if st.button("确认干预日", key=f"{admin_day_confirmation_key}::button"):
-        st.session_state[admin_day_confirmation_key] = int(intervention_day)
-    confirmed_day = st.session_state.get(admin_day_confirmation_key)
+    if st.button("确认干预日", key=f"{admin_day_state_keys.confirmation}::button"):
+        st.session_state[admin_day_state_keys.confirmation] = int(intervention_day)
+    confirmed_day = st.session_state.get(admin_day_state_keys.confirmation)
     if confirmed_day != int(intervention_day):
         st.info("请确认本次干预日后开始录制。")
         st.stop()
@@ -448,8 +453,20 @@ try:
     record = record_store.get_or_create(
         safe_subject_id, record_date, int(intervention_day)
     )
+except RecordArchivedError as error:
+    archived_message = archived_record_success_message(error, intervention_day)
+    if archived_message is not None:
+        st.success(archived_message)
+    else:
+        LOGGER.warning(
+            "record unavailable record_id=%s outcome=%s",
+            error.record_id,
+            type(error).__name__,
+        )
+        st.error("当日记录无法安全恢复，请联系研究团队。")
+    st.stop()
 except (RecordConflictError, RecordCorruptionError, RecordLockError):
-    logging.exception("record retrieval failed")
+    LOGGER.warning("record recovery failed outcome=%s", "store_error")
     st.error("当日记录无法安全恢复，请联系研究团队。")
     st.stop()
 try:
@@ -714,7 +731,10 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
             initial_step=step_by_visit.get(visit, 0),
         )
         current_answered = set(st.session_state.get(state_keys.answered, []))
-        if support_needed(visit, answers, current_answered, int(record["intervention_day"])):
+        if (
+            not questionnaire_complete
+            and support_needed(visit, answers, current_answered, int(record["intervention_day"]))
+        ):
             contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
             st.warning(
                 "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
@@ -728,6 +748,13 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
         save_questionnaire_draft(answers, current_answered, persist=False)
         mark_questionnaire_visit_complete(record, visit)
         record_store.save(record)
+    if persisted_support_needed(record, visit):
+        contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
+        st.warning(
+            "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
+            "如果你正处于紧急危险中，请联系当地急救服务。\n"
+            f"{contact or '请联系研究团队。'}"
+        )
     meta_path = record_store.path_for(record)
     record_date_key = date.fromisoformat(record["record_date"]).strftime("%Y%m%d")
     remote_dir = remote_record_dir(
@@ -779,8 +806,12 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
             st.success("上传完成。")
         except LocalCleanupError as error:
             st.warning(cleanup_pending_message(error, participant=is_participant))
-        except Exception:
-            logging.exception("record upload failed")
+        except Exception as error:
+            LOGGER.warning(
+                "record upload failed record_id=%s stage=upload exception_type=%s",
+                record["record_id"],
+                type(error).__name__,
+            )
             st.error(upload_failure_message(record["record_id"], participant=is_participant))
 
     if c2.button("重新录制"):

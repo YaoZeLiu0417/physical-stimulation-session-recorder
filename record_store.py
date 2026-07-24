@@ -29,6 +29,26 @@ class RecordLockError(RuntimeError):
     """Raised when a lock path is unsafe or cannot be securely acquired."""
 
 
+class RecordArchivedError(RuntimeError):
+    """Raised when a lifecycle index proves the latest state is unavailable."""
+
+    def __init__(self, index: Mapping[str, Any]) -> None:
+        self.record_id = index["record_id"]
+        self.intervention_day = index["intervention_day"]
+        self.latest_revision = index["latest_revision"]
+        self.lifecycle = index["lifecycle"]
+        self.completion_status = index["completion_status"]
+        self.completed_visits = tuple(index["completed_visits"])
+        self.upload = dict(index["upload"])
+        super().__init__(f"记录 {self.record_id} 的最新状态不可用。")
+
+
+_INDEX_VERSION = 1
+_COMPLETION_STATUSES = {"draft", "complete"}
+_UPLOAD_STATUSES = {"pending", "uploaded", "failed"}
+_LIFECYCLES = {"draft", "complete", "uploaded"}
+
+
 def validate_subject_id(subject_id: str) -> str:
     if not isinstance(subject_id, str):
         raise ValueError("受试者编号仅允许字母、数字、下划线和连字符，长度为 1-64 个字符。")
@@ -232,13 +252,24 @@ class DailyRecordStore:
         if not isinstance(timestamp, str) or "T" not in timestamp:
             raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
         parsed = datetime.fromisoformat(timestamp)
-        if (
-            parsed.tzinfo is None
-            or parsed.microsecond != 0
-            or timestamp != parsed.isoformat(timespec="seconds")
-        ):
+        if parsed.microsecond != 0 or timestamp != parsed.isoformat(timespec="seconds"):
             raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
-        return parsed
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+    @staticmethod
+    def _validate_intervention_day(value: Any) -> int:
+        if type(value) is not int or not 1 <= value <= 28:
+            raise ValueError("干预日必须是 1 到 28 的整数。")
+        return value
+
+    @staticmethod
+    def _validate_upload(upload: Any) -> dict[str, str]:
+        if not isinstance(upload, Mapping) or set(upload) != {"json", "video"}:
+            raise ValueError("上传状态无效。")
+        validated = {key: upload[key] for key in ("json", "video")}
+        if any(value not in _UPLOAD_STATUSES for value in validated.values()):
+            raise ValueError("上传状态无效。")
+        return validated
 
     def _identity_from_record(self, record: Mapping[str, Any]) -> tuple[str, date, str, int]:
         try:
@@ -289,18 +320,70 @@ class DailyRecordStore:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise RecordCorruptionError(f"记录文件损坏或无效: {path.name}") from exc
 
+    def _index_from_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        subject_id, record_date, record_id, revision = self._identity_from_record(record)
+        intervention_day = self._validate_intervention_day(record["intervention_day"])
+        updated_at_iso = record["updated_at_iso"]
+        self._parse_timestamp(updated_at_iso)
+        completion = record.get("completion", {})
+        if not isinstance(completion, Mapping):
+            raise ValueError("完成状态无效。")
+        stored_completion_status = completion.get("status", "draft")
+        if stored_completion_status not in {"draft", "in_progress", "complete"}:
+            raise ValueError("完成状态无效。")
+        completion_status = (
+            "complete" if stored_completion_status == "complete" else "draft"
+        )
+        visits = completion.get("questionnaire_visits", {})
+        if not isinstance(visits, Mapping):
+            raise ValueError("问卷完成状态无效。")
+        completed_visits = sorted(
+            visit
+            for visit, status in visits.items()
+            if isinstance(visit, str)
+            and isinstance(status, Mapping)
+            and status.get("status") == "complete"
+            and status.get("revision") == revision
+        )
+        upload = self._validate_upload(record.get("upload", {}))
+        lifecycle = (
+            "uploaded"
+            if can_cleanup(upload)
+            else "complete"
+            if completion_status == "complete"
+            else "draft"
+        )
+        return {
+            "index_version": _INDEX_VERSION,
+            "subject_id": subject_id,
+            "record_date": record_date.isoformat(),
+            "record_id": record_id,
+            "intervention_day": intervention_day,
+            "latest_revision": revision,
+            "record_updated_at_iso": updated_at_iso,
+            "completion_status": completion_status,
+            "completed_visits": completed_visits,
+            "upload": upload,
+            "lifecycle": lifecycle,
+        }
+
     def _load_identity_unlocked(
         self, subject_id: str, record_date: date
     ) -> dict[str, Any] | None:
         path = self._identity_path(subject_id, record_date)
-        if not path.exists():
-            return None
         try:
             path_stat = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RecordCorruptionError(f"记录身份索引损坏或无效: {path.name}") from exc
+        try:
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
             if (
                 not stat.S_ISREG(path_stat.st_mode)
                 or stat.S_ISLNK(path_stat.st_mode)
                 or path_stat.st_nlink != 1
+                or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
                 or path.parent.resolve() != self._root_resolved
             ):
                 raise ValueError("记录身份索引路径不安全。")
@@ -308,6 +391,12 @@ class DailyRecordStore:
                 identity = json.load(handle)
             if not isinstance(identity, dict):
                 raise ValueError("记录身份索引必须是对象。")
+            if set(identity) != {
+                "index_version", "subject_id", "record_date", "record_id",
+                "intervention_day", "latest_revision", "record_updated_at_iso",
+                "completion_status", "completed_visits", "upload", "lifecycle",
+            } or identity["index_version"] != _INDEX_VERSION:
+                raise ValueError("记录身份索引版本或结构无效。")
             actual_subject = validate_subject_id(identity["subject_id"])
             actual_date = date.fromisoformat(identity["record_date"])
             if actual_date.isoformat() != identity["record_date"]:
@@ -317,22 +406,47 @@ class DailyRecordStore:
             )
             if actual_subject != subject_id or actual_date != record_date:
                 raise ValueError("记录身份索引与请求不匹配。")
+            intervention_day = self._validate_intervention_day(identity["intervention_day"])
+            latest_revision = self._validate_revision(identity["latest_revision"])
+            self._parse_timestamp(identity["record_updated_at_iso"])
+            completion_status = identity["completion_status"]
+            completed_visits = identity["completed_visits"]
+            upload = self._validate_upload(identity["upload"])
+            lifecycle = identity["lifecycle"]
+            if (
+                completion_status not in _COMPLETION_STATUSES
+                or not isinstance(completed_visits, list)
+                or any(not isinstance(visit, str) or not visit for visit in completed_visits)
+                or completed_visits != sorted(set(completed_visits))
+                or lifecycle not in _LIFECYCLES
+            ):
+                raise ValueError("记录身份索引摘要无效。")
+            expected_lifecycle = (
+                "uploaded" if can_cleanup(upload)
+                else "complete" if completion_status == "complete" else "draft"
+            )
+            if lifecycle != expected_lifecycle:
+                raise ValueError("记录身份索引生命周期无效。")
             return {
+                "index_version": _INDEX_VERSION,
                 "subject_id": actual_subject,
                 "record_date": actual_date.isoformat(),
                 "record_id": record_id,
+                "intervention_day": intervention_day,
+                "latest_revision": latest_revision,
+                "record_updated_at_iso": identity["record_updated_at_iso"],
+                "completion_status": completion_status,
+                "completed_visits": completed_visits,
+                "upload": upload,
+                "lifecycle": lifecycle,
             }
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise RecordCorruptionError(f"记录身份索引损坏或无效: {path.name}") from exc
 
     def _write_identity_unlocked(self, record: Mapping[str, Any]) -> None:
-        subject_id, record_date, record_id, _ = self._identity_from_record(record)
+        subject_id, record_date, _, _ = self._identity_from_record(record)
         path = self._identity_path(subject_id, record_date)
-        identity = {
-            "subject_id": subject_id,
-            "record_date": record_date.isoformat(),
-            "record_id": record_id,
-        }
+        identity = self._index_from_record(record)
         serialized = json.dumps(identity, ensure_ascii=False, indent=2)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -345,13 +459,12 @@ class DailyRecordStore:
             if temporary.exists():
                 temporary.unlink()
 
-    def _ensure_identity_unlocked(self, record: Mapping[str, Any]) -> None:
-        subject_id, record_date, record_id, _ = self._identity_from_record(record)
-        identity = self._load_identity_unlocked(subject_id, record_date)
-        if identity is None:
-            self._write_identity_unlocked(record)
+    def _validate_index_for_write_unlocked(self, record: Mapping[str, Any]) -> None:
+        subject_id, record_date, record_id, revision = self._identity_from_record(record)
+        index = self._load_identity_unlocked(subject_id, record_date)
+        if index is None:
             return
-        if identity["record_id"] != record_id:
+        if index["record_id"] != record_id or index["latest_revision"] > revision:
             raise RecordCorruptionError("记录身份索引与状态文件冲突。")
 
     def _latest_unlocked(self, subject_id: str, record_date: date) -> dict[str, Any] | None:
@@ -366,6 +479,32 @@ class DailyRecordStore:
             raise RecordCorruptionError("同一日期的状态文件包含冲突的记录身份。")
         return max(candidates, key=lambda record: record["revision"])
 
+    def _reconcile_unlocked(
+        self, subject_id: str, record_date: date
+    ) -> dict[str, Any] | None:
+        index = self._load_identity_unlocked(subject_id, record_date)
+        latest = self._latest_unlocked(subject_id, record_date)
+        if index is None:
+            if latest is not None:
+                self._write_identity_unlocked(latest)
+            return latest
+        if latest is None:
+            raise RecordArchivedError(index)
+        if index["record_id"] != latest["record_id"]:
+            raise RecordCorruptionError("记录身份索引与状态文件冲突。")
+        latest_revision = latest["revision"]
+        index_revision = index["latest_revision"]
+        if index_revision > latest_revision:
+            raise RecordArchivedError(index)
+        latest_updated = self._parse_timestamp(latest["updated_at_iso"])
+        index_updated = self._parse_timestamp(index["record_updated_at_iso"])
+        if latest_revision > index_revision or latest_updated > index_updated:
+            self._write_identity_unlocked(latest)
+            return latest
+        if latest_revision == index_revision and latest["updated_at_iso"] == index["record_updated_at_iso"]:
+            return latest
+        raise RecordCorruptionError("记录身份索引的修订时间与状态文件冲突。")
+
     def get_or_create(
         self, subject_id: str, record_date: date, intervention_day: int
     ) -> dict[str, Any]:
@@ -373,18 +512,9 @@ class DailyRecordStore:
         if not isinstance(record_date, date):
             raise ValueError("记录日期必须是 date 对象。")
         with self._lock(self._day_lock_token(safe_subject_id, record_date)):
-            identity = self._load_identity_unlocked(safe_subject_id, record_date)
-            latest = self._latest_unlocked(safe_subject_id, record_date)
+            latest = self._reconcile_unlocked(safe_subject_id, record_date)
             if latest is not None:
-                if identity is not None and identity["record_id"] != latest["record_id"]:
-                    raise RecordCorruptionError("记录身份索引与状态文件冲突。")
-                if identity is None:
-                    self._write_identity_unlocked(latest)
                 return latest
-            if identity is not None:
-                raise RecordConflictError(
-                    f"记录 {identity['record_id']} 的状态文件已归档，无法创建新的当日记录。"
-                )
             record = self._new_record(safe_subject_id, record_date, intervention_day)
             self._write_unlocked(record, previous_updated_at=None, require_absent=True)
             return record
@@ -405,7 +535,7 @@ class DailyRecordStore:
         require_absent: bool,
     ) -> Path:
         target = self.path_for(record)
-        self._ensure_identity_unlocked(record)
+        self._validate_index_for_write_unlocked(record)
         if require_absent and target.exists():
             raise RecordConflictError(f"修订文件已存在: {target.name}")
         payload = deepcopy(record)
@@ -422,12 +552,13 @@ class DailyRecordStore:
             if temporary.exists():
                 temporary.unlink()
         record["updated_at_iso"] = payload["updated_at_iso"]
+        self._write_identity_unlocked(record)
         return target
 
     def save(self, record: dict[str, Any]) -> Path:
         subject_id, record_date, record_id, revision = self._identity_from_record(record)
         with self._lock(self._day_lock_token(subject_id, record_date)):
-            latest = self._latest_unlocked(subject_id, record_date)
+            latest = self._reconcile_unlocked(subject_id, record_date)
             if latest is None:
                 if revision != 1:
                     raise RecordConflictError("无法创建非初始修订。")
@@ -443,7 +574,7 @@ class DailyRecordStore:
     def revise(self, record: Mapping[str, Any]) -> dict[str, Any]:
         subject_id, record_date, record_id, revision = self._identity_from_record(record)
         with self._lock(self._day_lock_token(subject_id, record_date)):
-            latest = self._latest_unlocked(subject_id, record_date)
+            latest = self._reconcile_unlocked(subject_id, record_date)
             if latest is None:
                 raise RecordConflictError("找不到要修订的记录。")
             if latest["record_id"] != record_id or latest["revision"] != revision:

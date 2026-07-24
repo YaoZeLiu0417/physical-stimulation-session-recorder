@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
-from record_store import DailyRecordStore
+from record_store import DailyRecordStore, RecordArchivedError
 from upload_workflow import LocalCleanupError
 
 
@@ -250,12 +250,12 @@ def test_app_controller_uses_canonical_record_date_and_completion_boundaries():
         and "RecordCorruptionError" in source
         and "RecordLockError" in source
     )
-    assert "logging.exception(\"record upload failed\")" in source
+    assert "record upload failed record_id=%s stage=upload exception_type=%s" in source
 
 
 def test_admin_confirmation_is_scoped_to_subject_and_record_date():
     source = APP_PATH.read_text(encoding="utf-8")
-    assert 'admin_intervention_day_confirmed::{safe_subject_id}::{record_date.isoformat()}' in source
+    assert "admin_intervention_state_keys(safe_subject_id, record_date)" in source
 
 
 def test_app_generated_iso_timestamps_are_offset_aware():
@@ -294,7 +294,7 @@ def test_trusted_intervention_day_accepts_only_subject_scoped_values_1_to_28():
 
 def test_app_admin_selects_day_but_signed_link_never_uses_unsigned_day():
     source = APP_PATH.read_text(encoding="utf-8")
-    assert 'key=f"admin_intervention_day::{safe_subject_id}"' in source
+    assert "admin_intervention_state_keys" in source
     assert "min_value=1" in source and "max_value=28" in source
     assert "resolve_trusted_intervention_day" in source
     assert 'q.get("day"' not in source
@@ -341,8 +341,6 @@ def test_daily_persistence_keeps_only_active_answered_and_removes_stale_safety()
     assert record["weekly_extension"] == {}
     assert record["derived_metrics"]["daily"]["nssi_total_count_24h"] == 0
     assert record["safety_signals"] == {
-        "nssi_thought_present_24h": False,
-        "nssi_behavior_present_24h": False,
         "suicide_thought_present_24h": False,
         "V1_pss_positive": True,
     }
@@ -457,6 +455,137 @@ def test_questionnaire_completion_is_scoped_to_the_current_visit_and_revision():
     assert workflow.questionnaire_visit_complete(record, "V1") is False
     record["revision"] += 1
     assert workflow.questionnaire_visit_complete(record, "daily") is False
+
+
+def test_completion_sets_top_level_complete_and_persists_upload_ready_after_reload(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+    workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
+    workflow.mark_questionnaire_visit_complete(record, "daily")
+    store.save(record)
+
+    reloaded = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    assert reloaded["completion"]["status"] == "complete"
+    assert workflow.upload_ready_for_visit(reloaded, "daily") is True
+
+
+def test_persisted_positive_safety_survives_reload_and_upload_ready_retry(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+        "suicide_thought_present_24h": True,
+        "suicide_thought_frequency_24h": 2,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+    workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
+    workflow.mark_questionnaire_visit_complete(record, "daily")
+    store.save(record)
+
+    reloaded = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    assert workflow.upload_ready_for_visit(reloaded, "daily") is True
+    assert workflow.persisted_support_needed(reloaded, "daily") is True
+
+
+def test_persisted_formal_pss_support_survives_reload_and_upload_ready_retry(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    workflow.persist_formal_questionnaire(
+        record, "V1", {"pss_1": True}, {"pss_1"}, current_step=1
+    )
+    workflow.mark_questionnaire_visit_complete(record, "V1")
+    store.save(record)
+
+    reloaded = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    assert workflow.upload_ready_for_visit(reloaded, "V1") is True
+    assert workflow.persisted_support_needed(reloaded, "V1") is True
+
+
+def test_daily_safety_uses_canonical_suicide_frequency_and_medical_keys():
+    workflow = _workflow()
+    record = _record(day=6)
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": True,
+        "nssi_medical_care_24h": True,
+        "suicide_thought_present_24h": True,
+        "suicide_thought_frequency_24h": 3,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+    workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
+    assert record["safety_signals"] == {
+        "suicide_thought_present_24h": True,
+        "suicide_thought_frequency_24h": 3,
+        "medical_care_required_24h": True,
+    }
+
+    answers["nssi_behavior_present_24h"] = False
+    answers["suicide_thought_present_24h"] = False
+    workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
+    assert record["safety_signals"] == {"suicide_thought_present_24h": False}
+
+
+def test_daily_safety_preserves_explicit_false_for_an_active_medical_branch():
+    workflow = _workflow()
+    record = _record(day=6)
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": True,
+        "nssi_medical_care_24h": False,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+
+    workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
+
+    assert record["safety_signals"]["medical_care_required_24h"] is False
+    assert "nssi_medical_care_24h" not in record["safety_signals"]
+
+
+def test_archived_uploaded_record_uses_the_completed_lifecycle_policy(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    record["completion"]["status"] = "complete"
+    record["completion"]["questionnaire_visits"] = {
+        "daily": {"status": "complete", "revision": 1}
+    }
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    store.save(record)
+    store.path_for(record).unlink()
+
+    with pytest.raises(RecordArchivedError) as raised:
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+
+    assert workflow.archived_record_is_completed(raised.value, 6) is True
+    assert workflow.archived_record_is_completed(raised.value, 7) is False
+    assert workflow.archived_record_success_message(raised.value, 6) == (
+        f"本次记录已完成（记录编号：{record['record_id']}）。"
+    )
+    assert workflow.archived_record_success_message(raised.value, 7) is None
+
+
+def test_admin_day_state_keys_are_isolated_by_subject_and_date():
+    workflow = _workflow()
+    first = workflow.admin_intervention_state_keys("sub-001", date(2026, 7, 24))
+    second = workflow.admin_intervention_state_keys("sub-001", date(2026, 7, 25))
+    assert first != second
+    assert "2026-07-24" in first.selection and "2026-07-24" in first.confirmation
+    assert "2026-07-25" in second.selection and "2026-07-25" in second.confirmation
 
 
 def test_upload_readiness_survives_retry_but_not_an_incomplete_sibling_visit():
@@ -725,9 +854,12 @@ def test_recording_timestamps_require_full_consistent_iso_datetimes(tmp_path):
             recordings_dir=tmp_path, persisted_recording=None,
         )
 
-    assert resolve(
+    normalized = resolve(
         "2026-07-24T10:00:00+08:00", "2026-07-24T10:01:00+08:00"
-    ) is not None
+    )
+    assert normalized is not None
+    assert normalized.started_at_iso == "2026-07-24T02:00:00+00:00"
+    assert normalized.ended_at_iso == "2026-07-24T02:01:00+00:00"
     for started, ended in (
         ("2026-07-24T10:00:00", "2026-07-24T10:01:00"),
         ("2026-07-24", "2026-07-25"),

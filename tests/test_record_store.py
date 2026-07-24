@@ -4,13 +4,16 @@ import json
 import multiprocessing
 import os
 import re
+from types import SimpleNamespace
 import threading
+from pathlib import Path
 
 import pytest
 
 import record_store
 from record_store import (
     DailyRecordStore,
+    RecordArchivedError,
     RecordConflictError,
     RecordCorruptionError,
     RecordLockError,
@@ -63,7 +66,7 @@ def test_identity_index_prevents_a_new_record_after_archived_state_cleanup(tmp_p
     record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
     store.path_for(record).unlink()
 
-    with pytest.raises(RecordConflictError, match=re.escape(record["record_id"])):
+    with pytest.raises(RecordArchivedError, match=re.escape(record["record_id"])):
         store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
 
 
@@ -88,6 +91,146 @@ def test_identity_index_rejects_a_state_file_for_a_different_record_id(tmp_path)
     conflicting_path.write_text(json.dumps(conflicting), encoding="utf-8")
 
     with pytest.raises(RecordCorruptionError, match="身份"):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_lifecycle_index_prevents_revision_resurrection_after_latest_state_cleanup(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    revised = store.revise(first)
+    store.path_for(revised).unlink()
+
+    with pytest.raises(RecordArchivedError) as raised:
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    error = raised.value
+    assert error.record_id == revised["record_id"]
+    assert error.intervention_day == 7
+    assert error.latest_revision == 2
+    assert list(tmp_path.glob("*_r1_state.json"))
+
+
+def test_lifecycle_index_summaries_track_completed_uploaded_record_and_archival(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["completion"] = {
+        "status": "complete",
+        "answered_field_ids": {"daily": ["suicide_thought_present_24h"]},
+        "current_step": {"daily": 4},
+        "questionnaire_visits": {"daily": {"status": "complete", "revision": 1}},
+    }
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    state_path = store.save(record)
+    index = json.loads(store._identity_path("sub-001", date(2026, 7, 24)).read_text(encoding="utf-8"))
+
+    assert index == {
+        "index_version": 1,
+        "subject_id": "sub-001",
+        "record_date": "2026-07-24",
+        "record_id": record["record_id"],
+        "intervention_day": 7,
+        "latest_revision": 1,
+        "record_updated_at_iso": record["updated_at_iso"],
+        "completion_status": "complete",
+        "completed_visits": ["daily"],
+        "upload": {"json": "uploaded", "video": "uploaded"},
+        "lifecycle": "uploaded",
+    }
+    state_path.unlink()
+    with pytest.raises(RecordArchivedError) as raised:
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert raised.value.lifecycle == "uploaded"
+    assert raised.value.completion_status == "complete"
+    assert raised.value.completed_visits == ("daily",)
+    assert raised.value.upload == {"json": "uploaded", "video": "uploaded"}
+
+
+def test_initial_state_replace_failure_leaves_no_lifecycle_index(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    original_replace = record_store.os.replace
+
+    def fail_state_replace(source, target):
+        if str(target).endswith("_state.json"):
+            raise OSError("state replace failed")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(record_store.os, "replace", fail_state_replace)
+
+    with pytest.raises(OSError, match="state replace failed"):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert not store._identity_path("sub-001", date(2026, 7, 24)).exists()
+
+
+def test_index_write_failure_after_state_commit_is_repaired_from_disk(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+
+    def fail_index_write(record):
+        raise OSError("index replace failed")
+
+    monkeypatch.setattr(store, "_write_identity_unlocked", fail_index_write)
+    with pytest.raises(OSError, match="index replace failed"):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    state_paths = list(tmp_path.glob("*_r1_state.json"))
+    assert len(state_paths) == 1
+    monkeypatch.undo()
+    repaired = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert repaired["revision"] == 1
+    assert store._identity_path("sub-001", date(2026, 7, 24)).is_file()
+
+
+def test_newer_state_repairs_a_stale_lifecycle_index(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    index_path = store._identity_path("sub-001", date(2026, 7, 24)
+    )
+    stale_index = index_path.read_text(encoding="utf-8")
+    revised = store.revise(first)
+    index_path.write_text(stale_index, encoding="utf-8")
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    repaired_index = json.loads(index_path.read_text(encoding="utf-8"))
+
+    assert resumed["revision"] == revised["revision"] == 2
+    assert repaired_index["latest_revision"] == 2
+    assert repaired_index["record_updated_at_iso"] == revised["updated_at_iso"]
+
+
+def test_legacy_naive_v4_timestamp_loads_and_migrates_on_save(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    path = store.path_for(record)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["updated_at_iso"] = "2026-07-24T10:00:00"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    store._identity_path("sub-001", date(2026, 7, 24)).unlink()
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    store.save(resumed)
+    reloaded = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    assert datetime.fromisoformat(reloaded["updated_at_iso"]).tzinfo is not None
+
+
+def test_lifecycle_index_rejects_reparse_point_attributes(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    index_path = store._identity_path("sub-001", date(2026, 7, 24))
+    original_lstat = record_store.os.lstat
+    monkeypatch.setattr(record_store.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1, raising=False)
+
+    def reparse_index(path):
+        result = original_lstat(path)
+        if Path(path) == index_path:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_nlink=result.st_nlink,
+                st_file_attributes=1,
+            )
+        return result
+
+    monkeypatch.setattr(record_store.os, "lstat", reparse_index)
+    with pytest.raises(RecordCorruptionError):
         store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
 
 
