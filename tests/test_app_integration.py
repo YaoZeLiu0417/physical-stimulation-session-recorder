@@ -834,7 +834,7 @@ def test_ready_confirmation_survives_cleanup_failure_for_refresh_recovery(
         return original_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", fail_raw_cleanup)
-    with pytest.raises(LocalCleanupError):
+    with pytest.raises(LocalCleanupError) as captured:
         upload_record_bundle(
             json_path,
             video_path,
@@ -846,6 +846,8 @@ def test_ready_confirmation_survives_cleanup_failure_for_refresh_recovery(
             confirm_final_sync=confirm_ready,
         )
 
+    assert captured.value.failed_path == raw_path
+    assert isinstance(captured.value.__cause__, PermissionError)
     persisted = json.loads(json_path.read_text(encoding="utf-8"))
     assert persisted["local_cleanup"] == {"requested": True, "status": "ready"}
     recovery = workflow.uploaded_cleanup_recovery(

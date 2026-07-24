@@ -139,6 +139,62 @@ def test_cleanup_runs_only_after_final_json_confirmation(tmp_path, monkeypatch):
     ]
 
 
+def test_atomic_ready_confirmation_refreshes_json_cleanup_identity(tmp_path):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+
+    def confirm_ready():
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        payload["local_cleanup"] = {"requested": True, "status": "ready"}
+        replacement = tmp_path / "ready-state.tmp"
+        replacement.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(replacement, json_path)
+
+    result = upload_record_bundle(
+        json_path,
+        video_path,
+        "/remote/record",
+        lambda *args, **kwargs: None,
+        persist_state=_json_persister(json_path),
+        delete_after_upload=True,
+        cleanup_paths=(raw_video_path,),
+        confirm_final_sync=confirm_ready,
+    )
+
+    assert result == {"json": "uploaded", "video": "uploaded"}
+    assert not raw_video_path.exists()
+    assert not video_path.exists()
+    assert not json_path.exists()
+
+
+def test_ready_confirmation_replacing_json_with_hardlink_still_fails_closed(
+    tmp_path,
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    outside = tmp_path / "outside-ready.json"
+    outside.write_text('{"local_cleanup": {"status": "ready"}}', encoding="utf-8")
+
+    def replace_with_hardlink():
+        json_path.unlink()
+        os.link(outside, json_path)
+
+    with pytest.raises(LocalCleanupError) as captured:
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            lambda *args, **kwargs: None,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+            confirm_final_sync=replace_with_hardlink,
+        )
+
+    assert captured.value.failed_path == json_path
+    assert raw_video_path.exists()
+    assert video_path.exists()
+    assert json_path.read_text(encoding="utf-8") == outside.read_text(encoding="utf-8")
+
+
 def test_bundle_uploads_private_snapshots_and_final_json_reflects_persisted_state(
     tmp_path,
 ):

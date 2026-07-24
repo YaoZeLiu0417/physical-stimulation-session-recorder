@@ -381,15 +381,19 @@ def upload_record_bundle(
         persist_state(dict(state))
         raise
 
+    json_cleanup_expectation: object = final_json_source_stat
     if confirm_final_sync is not None:
         confirm_final_sync()
+        json_cleanup_expectation = _capture_cleanup_expectations((json_path,))[
+            json_path
+        ]
 
     if delete_after_upload:
         _cleanup_local_files(
             cleanup_candidates,
             expected_stats={
                 **extra_cleanup_expectations,
-                json_path: final_json_source_stat,
+                json_path: json_cleanup_expectation,
                 video_path: video_source_stat,
             },
         )
