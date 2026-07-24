@@ -491,6 +491,30 @@ def test_recording_eligibility_requires_current_marker_safe_file_and_ordered_tim
         ) is None
 
 
+def test_recording_timestamps_require_full_consistent_iso_datetimes(tmp_path):
+    workflow = _workflow()
+    record_id = "sub-001_20260724_deadbeef"
+    video = tmp_path / f"{record_id}.flv"
+    video.write_bytes(b"video")
+
+    def resolve(started: str, ended: str):
+        return workflow.resolve_completed_recording(
+            record_id, record_id, video, started, ended,
+            recordings_dir=tmp_path, persisted_recording=None,
+        )
+
+    assert resolve("2026-07-24T10:00:00", "2026-07-24T10:01:00") is not None
+    assert resolve(
+        "2026-07-24T10:00:00+08:00", "2026-07-24T10:01:00+08:00"
+    ) is not None
+    for started, ended in (
+        ("2026-07-24", "2026-07-25"),
+        ("2026-07-24T10:00:00", "2026-07-24T10:01:00+08:00"),
+        ("2026-07-24T10:00:00+08:00", "2026-07-24T10:01:00"),
+    ):
+        assert resolve(started, ended) is None
+
+
 def test_recording_resume_only_accepts_safe_current_record_basename(tmp_path):
     workflow = _workflow()
     record_id = "sub-001_20260724_deadbeef"
@@ -537,3 +561,171 @@ def test_app_uses_scoped_context_keys_and_recorder_gate_helpers():
         "nssi_urge_0to10", "coping_effect_1to5", "caffeine", "exercise",
         "tags", "coping_used", "narrative", "triggers",
     }
+
+
+def test_app_orders_day_confirmation_recorder_gate_and_draft_context_save():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    top_level = tree.body
+    get_record_index = next(
+        index
+        for index, node in enumerate(top_level)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "record" for target in node.targets)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "record_store"
+        and node.value.func.attr == "get_or_create"
+    )
+    get_record = top_level[get_record_index]
+    confirmation = next(
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "confirm_admin_intervention_day"
+    )
+    confirmation_button = next(
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "button"
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == "确认干预日"
+    )
+    confirmation_stops = [
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "stop"
+        and confirmation_button.lineno < call.lineno < get_record.lineno
+    ]
+    assert confirmation.lineno < get_record.lineno
+    assert confirmation_stops
+
+    validation = top_level[get_record_index + 1]
+    assert isinstance(validation, ast.Try)
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "ensure_record_intervention_day"
+        for call in ast.walk(validation)
+    )
+
+    resolved = next(
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "resolve_completed_recording"
+    )
+    render = next(
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "render_questionnaire"
+    )
+    gate = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "completed_recording"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.Is)
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value is None
+    )
+    assert resolved.lineno < gate.lineno < render.lineno
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "stop"
+        for call in ast.walk(gate)
+    )
+
+    save_draft = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "save_questionnaire_draft"
+    )
+    context_assignment = next(
+        node for node in ast.walk(save_draft)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "record"
+            and isinstance(target.slice, ast.Constant)
+            and target.slice.value == "daily_context"
+            for target in node.targets
+        )
+    )
+    draft_save = next(
+        call for call in ast.walk(save_draft)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "record_store"
+        and call.func.attr == "save"
+    )
+    assert context_assignment.lineno < draft_save.lineno
+
+
+def test_app_signed_operational_surfaces_follow_participant_stop_guard():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    participant_guard = next(
+        node for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "is_participant"
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "st"
+            and call.func.attr == "stop"
+            for call in ast.walk(node)
+        )
+    )
+    history_subheader = next(
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "subheader"
+        and isinstance(call.args[0], ast.Constant)
+        and "历史文件上传" in call.args[0].value
+    )
+    operations_expanders = [
+        call for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "expander"
+    ]
+    assert participant_guard.lineno < history_subheader.lineno
+    assert all(participant_guard.lineno < call.lineno for call in operations_expanders)
+
+    admin_only = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.UnaryOp)
+        and isinstance(node.test.op, ast.Not)
+        and isinstance(node.test.operand, ast.Name)
+        and node.test.operand.id == "is_participant"
+    )
+    admin_surface_calls = [
+        call for call in ast.walk(admin_only)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr in {"write", "json"}
+    ]
+    assert {call.func.attr for call in admin_surface_calls} == {"write", "json"}

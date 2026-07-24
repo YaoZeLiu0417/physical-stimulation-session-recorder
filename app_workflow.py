@@ -96,12 +96,20 @@ def _parse_recording_times(
         return None
     if not started_at_iso or not ended_at_iso:
         return None
+    if "T" not in started_at_iso or "T" not in ended_at_iso:
+        return None
     try:
         started = datetime.fromisoformat(started_at_iso)
         ended = datetime.fromisoformat(ended_at_iso)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
-    if started >= ended:
+    if (started.tzinfo is None) != (ended.tzinfo is None):
+        return None
+    try:
+        valid_order = started < ended
+    except TypeError:
+        return None
+    if not valid_order:
         return None
     return started_at_iso, ended_at_iso
 
