@@ -154,6 +154,57 @@ def test_generation_marker_rejects_same_timestamp_lifecycle_summary_conflict(tmp
     assert not identity_path.exists()
 
 
+def test_markerless_revision_one_rejects_identity_state_summary_conflict(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["completion"] = {
+        "status": "complete",
+        "answered_field_ids": {"daily": ["suicide_thought_present_24h"]},
+        "current_step": {"daily": 4},
+        "questionnaire_visits": {"daily": {"status": "complete", "revision": 1}},
+    }
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    state_path = store.save(record)
+    store._generation_path("sub-001", date(2026, 7, 24)).unlink()
+    downgraded = json.loads(state_path.read_text(encoding="utf-8"))
+    downgraded["completion"] = {
+        "status": "draft",
+        "answered_field_ids": {},
+        "current_step": {},
+        "questionnaire_visits": {},
+    }
+    downgraded["upload"] = {"json": "pending", "video": "pending"}
+    state_path.write_text(json.dumps(downgraded), encoding="utf-8")
+
+    with pytest.raises(RecordCorruptionError):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+
+
+def test_consistent_markerless_revision_one_backfills_before_identity_loss(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    generation_path = store._generation_path("sub-001", date(2026, 7, 24))
+    generation_path.unlink()
+
+    resumed = DailyRecordStore(tmp_path).get_or_create(
+        "sub-001", date(2026, 7, 24), intervention_day=7
+    )
+    assert resumed["revision"] == 1
+    assert generation_path.is_file()
+
+    state_path = store.path_for(record)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["upload"] = {"json": "uploaded", "video": "uploaded"}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    store._identity_path("sub-001", date(2026, 7, 24)).unlink()
+    with pytest.raises(RecordCorruptionError):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+
+
 def test_generation_marker_blocks_same_day_recreation_when_all_states_are_lost(
     tmp_path,
 ):

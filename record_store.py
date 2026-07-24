@@ -633,9 +633,39 @@ class DailyRecordStore:
         index = self._load_identity_unlocked(subject_id, record_date)
         generation = self._load_generation_unlocked(subject_id, record_date)
         latest = self._latest_unlocked(subject_id, record_date)
-        if generation is None and latest is not None and latest["revision"] > 1:
-            self._write_generation_unlocked(latest)
-            generation = self._load_generation_unlocked(subject_id, record_date)
+        summary_keys = (
+            "subject_id", "record_date", "record_id", "intervention_day",
+            "latest_revision", "record_updated_at_iso", "completion_status",
+            "completed_visits", "upload", "lifecycle",
+        )
+        if generation is None and latest is not None:
+            try:
+                latest_summary = self._index_from_record(latest)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RecordCorruptionError("state lifecycle summary is invalid") from exc
+            should_backfill = index is None
+            if index is not None and index["record_id"] == latest["record_id"]:
+                latest_revision = latest["revision"]
+                index_revision = index["latest_revision"]
+                latest_updated = self._parse_timestamp(latest["updated_at_iso"])
+                index_updated = self._parse_timestamp(index["record_updated_at_iso"])
+                if latest_revision > index_revision:
+                    should_backfill = True
+                elif latest_revision == index_revision:
+                    if latest["updated_at_iso"] == index["record_updated_at_iso"]:
+                        if any(
+                            latest_summary[key] != index[key]
+                            for key in summary_keys
+                        ):
+                            raise RecordCorruptionError(
+                                "identity index conflicts with state summary"
+                            )
+                        should_backfill = True
+                    elif latest_updated > index_updated:
+                        should_backfill = True
+            if should_backfill:
+                self._write_generation_unlocked(latest)
+                generation = self._load_generation_unlocked(subject_id, record_date)
         if generation is not None:
             if index is not None and index["record_id"] != generation["record_id"]:
                 raise RecordCorruptionError("lifecycle indexes contain conflicting record identities")
@@ -656,12 +686,6 @@ class DailyRecordStore:
                             raise RecordCorruptionError(
                                 "generation marker conflicts with state summary"
                             ) from exc
-                        summary_keys = (
-                            "subject_id", "record_date", "record_id",
-                            "intervention_day", "latest_revision",
-                            "record_updated_at_iso", "completion_status",
-                            "completed_visits", "upload", "lifecycle",
-                        )
                         if any(
                             latest_summary[key] != generation[key]
                             for key in summary_keys
