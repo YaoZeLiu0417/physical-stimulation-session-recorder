@@ -23,6 +23,14 @@ def _clear_signed_link_state(state: MutableMapping[str, Any]) -> None:
         state.pop(key, None)
 
 
+def _has_legacy_signed_link_state(state: MutableMapping[str, Any]) -> bool:
+    return (
+        state.get("auth_source") is None
+        and state.get("authed") is True
+        and ("subject_id" in state or "visit" in state)
+    )
+
+
 def reconcile_link_auth_state(
     state: MutableMapping[str, Any],
     verified: VerifiedLink | None,
@@ -39,13 +47,13 @@ def reconcile_link_auth_state(
     if signed_link_attempted:
         _clear_signed_link_state(state)
         return True
-    if state.get("auth_source") == "signed_link":
+    if state.get("auth_source") == "signed_link" or _has_legacy_signed_link_state(state):
         _clear_signed_link_state(state)
     return False
 
 
 def mark_admin_authenticated(state: MutableMapping[str, Any]) -> None:
-    if state.get("auth_source") == "signed_link":
+    if state.get("auth_source") == "signed_link" or _has_legacy_signed_link_state(state):
         _clear_signed_link_state(state)
     else:
         state.pop("visit", None)

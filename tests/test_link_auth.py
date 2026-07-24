@@ -134,6 +134,21 @@ def test_admin_auth_state_does_not_inherit_signed_link_identity() -> None:
     assert state == {"authed": True, "auth_source": "admin"}
 
 
+def test_legacy_signed_link_state_without_auth_source_is_cleared() -> None:
+    state: dict[str, object] = {
+        "authed": True,
+        "subject_id": "sub-old",
+        "visit": "V5",
+    }
+
+    assert reconcile_link_auth_state(state, None, signed_link_attempted=False) is False
+    assert state == {}
+
+    state.update({"authed": True, "subject_id": "sub-old", "visit": "V5"})
+    mark_admin_authenticated(state)
+    assert state == {"authed": True, "auth_source": "admin"}
+
+
 def test_app_verifies_link_once_and_reuses_the_result() -> None:
     app_source = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8")
 
