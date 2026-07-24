@@ -198,6 +198,13 @@ class DailyRecordStore:
             raise ValueError("记录身份索引必须保存在记录根目录中。")
         return path
 
+    def _generation_path(self, subject_id: str, record_date: date) -> Path:
+        token = self._day_lock_token(subject_id, record_date)
+        path = self.root / f".{token}_generation.json"
+        if path.parent.resolve() != self._root_resolved:
+            raise ValueError("generation index must stay inside record root")
+        return path
+
     @staticmethod
     def _day_lock_token(subject_id: str, record_date: date) -> str:
         safe_subject_id = validate_subject_id(subject_id)
@@ -459,6 +466,114 @@ class DailyRecordStore:
             if temporary.exists():
                 temporary.unlink()
 
+    def _load_generation_unlocked(
+        self, subject_id: str, record_date: date
+    ) -> dict[str, Any] | None:
+        path = self._generation_path(subject_id, record_date)
+        try:
+            path_stat = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RecordCorruptionError(f"generation marker unavailable: {path.name}") from exc
+        try:
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or stat.S_ISLNK(path_stat.st_mode)
+                or path_stat.st_nlink != 1
+                or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+                or path.parent.resolve() != self._root_resolved
+            ):
+                raise ValueError("generation marker path is unsafe")
+            with path.open(encoding="utf-8") as handle:
+                generation = json.load(handle)
+            expected_keys = {
+                "generation_version", "subject_id", "record_date", "record_id",
+                "intervention_day", "highest_revision", "record_updated_at_iso",
+                "completion_status", "completed_visits", "upload", "lifecycle",
+            }
+            if not isinstance(generation, dict) or set(generation) != expected_keys:
+                raise ValueError("generation marker structure is invalid")
+            if generation["generation_version"] != _INDEX_VERSION:
+                raise ValueError("generation marker version is invalid")
+            actual_subject = validate_subject_id(generation["subject_id"])
+            actual_date = date.fromisoformat(generation["record_date"])
+            if actual_date.isoformat() != generation["record_date"]:
+                raise ValueError("generation marker date is invalid")
+            record_id = validate_record_id(
+                generation["record_id"], actual_subject, actual_date.strftime("%Y%m%d")
+            )
+            if actual_subject != subject_id or actual_date != record_date:
+                raise ValueError("generation marker identity does not match request")
+            intervention_day = self._validate_intervention_day(generation["intervention_day"])
+            highest_revision = self._validate_revision(generation["highest_revision"])
+            self._parse_timestamp(generation["record_updated_at_iso"])
+            completion_status = generation["completion_status"]
+            completed_visits = generation["completed_visits"]
+            upload = self._validate_upload(generation["upload"])
+            lifecycle = generation["lifecycle"]
+            if (
+                completion_status not in _COMPLETION_STATUSES
+                or not isinstance(completed_visits, list)
+                or any(not isinstance(visit, str) or not visit for visit in completed_visits)
+                or completed_visits != sorted(set(completed_visits))
+                or lifecycle not in _LIFECYCLES
+            ):
+                raise ValueError("generation marker summary is invalid")
+            expected_lifecycle = (
+                "uploaded" if can_cleanup(upload)
+                else "complete" if completion_status == "complete" else "draft"
+            )
+            if lifecycle != expected_lifecycle:
+                raise ValueError("generation marker lifecycle is invalid")
+            return {
+                "index_version": _INDEX_VERSION,
+                "generation_version": _INDEX_VERSION,
+                "subject_id": actual_subject,
+                "record_date": actual_date.isoformat(),
+                "record_id": record_id,
+                "intervention_day": intervention_day,
+                "latest_revision": highest_revision,
+                "highest_revision": highest_revision,
+                "record_updated_at_iso": generation["record_updated_at_iso"],
+                "completion_status": completion_status,
+                "completed_visits": completed_visits,
+                "upload": upload,
+                "lifecycle": lifecycle,
+            }
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise RecordCorruptionError(f"generation marker corrupt: {path.name}") from exc
+
+    def _write_generation_unlocked(self, record: Mapping[str, Any]) -> None:
+        subject_id, record_date, _, _ = self._identity_from_record(record)
+        path = self._generation_path(subject_id, record_date)
+        index = self._index_from_record(record)
+        generation = {
+            "generation_version": _INDEX_VERSION,
+            "subject_id": index["subject_id"],
+            "record_date": index["record_date"],
+            "record_id": index["record_id"],
+            "intervention_day": index["intervention_day"],
+            "highest_revision": index["latest_revision"],
+            "record_updated_at_iso": index["record_updated_at_iso"],
+            "completion_status": index["completion_status"],
+            "completed_visits": index["completed_visits"],
+            "upload": index["upload"],
+            "lifecycle": index["lifecycle"],
+        }
+        serialized = json.dumps(generation, ensure_ascii=False, indent=2)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
     def _validate_index_for_write_unlocked(self, record: Mapping[str, Any]) -> None:
         subject_id, record_date, record_id, revision = self._identity_from_record(record)
         index = self._load_identity_unlocked(subject_id, record_date)
@@ -483,13 +598,30 @@ class DailyRecordStore:
         self, subject_id: str, record_date: date
     ) -> dict[str, Any] | None:
         index = self._load_identity_unlocked(subject_id, record_date)
+        generation = self._load_generation_unlocked(subject_id, record_date)
         latest = self._latest_unlocked(subject_id, record_date)
+        if generation is not None:
+            if index is not None and index["record_id"] != generation["record_id"]:
+                raise RecordCorruptionError("lifecycle indexes contain conflicting record identities")
+            if latest is not None and latest["record_id"] != generation["record_id"]:
+                raise RecordCorruptionError("generation marker conflicts with state file")
+            if latest is not None and latest["revision"] < generation["highest_revision"]:
+                raise RecordArchivedError(generation)
+            if latest is not None:
+                latest_updated = self._parse_timestamp(latest["updated_at_iso"])
+                generation_updated = self._parse_timestamp(generation["record_updated_at_iso"])
+                if (
+                    latest["revision"] > generation["highest_revision"]
+                    or latest_updated > generation_updated
+                ):
+                    self._write_generation_unlocked(latest)
+                    generation = self._load_generation_unlocked(subject_id, record_date)
         if index is None:
             if latest is not None:
                 self._write_identity_unlocked(latest)
             return latest
         if latest is None:
-            raise RecordArchivedError(index)
+            raise RecordArchivedError(generation or index)
         if index["record_id"] != latest["record_id"]:
             raise RecordCorruptionError("记录身份索引与状态文件冲突。")
         latest_revision = latest["revision"]
@@ -536,11 +668,20 @@ class DailyRecordStore:
     ) -> Path:
         target = self.path_for(record)
         self._validate_index_for_write_unlocked(record)
+        subject_id, record_date, record_id, revision = self._identity_from_record(record)
+        generation = self._load_generation_unlocked(subject_id, record_date)
+        if generation is not None:
+            if generation["record_id"] != record_id or generation["highest_revision"] > revision:
+                raise RecordCorruptionError("generation marker conflicts with state file")
         if require_absent and target.exists():
             raise RecordConflictError(f"修订文件已存在: {target.name}")
         payload = deepcopy(record)
         payload["updated_at_iso"] = self._next_updated_at(previous_updated_at)
         serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        if revision > 1 and (
+            generation is None or generation["highest_revision"] < revision
+        ):
+            self._write_generation_unlocked(payload)
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as handle:
@@ -552,6 +693,14 @@ class DailyRecordStore:
             if temporary.exists():
                 temporary.unlink()
         record["updated_at_iso"] = payload["updated_at_iso"]
+        if revision == 1 and generation is None:
+            self._write_generation_unlocked(record)
+        elif generation is not None and (
+            generation["highest_revision"] < revision
+            or self._parse_timestamp(payload["updated_at_iso"])
+            > self._parse_timestamp(generation["record_updated_at_iso"])
+        ):
+            self._write_generation_unlocked(record)
         self._write_identity_unlocked(record)
         return target
 
