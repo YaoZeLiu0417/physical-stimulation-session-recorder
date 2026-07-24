@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Callable, Mapping
+import logging
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
@@ -20,6 +22,11 @@ from questionnaire_specs import (
 )
 
 
+logger = logging.getLogger(__name__)
+SAVE_ERROR_MESSAGE = "暂时无法保存，请重试。"
+BEHAVIOR_COUNT_ERROR = "至少记录一类 NSSI 行为的实际次数"
+
+
 ALTO_COLORS = {
     "black": "#050505",
     "purple": "#2D2674",
@@ -27,6 +34,42 @@ ALTO_COLORS = {
     "magenta": "#DD1D86",
     "orange": "#FF8D2A",
 }
+
+
+@dataclass(frozen=True)
+class QuestionnaireStateKeys:
+    """All Streamlit state keys owned by one record and visit."""
+
+    answered: str
+    values: str
+    step: str
+    error: str
+    back_button: str
+    next_button: str
+    widget_prefix: str
+
+    def widget(self, field_id: str) -> str:
+        return f"{self.widget_prefix}{field_id}"
+
+
+def questionnaire_state_keys(
+    state_namespace: str, visit: str
+) -> QuestionnaireStateKeys:
+    namespace = str(state_namespace)
+    visit_name = str(visit)
+    prefix = (
+        f"questionnaire::{len(namespace)}:{namespace}::"
+        f"{len(visit_name)}:{visit_name}"
+    )
+    return QuestionnaireStateKeys(
+        answered=f"{prefix}::answered",
+        values=f"{prefix}::values",
+        step=f"{prefix}::step",
+        error=f"{prefix}::error",
+        back_button=f"{prefix}::back",
+        next_button=f"{prefix}::next",
+        widget_prefix=f"{prefix}::widget::",
+    )
 
 
 ALTO_CSS = """
@@ -252,7 +295,7 @@ def validate_submission(
     if answers.get("nssi_behavior_present_24h") is True and sum(
         int(answers.get(field, 0) or 0) for field in COUNT_FIELDS
     ) == 0:
-        errors.append("至少记录一类 NSSI 行为的实际次数")
+        errors.append(BEHAVIOR_COUNT_ERROR)
     return errors
 
 
@@ -381,22 +424,32 @@ def inject_alto_theme(
     )
 
 
-def _answered_field_ids() -> set[str]:
-    values = st.session_state.get("answered_field_ids", [])
+def _answered_field_ids(state_keys: QuestionnaireStateKeys) -> set[str]:
+    values = st.session_state.get(state_keys.answered, [])
     return {value for value in values if isinstance(value, str)}
 
 
-def _mark_answered(field_id: str) -> None:
-    answered = _answered_field_ids()
+def _mark_answered(state_keys: QuestionnaireStateKeys, field_id: str) -> None:
+    answered = _answered_field_ids(state_keys)
     answered.add(field_id)
-    st.session_state["answered_field_ids"] = sorted(answered)
+    st.session_state[state_keys.answered] = sorted(answered)
+    values = dict(st.session_state.get(state_keys.values, {}))
+    widget_key = state_keys.widget(field_id)
+    if widget_key in st.session_state:
+        values[field_id] = st.session_state[widget_key]
+    st.session_state[state_keys.values] = values
 
 
-def render_question(question: QuestionSpec) -> Any:
+def render_question(
+    question: QuestionSpec, state_keys: QuestionnaireStateKeys
+) -> Any:
     """Render one question using only native Streamlit input controls."""
 
-    key = f"q_{question.id}"
-    change_args = {"on_change": _mark_answered, "args": (question.id,)}
+    key = state_keys.widget(question.id)
+    change_args = {
+        "on_change": _mark_answered,
+        "args": (state_keys, question.id),
+    }
     if question.kind == "boolean":
         return st.radio(
             question.prompt,
@@ -451,22 +504,44 @@ def render_question(question: QuestionSpec) -> Any:
     raise ValueError(f"Unsupported question kind: {question.kind}")
 
 
-def _sync_answered_widget_values(
-    answers: dict[str, Any], answered_field_ids: set[str]
+def _sync_answered_values(
+    answers: dict[str, Any],
+    answered_field_ids: set[str],
+    state_keys: QuestionnaireStateKeys,
 ) -> None:
+    values = st.session_state.get(state_keys.values, {})
     for field_id in answered_field_ids:
-        key = f"q_{field_id}"
-        if key in st.session_state:
-            answers[field_id] = st.session_state[key]
+        if field_id in values:
+            answers[field_id] = values[field_id]
 
 
-def _show_pending_errors(visit: str) -> None:
-    pending = st.session_state.pop(f"questionnaire_error_{visit}", None)
+def _show_pending_errors(state_keys: QuestionnaireStateKeys) -> None:
+    pending = st.session_state.pop(state_keys.error, None)
     if pending is None:
         return
     errors = pending if isinstance(pending, (list, tuple)) else [pending]
     for error in errors:
         st.error(str(error))
+
+
+def _save_draft_at_step(
+    save_draft: Callable[[dict[str, Any], set[str]], None],
+    answers: dict[str, Any],
+    answered: set[str],
+    state_keys: QuestionnaireStateKeys,
+    *,
+    previous_step: int,
+    target_step: int,
+) -> bool:
+    st.session_state[state_keys.step] = target_step
+    try:
+        save_draft(answers, answered)
+    except Exception:
+        st.session_state[state_keys.step] = previous_step
+        logger.exception("Unable to save questionnaire draft")
+        st.error(SAVE_ERROR_MESSAGE)
+        return False
+    return True
 
 
 def render_questionnaire(
@@ -476,23 +551,44 @@ def render_questionnaire(
     answers: dict[str, Any],
     save_draft: Callable[[dict[str, Any], set[str]], None],
     visit: str = "daily",
+    state_namespace: str | None = None,
+    initial_answered_field_ids: Iterable[str] | None = None,
+    initial_step: int = 0,
 ) -> tuple[dict[str, Any], bool]:
     """Render one active question and persist each successful navigation."""
 
-    answered = _answered_field_ids()
-    _sync_answered_widget_values(answers, answered)
+    namespace = (
+        state_namespace
+        if state_namespace is not None
+        else f"{subject_id}:{intervention_day}"
+    )
+    state_keys = questionnaire_state_keys(namespace, visit)
+    if state_keys.answered not in st.session_state:
+        st.session_state[state_keys.answered] = sorted(
+            {
+                field_id
+                for field_id in (initial_answered_field_ids or ())
+                if isinstance(field_id, str)
+            }
+        )
+    if state_keys.values not in st.session_state:
+        st.session_state[state_keys.values] = dict(answers)
+    if state_keys.step not in st.session_state:
+        st.session_state[state_keys.step] = initial_step
+
+    answered = _answered_field_ids(state_keys)
+    _sync_answered_values(answers, answered, state_keys)
     flow = (
         build_flow(answers, intervention_day)
         if visit == "daily"
         else formal_flow(visit, answers)
     )
-    step_key = f"question_step_{visit}"
     try:
-        requested_step = int(st.session_state.get(step_key, 0))
+        requested_step = int(st.session_state.get(state_keys.step, 0))
     except (TypeError, ValueError):
         requested_step = 0
     step = min(max(requested_step, 0), max(len(flow) - 1, 0))
-    st.session_state[step_key] = step
+    st.session_state[state_keys.step] = step
 
     inject_alto_theme(
         subject_id,
@@ -501,17 +597,18 @@ def render_questionnaire(
         step + 1 if flow else 0,
         len(flow),
     )
-    _show_pending_errors(visit)
+    _show_pending_errors(state_keys)
 
     if not flow:
         return answers, True
 
     question = flow[step]
-    widget_key = f"q_{question.id}"
-    if widget_key not in st.session_state and question.id in answers:
-        st.session_state[widget_key] = answers[question.id]
-    value = render_question(question)
-    answered = _answered_field_ids()
+    widget_key = state_keys.widget(question.id)
+    scoped_values = st.session_state.get(state_keys.values, {})
+    if widget_key not in st.session_state and question.id in scoped_values:
+        st.session_state[widget_key] = scoped_values[question.id]
+    value = render_question(question, state_keys)
+    answered = _answered_field_ids(state_keys)
     if question.id in answered:
         answers[question.id] = value
 
@@ -520,29 +617,51 @@ def render_questionnaire(
         "←",
         disabled=step == 0,
         help="返回上一题",
-        key=f"question_back_{visit}",
+        key=state_keys.back_button,
     ):
-        st.session_state[step_key] = step - 1
-        save_draft(answers, answered)
+        if not _save_draft_at_step(
+            save_draft,
+            answers,
+            answered,
+            state_keys,
+            previous_step=step,
+            target_step=step - 1,
+        ):
+            return answers, False
         st.rerun()
 
     primary_label = "继续" if step < len(flow) - 1 else "检查并提交"
     if primary_column.button(
         primary_label,
         type="primary",
-        key=f"question_next_{visit}",
+        key=state_keys.next_button,
     ):
-        answered = _answered_field_ids()
+        answered = _answered_field_ids(state_keys)
         if question.required and question.id not in answered:
             st.error("请先确认当前答案。")
             return answers, False
 
         if step < len(flow) - 1:
-            st.session_state[step_key] = step + 1
-            save_draft(answers, answered)
+            if not _save_draft_at_step(
+                save_draft,
+                answers,
+                answered,
+                state_keys,
+                previous_step=step,
+                target_step=step + 1,
+            ):
+                return answers, False
             st.rerun()
 
-        save_draft(answers, answered)
+        if not _save_draft_at_step(
+            save_draft,
+            answers,
+            answered,
+            state_keys,
+            previous_step=step,
+            target_step=step,
+        ):
+            return answers, False
         errors = (
             validate_submission(answers, answered, intervention_day)
             if visit == "daily"
@@ -554,9 +673,27 @@ def render_questionnaire(
                 for index, item in enumerate(flow)
                 if item.required and item.id not in answered
             ]
-            if missing_indices:
-                st.session_state[step_key] = missing_indices[0]
-                st.session_state[f"questionnaire_error_{visit}"] = list(errors)
+            target_step = missing_indices[0] if missing_indices else None
+            if target_step is None and BEHAVIOR_COUNT_ERROR in errors:
+                target_step = next(
+                    (
+                        index
+                        for index, item in enumerate(flow)
+                        if item.id in COUNT_FIELDS
+                    ),
+                    None,
+                )
+            if target_step is not None:
+                if not _save_draft_at_step(
+                    save_draft,
+                    answers,
+                    answered,
+                    state_keys,
+                    previous_step=step,
+                    target_step=target_step,
+                ):
+                    return answers, False
+                st.session_state[state_keys.error] = list(errors)
                 st.rerun()
             for error in errors:
                 st.error(error)

@@ -14,12 +14,14 @@ from questionnaire_specs import (
 from questionnaire_ui import (
     ALTO_COLORS,
     ALTO_CSS,
+    QuestionnaireStateKeys,
     build_field_status,
     build_formal_field_status,
     build_flow,
     formal_flow,
     inject_alto_theme,
     question_context_label,
+    questionnaire_state_keys,
     render_question,
     validate_formal_submission,
     validate_submission,
@@ -27,6 +29,7 @@ from questionnaire_ui import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "questionnaire_app.py"
+FIXTURE_NAMESPACE = "fixture-record"
 
 
 def _negative_daily_answers():
@@ -39,6 +42,10 @@ def _negative_daily_answers():
 
 def _button(app, label):
     return next(button for button in app.button if button.label == label)
+
+
+def _fixture_keys(visit="daily", namespace=FIXTURE_NAMESPACE):
+    return questionnaire_state_keys(namespace, visit)
 
 
 def _answer_no_and_continue(app):
@@ -248,7 +255,7 @@ def test_slider_endpoint_labels_are_html_escaped(monkeypatch):
         high_label="<script>bad()</script>",
     )
 
-    assert render_question(question) == 0
+    assert render_question(question, _fixture_keys()) == 0
     body = "".join(rendered)
     assert "<script>" not in body
     assert "<img" not in body
@@ -268,13 +275,13 @@ def test_daily_now_and_weekly_steps_render_accurate_context_titles():
     app = AppTest.from_file(str(FIXTURE), default_timeout=10)
     app.session_state["fixture_day"] = 7
     app.session_state["fixture_answers"] = _negative_daily_answers()
-    app.session_state["question_step_daily"] = 3
+    app.session_state["fixture_initial_step"] = 3
     app = app.run()
     markup = "\n".join(item.value for item in app.markdown)
     assert "此时此刻 · 4 /" in markup
     assert "过去 24 小时 · 4 /" not in markup
 
-    app.session_state["question_step_daily"] = 5
+    app.session_state[_fixture_keys().step] = 5
     app = app.run()
     weekly = WEEKLY_INSTRUMENTS[0]
     markup = "\n".join(item.value for item in app.markdown)
@@ -300,7 +307,7 @@ def test_required_boolean_must_be_actively_answered_before_continuing():
 
     app = _button(app, "继续").click().run()
     assert [error.value for error in app.error] == ["请先确认当前答案。"]
-    assert app.session_state["question_step_daily"] == 0
+    assert app.session_state[_fixture_keys().step] == 0
 
 
 def test_untouched_slider_cannot_continue_from_its_default_position():
@@ -311,7 +318,7 @@ def test_untouched_slider_cannot_continue_from_its_default_position():
     assert app.slider[0].value == DAILY_CORE[3].min_value
     app = _button(app, "继续").click().run()
     assert [error.value for error in app.error] == ["请先确认当前答案。"]
-    assert DAILY_CORE[3].id not in set(app.session_state["answered_field_ids"])
+    assert DAILY_CORE[3].id not in set(app.session_state[_fixture_keys().answered])
 
 
 def test_boolean_branch_rebuilds_steps_and_navigation_saves_drafts():
@@ -328,4 +335,247 @@ def test_boolean_branch_rebuilds_steps_and_navigation_saves_drafts():
     app.radio[0].set_value(False).run()
     app = _button(app, "继续").click().run()
     assert app.radio[0].label == DAILY_CORE[1].prompt
-    assert app.session_state["question_step_daily"] == 1
+    assert app.session_state[_fixture_keys().step] == 1
+
+
+def test_questionnaire_state_keys_isolate_namespace_and_visit():
+    a_daily = questionnaire_state_keys("record-A", "daily")
+    a_formal = questionnaire_state_keys("record-A", "V1")
+    b_daily = questionnaire_state_keys("record-B", "daily")
+
+    assert isinstance(a_daily, QuestionnaireStateKeys)
+    for attribute in (
+        "answered",
+        "values",
+        "step",
+        "error",
+        "back_button",
+        "next_button",
+    ):
+        assert len(
+            {
+                getattr(a_daily, attribute),
+                getattr(a_formal, attribute),
+                getattr(b_daily, attribute),
+            }
+        ) == 3
+    assert len(
+        {
+            a_daily.widget("nssi_impulse_time"),
+            a_formal.widget("nssi_impulse_time"),
+            b_daily.widget("nssi_impulse_time"),
+        }
+    ) == 3
+
+
+def test_daily_and_formal_shared_field_ids_do_not_share_widget_or_answered_state():
+    daily_answers = _negative_daily_answers()
+    daily_answers["nssi_impulse_time"] = 88
+    daily_flow = build_flow(daily_answers, 7)
+    daily_step = next(
+        index
+        for index, question in enumerate(daily_flow)
+        if question.id == "nssi_impulse_time"
+    )
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_answers"] = daily_answers
+    app.session_state["fixture_initial_answered"] = ["nssi_impulse_time"]
+    app.session_state["fixture_initial_step"] = daily_step
+    app = app.run()
+    assert app.slider[0].value == 88
+
+    formal_step = next(
+        index
+        for index, question in enumerate(formal_flow("V1", {}))
+        if question.id == "nssi_impulse_time"
+    )
+    app.session_state["fixture_visit"] = "V1"
+    app.session_state["fixture_answers"] = {}
+    app.session_state["fixture_initial_answered"] = []
+    app.session_state["fixture_initial_step"] = formal_step
+    app = app.run()
+
+    assert app.slider[0].value == 1
+    assert "nssi_impulse_time" not in set(
+        app.session_state[_fixture_keys("V1").answered]
+    )
+    assert app.session_state[_fixture_keys().values]["nssi_impulse_time"] == 88
+
+
+def test_record_namespace_switches_restore_only_their_own_state():
+    answers_a = {
+        **_negative_daily_answers(),
+        "nssi_urge_now": 7,
+    }
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_namespace"] = "record-A"
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = answers_a
+    app.session_state["fixture_initial_answered"] = [
+        "nssi_thought_present_24h",
+        "nssi_behavior_present_24h",
+        "suicide_thought_present_24h",
+        "nssi_urge_now",
+    ]
+    app.session_state["fixture_initial_step"] = 3
+    app = app.run()
+    assert app.slider[0].value == 7
+
+    app.session_state["fixture_namespace"] = "record-B"
+    app.session_state["fixture_answers"] = {}
+    app.session_state["fixture_initial_answered"] = []
+    app.session_state["fixture_initial_step"] = 0
+    app = app.run()
+    assert app.radio[0].value is None
+    assert app.session_state[_fixture_keys(namespace="record-B").step] == 0
+
+    app.session_state["fixture_namespace"] = "record-A"
+    app.session_state["fixture_answers"] = {}
+    app = app.run()
+    keys_a = _fixture_keys(namespace="record-A")
+    assert app.slider[0].value == 7
+    assert app.session_state[keys_a.step] == 3
+    assert "nssi_urge_now" in set(app.session_state[keys_a.answered])
+
+
+def test_saved_answers_restore_widget_but_only_initial_ids_count_as_answered():
+    answers = {**_negative_daily_answers(), "nssi_urge_now": 5}
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = answers
+    app.session_state["fixture_initial_answered"] = list(_negative_daily_answers())
+    app.session_state["fixture_initial_step"] = 3
+    app = app.run()
+
+    keys = _fixture_keys()
+    assert app.slider[0].value == 5
+    assert app.session_state[keys.step] == 3
+    assert "nssi_urge_now" not in set(app.session_state[keys.answered])
+    app = _button(app, "继续").click().run()
+    assert [error.value for error in app.error] == ["请先确认当前答案。"]
+
+
+def test_pending_errors_are_scoped_to_record_namespace():
+    keys_a = _fixture_keys(namespace="record-A")
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_namespace"] = "record-B"
+    app.session_state[keys_a.error] = ["record-A only"]
+    app = app.run()
+    assert not app.error
+    assert app.session_state[keys_a.error] == ["record-A only"]
+
+    app.session_state["fixture_namespace"] = "record-A"
+    app = app.run()
+    assert [error.value for error in app.error] == ["record-A only"]
+
+
+def test_save_failure_on_forward_rolls_back_step_and_hides_technical_error():
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10).run()
+    app.radio[0].set_value(False).run()
+    app.session_state["fixture_fail_save"] = True
+    app = _button(app, "继续").click().run()
+
+    assert not app.exception
+    assert app.session_state[_fixture_keys().step] == 0
+    assert [error.value for error in app.error] == ["暂时无法保存，请重试。"]
+    assert "sensitive backend detail" not in str(app)
+
+
+def test_save_failure_on_back_rolls_back_step():
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = {
+        "nssi_thought_present_24h": False,
+    }
+    app.session_state["fixture_initial_answered"] = [
+        "nssi_thought_present_24h"
+    ]
+    app.session_state["fixture_initial_step"] = 1
+    app.session_state["fixture_fail_save"] = True
+    app = app.run()
+    app = _button(app, "←").click().run()
+
+    assert not app.exception
+    assert app.session_state[_fixture_keys().step] == 1
+    assert [error.value for error in app.error] == ["暂时无法保存，请重试。"]
+
+
+def test_save_failure_on_final_submission_keeps_final_step():
+    answers = {
+        **_negative_daily_answers(),
+        "nssi_urge_now": 1,
+        "nssi_resistance_confidence_now": 7,
+    }
+    answered = [question.id for question in build_flow(answers, 6)]
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = answers
+    app.session_state["fixture_initial_answered"] = answered
+    app.session_state["fixture_initial_step"] = 4
+    app.session_state["fixture_fail_save"] = True
+    app = app.run()
+    app = _button(app, "检查并提交").click().run()
+
+    assert not app.exception
+    assert app.session_state[_fixture_keys().step] == 4
+    assert [error.value for error in app.error] == ["暂时无法保存，请重试。"]
+
+
+def test_second_save_failure_during_missing_relocation_restores_final_step():
+    answers = {
+        **_negative_daily_answers(),
+        "nssi_urge_now": 1,
+        "nssi_resistance_confidence_now": 7,
+    }
+    flow = build_flow(answers, 6)
+    answered = [
+        question.id
+        for question in flow
+        if question.id != "nssi_thought_present_24h"
+    ]
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = answers
+    app.session_state["fixture_initial_answered"] = answered
+    app.session_state["fixture_initial_step"] = len(flow) - 1
+    app.session_state["fixture_fail_on_save_attempt"] = 2
+    app = app.run()
+    app = _button(app, "检查并提交").click().run()
+
+    assert not app.exception
+    assert app.session_state[_fixture_keys().step] == len(flow) - 1
+    assert app.session_state["fixture_save_attempts"] == 2
+    assert app.session_state["fixture_save_calls"] == 1
+    assert [error.value for error in app.error] == ["暂时无法保存，请重试。"]
+
+
+def test_zero_behavior_counts_relocate_to_first_count_with_error_visible():
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": True,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+        **{field: 0 for field in COUNT_FIELDS},
+        "nssi_medical_care_24h": False,
+    }
+    flow = build_flow(answers, 6)
+    answered = [question.id for question in flow if question.required]
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = answers
+    app.session_state["fixture_initial_answered"] = answered
+    app.session_state["fixture_initial_step"] = len(flow) - 1
+    app = app.run()
+    app = _button(app, "检查并提交").click().run()
+
+    first_count = next(
+        question for question in flow if question.id == COUNT_FIELDS[0]
+    )
+    assert not app.exception
+    assert app.number_input[0].label == first_count.prompt
+    assert app.session_state[_fixture_keys().step] == flow.index(first_count)
+    assert [error.value for error in app.error] == [
+        "至少记录一类 NSSI 行为的实际次数"
+    ]
+    assert app.session_state["fixture_saved_step"] == flow.index(first_count)
