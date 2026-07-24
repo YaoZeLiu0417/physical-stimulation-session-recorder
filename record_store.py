@@ -1,14 +1,27 @@
 import json
 import os
 import re
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 
 SUBJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+class RecordConflictError(RuntimeError):
+    """Raised when a caller attempts to save or revise a stale record."""
+
+
+class RecordCorruptionError(RuntimeError):
+    """Raised when an on-disk state file fails record integrity validation."""
 
 
 def validate_subject_id(subject_id: str) -> str:
@@ -28,7 +41,6 @@ def validate_record_id(record_id: str, subject_id: str, date_key: str) -> str:
         datetime.strptime(date_key, "%Y%m%d")
     except ValueError as exc:
         raise ValueError("记录日期必须是有效的 YYYYMMDD 日期。") from exc
-
     expected_pattern = rf"{re.escape(safe_subject_id)}_{date_key}_[0-9a-f]{{8}}"
     if not isinstance(record_id, str) or not re.fullmatch(expected_pattern, record_id):
         raise ValueError("记录编号必须匹配受试者、日期和 8 位小写十六进制后缀。")
@@ -44,15 +56,51 @@ def remote_record_dir(
 ) -> str:
     safe_subject_id = validate_subject_id(subject_id)
     validate_record_id(record_id, safe_subject_id, record_date)
-    return "/".join(
-        (save_dir.rstrip("/"), safe_subject_id, record_date, record_id)
-    )
+    return "/".join((save_dir.rstrip("/"), safe_subject_id, record_date, record_id))
 
 
 class DailyRecordStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._locks_root = self.root / ".locks"
+        self._locks_root.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _lock(self, token: str) -> Iterator[None]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise ValueError("锁名称包含不安全字符。")
+        key = (str(self.root.resolve()), token)
+        with _LOCKS_GUARD:
+            local_lock = _LOCKS.setdefault(key, threading.RLock())
+        lock_path = self._locks_root / f"{token}.lock"
+
+        with local_lock, lock_path.open("a+b") as lock_file:
+            lock_file.seek(0)
+            lock_file.write(b"\0")
+            lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _matching_paths(self, subject_id: str, record_date: date) -> list[Path]:
         safe_subject_id = validate_subject_id(subject_id)
@@ -94,60 +142,167 @@ class DailyRecordStore:
             "updated_at_iso": now,
         }
 
-    def get_or_create(
-        self, subject_id: str, record_date: date, intervention_day: int
-    ) -> dict[str, Any]:
-        matching_records: list[dict[str, Any]] = []
-        for path in self._matching_paths(subject_id, record_date):
-            with path.open(encoding="utf-8") as handle:
-                matching_records.append(json.load(handle))
-        if matching_records:
-            return max(matching_records, key=lambda record: int(record["revision"]))
+    @staticmethod
+    def _validate_revision(revision: Any) -> int:
+        if type(revision) is not int or revision < 1:
+            raise ValueError("记录修订号必须是大于等于 1 的整数。")
+        return revision
 
-        record = self._new_record(subject_id, record_date, intervention_day)
-        self.save(record)
-        return record
+    @staticmethod
+    def _parse_timestamp(timestamp: Any) -> datetime:
+        if not isinstance(timestamp, str) or "T" not in timestamp:
+            raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
+        parsed = datetime.fromisoformat(timestamp)
+        if parsed.microsecond != 0 or timestamp != parsed.isoformat(timespec="seconds"):
+            raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
+        return parsed
 
-    def path_for(self, record: Mapping[str, Any]) -> Path:
-        subject_id = record["subject_id"]
-        record_date = record["record_date"]
-        if not isinstance(record_date, str):
-            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
+    def _identity_from_record(self, record: Mapping[str, Any]) -> tuple[str, date, str, int]:
         try:
+            safe_subject_id = validate_subject_id(record["subject_id"])
+            record_date = record["record_date"]
+            if not isinstance(record_date, str):
+                raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
             parsed_date = date.fromisoformat(record_date)
-        except ValueError as exc:
-            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。") from exc
-        if parsed_date.isoformat() != record_date:
-            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
+            if parsed_date.isoformat() != record_date:
+                raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
+            date_key = parsed_date.strftime("%Y%m%d")
+            record_id = validate_record_id(record["record_id"], safe_subject_id, date_key)
+            revision = self._validate_revision(record["revision"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("记录身份或修订号无效。") from exc
+        return safe_subject_id, parsed_date, record_id, revision
 
-        date_key = parsed_date.strftime("%Y%m%d")
-        record_id = validate_record_id(record["record_id"], subject_id, date_key)
-        target = self.root / f"{record_id}_r{record['revision']}_state.json"
+    def _target_for_identity(
+        self, record_id: str, revision: int, record: Mapping[str, Any]
+    ) -> Path:
+        target = self.root / f"{record_id}_r{revision}_state.json"
         if target.parent.resolve() != self.root.resolve():
             raise ValueError("记录文件必须保存在记录根目录中。")
         return target
 
-    def save(self, record: dict[str, Any]) -> Path:
-        record["updated_at_iso"] = datetime.now().isoformat(timespec="seconds")
+    def path_for(self, record: Mapping[str, Any]) -> Path:
+        _, _, record_id, revision = self._identity_from_record(record)
+        return self._target_for_identity(record_id, revision, record)
+
+    def _load_candidate(
+        self, path: Path, subject_id: str, record_date: date
+    ) -> dict[str, Any]:
+        try:
+            if path.is_symlink() or path.parent.resolve() != self.root.resolve():
+                raise ValueError("记录候选路径不安全。")
+            with path.open(encoding="utf-8") as handle:
+                record = json.load(handle)
+            if not isinstance(record, dict):
+                raise ValueError("记录 JSON 顶层必须是对象。")
+            actual_subject, actual_date, record_id, revision = self._identity_from_record(record)
+            if actual_subject != subject_id or actual_date != record_date:
+                raise ValueError("记录身份与请求不匹配。")
+            expected_name = f"{record_id}_r{revision}_state.json"
+            if path.name != expected_name:
+                raise ValueError("记录文件名与 JSON 内容不匹配。")
+            self._parse_timestamp(record["updated_at_iso"])
+            return record
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise RecordCorruptionError(f"记录文件损坏或无效: {path.name}") from exc
+
+    def _latest_unlocked(self, subject_id: str, record_date: date) -> dict[str, Any] | None:
+        candidates = [
+            self._load_candidate(path, subject_id, record_date)
+            for path in self._matching_paths(subject_id, record_date)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda record: record["revision"])
+
+    def get_or_create(
+        self, subject_id: str, record_date: date, intervention_day: int
+    ) -> dict[str, Any]:
+        safe_subject_id = validate_subject_id(subject_id)
+        if not isinstance(record_date, date):
+            raise ValueError("记录日期必须是 date 对象。")
+        date_key = record_date.strftime("%Y%m%d")
+        with self._lock(f"{safe_subject_id}_{date_key}"):
+            latest = self._latest_unlocked(safe_subject_id, record_date)
+            if latest is not None:
+                return latest
+            record = self._new_record(safe_subject_id, record_date, intervention_day)
+            self._write_unlocked(record, previous_updated_at=None, require_absent=True)
+            return record
+
+    @staticmethod
+    def _next_updated_at(previous_updated_at: str | None) -> str:
+        now = datetime.now().replace(microsecond=0)
+        if previous_updated_at is not None:
+            previous = DailyRecordStore._parse_timestamp(previous_updated_at)
+            if now <= previous:
+                now = previous + timedelta(seconds=1)
+        return now.isoformat(timespec="seconds")
+
+    def _write_unlocked(
+        self,
+        record: dict[str, Any],
+        previous_updated_at: str | None,
+        require_absent: bool,
+    ) -> Path:
         target = self.path_for(record)
+        if require_absent and target.exists():
+            raise RecordConflictError(f"修订文件已存在: {target.name}")
+        payload = deepcopy(record)
+        payload["updated_at_iso"] = self._next_updated_at(previous_updated_at)
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(record, handle, ensure_ascii=False, indent=2)
-        os.replace(temporary, target)
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        record["updated_at_iso"] = payload["updated_at_iso"]
         return target
 
+    def save(self, record: dict[str, Any]) -> Path:
+        subject_id, record_date, record_id, revision = self._identity_from_record(record)
+        with self._lock(record_id):
+            latest = self._latest_unlocked(subject_id, record_date)
+            if latest is None:
+                if revision != 1:
+                    raise RecordConflictError("无法创建非初始修订。")
+                return self._write_unlocked(record, None, require_absent=True)
+            if latest["record_id"] != record_id or latest["revision"] != revision:
+                raise RecordConflictError("尝试保存的记录不是最新修订。")
+            if record.get("updated_at_iso") != latest.get("updated_at_iso"):
+                raise RecordConflictError("记录已被其他调用者更新。")
+            return self._write_unlocked(
+                record, latest["updated_at_iso"], require_absent=False
+            )
+
     def revise(self, record: Mapping[str, Any]) -> dict[str, Any]:
-        revised = deepcopy(record)
-        previous_revision = revised["revision"]
-        revised["supersedes_revision"] = previous_revision
-        revised["revision"] = previous_revision + 1
-        revised["completion"] = {
-            "status": "draft",
-            "answered_field_ids": {},
-            "current_step": {},
-        }
-        prior_upload = revised.get("upload", {})
-        video_status = prior_upload.get("video", "pending")
-        revised["upload"] = {"json": "pending", "video": video_status}
-        self.save(revised)
-        return revised
+        subject_id, record_date, record_id, revision = self._identity_from_record(record)
+        with self._lock(record_id):
+            latest = self._latest_unlocked(subject_id, record_date)
+            if latest is None:
+                raise RecordConflictError("找不到要修订的记录。")
+            if latest["record_id"] != record_id or latest["revision"] != revision:
+                raise RecordConflictError("尝试修订的记录不是最新修订。")
+            if record.get("updated_at_iso") != latest.get("updated_at_iso"):
+                raise RecordConflictError("记录已被其他调用者更新。")
+
+            revised = deepcopy(record)
+            revised["supersedes_revision"] = revision
+            revised["revision"] = revision + 1
+            revised["completion"] = {
+                "status": "draft",
+                "answered_field_ids": {},
+                "current_step": {},
+            }
+            prior_upload = revised.get("upload", {})
+            video_status = prior_upload.get("video", "pending")
+            revised["upload"] = {"json": "pending", "video": video_status}
+            self._write_unlocked(
+                revised, latest["updated_at_iso"], require_absent=True
+            )
+            return revised

@@ -2,11 +2,15 @@ from copy import deepcopy
 from datetime import date, datetime
 import json
 import re
+import threading
 
 import pytest
 
+import record_store
 from record_store import (
     DailyRecordStore,
+    RecordConflictError,
+    RecordCorruptionError,
     can_cleanup,
     remote_record_dir,
     validate_subject_id,
@@ -164,10 +168,12 @@ def test_get_or_create_selects_highest_numeric_revision_not_filename_order(tmp_p
     record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
     revision_nine = deepcopy(record)
     revision_nine["revision"] = 9
-    store.save(revision_nine)
     revision_ten = deepcopy(record)
     revision_ten["revision"] = 10
-    store.save(revision_ten)
+    for candidate in (revision_nine, revision_ten):
+        store.path_for(candidate).write_text(
+            json.dumps(candidate, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
     assert resumed["revision"] == 10
@@ -240,3 +246,157 @@ def test_remote_paths_require_a_real_eight_digit_calendar_date(date_key):
         remote_record_dir(
             "/apps/collector", "sub-001", date_key, f"sub-001_{date_key}_deadbeef"
         )
+
+
+def test_concurrent_get_or_create_returns_one_record_and_one_initial_file(tmp_path):
+    barrier = threading.Barrier(2)
+    record_ids = []
+    errors = []
+
+    def create_record():
+        try:
+            store = DailyRecordStore(tmp_path)
+            barrier.wait()
+            record_ids.append(
+                store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)[
+                    "record_id"
+                ]
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=create_record) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert record_ids[0] == record_ids[1]
+    assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
+
+
+def test_stale_competing_draft_cannot_overwrite_newer_save(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    base = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    first = deepcopy(base)
+    stale = deepcopy(base)
+    first["daily_core"]["nssi_urge_now"] = 4
+    stale["daily_core"]["nssi_urge_now"] = 1
+
+    store.save(first)
+    with pytest.raises(RecordConflictError):
+        store.save(stale)
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert resumed["daily_core"]["nssi_urge_now"] == 4
+
+
+def test_stale_competing_revision_cannot_overwrite_created_revision(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    base = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    base["daily_core"]["nssi_urge_now"] = 4
+    store.save(base)
+    stale = deepcopy(base)
+
+    first_revision = store.revise(base)
+    first_revision["daily_core"]["nssi_urge_now"] = 2
+    store.save(first_revision)
+    with pytest.raises(RecordConflictError):
+        store.revise(stale)
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert resumed["revision"] == 2
+    assert resumed["daily_core"]["nssi_urge_now"] == 2
+
+
+@pytest.mark.parametrize("invalid_revision", [True, "1", 1.0, 0, -1])
+def test_save_rejects_invalid_revision_values(tmp_path, invalid_revision):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["revision"] = invalid_revision
+
+    with pytest.raises(ValueError):
+        store.save(record)
+
+
+def test_loaded_invalid_revision_is_reported_as_corruption(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    path = store.path_for(record)
+    record["revision"] = "1"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(RecordCorruptionError, match=re.escape(path.name)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_corrupt_json_candidate_is_reported_instead_of_replaced(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    path = store.path_for(record)
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(RecordCorruptionError, match=re.escape(path.name)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_filename_and_json_identity_mismatch_is_reported_as_corruption(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    path = store.path_for(record)
+    record["record_id"] = "sub-001_20260724_deadbeef"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(RecordCorruptionError, match=re.escape(path.name)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_symlink_candidate_is_reported_as_corruption_when_supported(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    source = store.path_for(record)
+    candidate = tmp_path / "sub-001_20260724_deadbeef_r2_state.json"
+    try:
+        candidate.symlink_to(source)
+    except OSError:
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    with pytest.raises(RecordCorruptionError, match=re.escape(candidate.name)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_serialization_failure_leaves_existing_target_and_no_temp_file(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    target = store.path_for(record)
+    original = target.read_text(encoding="utf-8")
+    record["daily_core"]["value"] = 1
+
+    def fail_dumps(*args, **kwargs):
+        raise TypeError("not serializable")
+
+    monkeypatch.setattr(record_store.json, "dumps", fail_dumps)
+    with pytest.raises(TypeError, match="not serializable"):
+        store.save(record)
+
+    assert target.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_replace_failure_leaves_existing_target_and_no_temp_file(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    target = store.path_for(record)
+    original = target.read_text(encoding="utf-8")
+    record["daily_core"]["value"] = 1
+
+    def fail_replace(*args, **kwargs):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(record_store.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        store.save(record)
+
+    assert target.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.tmp"))
