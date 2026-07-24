@@ -36,6 +36,19 @@ from link_auth import (
     reconcile_link_auth_state,
     verify_subject_link,
 )
+from app_workflow import (
+    cleanup_pending_message,
+    persist_daily_questionnaire,
+    persist_formal_questionnaire,
+    questionnaire_answers,
+    resolve_trusted_intervention_day,
+    support_needed,
+    upload_failure_message,
+)
+from questionnaire_specs import VISIT_INSTRUMENT_IDS
+from questionnaire_ui import questionnaire_state_keys, render_questionnaire
+from record_store import DailyRecordStore, remote_record_dir, validate_subject_id
+from upload_workflow import LocalCleanupError, upload_record_bundle
 
 # =========================
 # 基础：页面设置 & 工具函数
@@ -46,7 +59,7 @@ st.set_page_config(
     layout="centered",
 )
 
-def _safe_secret(key: str, default: str = "") -> str:
+def _safe_secret(key: str, default: Any = "") -> Any:
     """优先从 st.secrets 读取；无 secrets.toml 时回退到环境变量。"""
     try:
         return st.secrets[key]  # 本地无 secrets.toml 时可能抛异常
@@ -56,6 +69,7 @@ def _safe_secret(key: str, default: str = "") -> str:
 ROOT = Path(__file__).resolve().parent
 REC_DIR = ROOT / "recordings"
 REC_DIR.mkdir(parents=True, exist_ok=True)
+record_store = DailyRecordStore(REC_DIR)
 CONF_PATH = ROOT / "config.toml"
 
 # ---- 读取配置：优先 Secrets，其次本地 config.toml（仅本地调试用） ----
@@ -376,6 +390,41 @@ else:
         st.caption(f"链接未锁定：{why_not}（当前可手动输入被试编号）")
 st.session_state["subject_id"] = subject_id
 
+is_participant = st.session_state.get("auth_source") == "signed_link"
+try:
+    safe_subject_id = validate_subject_id(subject_id)
+except ValueError:
+    st.error("受试者编号无效，请联系研究团队。")
+    st.stop()
+
+record_date = datetime.now().date()
+if is_participant:
+    try:
+        intervention_day = resolve_trusted_intervention_day(
+            _safe_secret("TRUSTED_INTERVENTION_DAYS", {}), safe_subject_id
+        )
+    except ValueError:
+        st.error("无法确认本次干预日期，请联系研究团队。")
+        st.stop()
+else:
+    intervention_day = st.number_input(
+        "干预第几天",
+        min_value=1,
+        max_value=28,
+        value=int(st.session_state.get(f"admin_intervention_day::{safe_subject_id}", 1)),
+        step=1,
+        key=f"admin_intervention_day::{safe_subject_id}",
+    )
+
+record = record_store.get_or_create(
+    safe_subject_id, record_date, int(intervention_day)
+)
+visit = locked_link.visit if locked_link else st.selectbox(
+    "问卷访视", ("daily", *VISIT_INSTRUMENT_IDS),
+    index=("daily", *VISIT_INSTRUMENT_IDS).index(st.session_state.get("visit", "daily")),
+)
+st.session_state["visit"] = visit
+
 st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
 c21, c22, c23 = st.columns(3)
@@ -439,10 +488,13 @@ st.subheader("② 录制视频")
 
 MAX_RECORD_MIN = 20  # 超过会在前端提示，可自行调整
 
-ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-base_name = f"{subject_id}_{ts}"
+base_name = record["record_id"]
 flv_path = REC_DIR / f"{base_name}.flv"
-st.session_state.setdefault("recorder_out_path", str(flv_path))
+if st.session_state.get("recorder_record_id") != record["record_id"]:
+    st.session_state["recorder_record_id"] = record["record_id"]
+    st.session_state["recorder_out_path"] = str(flv_path)
+    st.session_state["recorder_converted_mp4"] = None
+    st.session_state.last_saved = None
 st.session_state.setdefault("recorder_format", "flv")
 
 st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测到 ffmpeg 将自动转为 MP4）。")
@@ -516,73 +568,118 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
     st.video(str(final_play))
 
     # 状态 JSON
-    state = st.session_state.get("state_payload", {}) or {}
-    meta = {
-        **state,
-        "file_basename": base_name,
-        "video_filename": final_play.name,
-        "record_started_at_iso": st.session_state.get("record_started_at_iso", ""),
-        "record_ended_at_iso": st.session_state.get("record_ended_at_iso", ""),
-        "server_time_generated_iso": datetime.now().isoformat(timespec="seconds"),
-    }
-    meta_path = REC_DIR / f"{base_name}_state.json"
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    st.caption(f"已生成状态文件：{meta_path.name}（上传时将与视频一并上传）")
+    state_payload = st.session_state.get("state_payload", {}) or {}
+    state_namespace = f"{record['record_id']}:r{record['revision']}"
+    state_keys = questionnaire_state_keys(state_namespace, visit)
+    answered_by_visit = record.get("completion", {}).get("answered_field_ids", {})
+    step_by_visit = record.get("completion", {}).get("current_step", {})
+    answers = questionnaire_answers(record, visit)
 
-    delete_after_upload = st.checkbox(
-        "上传成功后删除服务器本地副本（视频与JSON，推荐）",
-        value=True,
-        help="建议开启：上传成功后删除本机/服务器文件，仅保留网盘副本。",
-        key="del_after_upload_recent",
+    def save_questionnaire_draft(
+        updated_answers: dict[str, Any], answered_field_ids: set[str]
+    ) -> None:
+        current_step = int(st.session_state.get(state_keys.step, 0))
+        if visit == "daily":
+            persist_daily_questionnaire(
+                record, updated_answers, answered_field_ids, current_step=current_step
+            )
+        else:
+            persist_formal_questionnaire(
+                record, visit, updated_answers, answered_field_ids,
+                current_step=current_step,
+            )
+        record_store.save(record)
+
+    answers, questionnaire_complete = render_questionnaire(
+        subject_id=safe_subject_id,
+        intervention_day=int(record["intervention_day"]),
+        answers=answers,
+        save_draft=save_questionnaire_draft,
+        visit=visit,
+        state_namespace=state_namespace,
+        initial_answered_field_ids=answered_by_visit.get(visit, []),
+        initial_step=step_by_visit.get(visit, 0),
+    )
+    current_answered = set(st.session_state.get(state_keys.answered, []))
+    if support_needed(visit, answers, current_answered, int(record["intervention_day"])):
+        contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
+        st.warning(
+            "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
+            "如果你正处于紧急危险中，请联系当地急救服务。\n"
+            f"{contact or '请联系研究团队。'}"
+        )
+    if not questionnaire_complete:
+        st.info("请完成问卷后继续上传。")
+        st.stop()
+
+    save_questionnaire_draft(answers, current_answered)
+    record["daily_context"] = state_payload
+    record["recording"] = {
+        "video_filename": final_play.name,
+        "started_at_iso": st.session_state.get("record_started_at_iso", ""),
+        "ended_at_iso": st.session_state.get("record_ended_at_iso", ""),
+        "format": final_play.suffix.lstrip(".").lower(),
+    }
+    record.setdefault("completion", {})["status"] = "complete"
+    record_store.save(record)
+    meta_path = record_store.path_for(record)
+    remote_dir = remote_record_dir(
+        SAVE_DIR, safe_subject_id, record["record_date"], record["record_id"]
     )
 
-    # 远端保存路径
-    date_str = datetime.now().strftime("%Y%m%d")
-    remote_dir = f"{SAVE_DIR}/{subject_id}/{date_str}"
-    remote_video = f"{remote_dir}/{final_play.name}"
-    remote_json  = f"{remote_dir}/{meta_path.name}"
-    st.write("将要上传到网盘目录：", f"`{remote_dir}`")
+    delete_after_upload = True
+    if not is_participant:
+        delete_after_upload = st.checkbox(
+            "上传成功后删除服务器本地副本（视频与 JSON）",
+            value=True,
+            key="del_after_upload_recent",
+        )
+        st.write("将上传到网盘目录：", f"`{remote_dir}`")
+        st.json(record["upload"])
 
     c1, c2 = st.columns([1, 1])
-    if c1.button("⬆️ 上传视频 + 状态JSON 到百度网盘", type="primary"):
-        prog = st.progress(0, text="上传视频中…")
-        def on_prog_v(p: float, msg: str):
-            prog.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
+    if c1.button("上传视频和问卷记录", type="primary"):
+        json_progress = st.progress(0, text="正在上传问卷记录")
+        video_progress = st.progress(0, text="正在上传视频")
+
+        def on_json_progress(progress: float, message: str) -> None:
+            json_progress.progress(
+                min(max(progress, 0.0), 1.0), text=f"[JSON] {int(progress * 100)}% - {message}"
+            )
+
+        def on_video_progress(progress: float, message: str) -> None:
+            video_progress.progress(
+                min(max(progress, 0.0), 1.0), text=f"[视频] {int(progress * 100)}% - {message}"
+            )
+
+        def persist_upload(upload_state: dict[str, str]) -> None:
+            record["upload"] = upload_state
+            record_store.save(record)
+
+        cleanup_paths = (out_file,) if final_play != out_file else ()
         try:
-            res_v = upload_to_baidu(final_play, remote_video, progress_cb=on_prog_v)
-            prog.progress(1.0, text="[视频] 上传完成 ✔")
-            st.success("视频上传成功")
-            st.json(res_v)
+            upload_record_bundle(
+                meta_path,
+                final_play,
+                remote_dir,
+                upload_to_baidu,
+                persist_state=persist_upload,
+                delete_after_upload=delete_after_upload,
+                cleanup_paths=cleanup_paths,
+                json_progress=on_json_progress,
+                video_progress=on_video_progress,
+            )
+            st.success("上传完成。")
+        except LocalCleanupError as error:
+            st.warning(cleanup_pending_message(error, participant=is_participant))
+        except Exception:
+            st.error(upload_failure_message(record["record_id"], participant=is_participant))
 
-            prog2 = st.progress(0, text="上传状态JSON中…")
-            def on_prog_j(p: float, msg: str):
-                prog2.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-            res_j = upload_to_baidu(meta_path, remote_json, progress_cb=on_prog_j)
-            prog2.progress(1.0, text="[JSON] 上传完成 ✔")
-            st.success("状态JSON上传成功")
-            st.json(res_j)
-
-            if delete_after_upload:
-                try:
-                    final_play.unlink(missing_ok=True)
-                    if final_play.suffix.lower() == ".mp4" and out_file.exists():
-                        out_file.unlink(missing_ok=True)
-                    elif final_play.suffix.lower() == ".flv":
-                        maybe_mp4 = final_play.with_suffix(".mp4")
-                        maybe_mp4.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
-                    st.caption("已从服务器删除本地副本（视频与JSON）。")
-                except Exception:
-                    pass
-
-        except Exception as e:
-            prog.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
-
-    if c2.button("🔁 重新录制"):
+    if c2.button("重新录制"):
         st.session_state.last_saved = None
         st.session_state["recorder_converted_mp4"] = None
         st.rerun()
+
 else:
     if webrtc_ctx and webrtc_ctx.state.playing:
         st.info("录制进行中… 点击 STOP 结束并进入上传。")
@@ -592,8 +689,14 @@ else:
 # =========================
 # ④ 历史文件上传（可复用当前状态JSON）
 # =========================
+if is_participant:
+    st.stop()
+
 st.divider()
 st.subheader("④ 从 recordings 目录选择历史文件上传")
+
+with st.expander("使用 & 运维提示"):
+    st.caption("管理员可使用历史文件上传工具。")
 
 files = sorted(
     [p for p in REC_DIR.glob("*") if p.suffix.lower() in [".mp4", ".flv"]],
