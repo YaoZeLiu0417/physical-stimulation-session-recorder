@@ -1,5 +1,5 @@
 import os
-import tempfile
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -16,6 +16,17 @@ from questionnaire_ui import questionnaire_state_keys, render_questionnaire
 from record_store import DailyRecordStore
 
 
+FIXTURE_DIR = Path(__file__).resolve().parent
+if str(FIXTURE_DIR) not in sys.path:
+    sys.path.insert(0, str(FIXTURE_DIR))
+
+from questionnaire_fixture_storage import (  # noqa: E402
+    resolve_run_token,
+    resolve_store_root,
+    run_store_root,
+)
+
+
 SCENARIOS = {
     "day1": ("daily", 1),
     "day7": ("daily", 7),
@@ -24,6 +35,10 @@ SCENARIOS = {
 
 
 scenario = st.query_params.get("scenario")
+raw_run_token = st.query_params.get("run")
+run_token = resolve_run_token(raw_run_token)
+if raw_run_token != run_token:
+    st.query_params["run"] = run_token
 if scenario in SCENARIOS:
     selected_visit, selected_day = SCENARIOS[scenario]
     st.session_state["fixture_scenario"] = scenario
@@ -32,21 +47,9 @@ if scenario in SCENARIOS:
 
 visit = st.session_state.setdefault("fixture_visit", "daily")
 intervention_day = st.session_state.setdefault("fixture_day", 7)
-if scenario in SCENARIOS:
-    configured_root = os.environ.get("QUESTIONNAIRE_FIXTURE_STORE")
-    if not configured_root:
-        configured_root = os.environ.get("_QUESTIONNAIRE_FIXTURE_PROCESS_STORE")
-    if not configured_root:
-        configured_root = tempfile.mkdtemp(prefix="questionnaire-browser-qa-")
-        os.environ["_QUESTIONNAIRE_FIXTURE_PROCESS_STORE"] = configured_root
-    base_root = Path(configured_root)
-    store_root = base_root / scenario
-else:
-    if "fixture_store_root" not in st.session_state:
-        st.session_state["fixture_store_root"] = tempfile.mkdtemp(
-            prefix="questionnaire-fixture-"
-        )
-    store_root = Path(st.session_state["fixture_store_root"])
+base_root = resolve_store_root(os.environ.get("QUESTIONNAIRE_FIXTURE_STORE"))
+scenario_name = scenario if scenario in SCENARIOS else "default"
+store_root = run_store_root(base_root, run_token, scenario_name)
 
 record_store = DailyRecordStore(store_root)
 record = record_store.get_or_create(
@@ -86,6 +89,9 @@ else:
 
 st.session_state.setdefault("fixture_save_calls", 0)
 st.session_state["fixture_record"] = record
+st.session_state["fixture_sensitive_sentinel"] = os.environ.get(
+    "QUESTIONNAIRE_FIXTURE_SENTINEL", ""
+)
 state_keys = questionnaire_state_keys(state_namespace, visit)
 
 

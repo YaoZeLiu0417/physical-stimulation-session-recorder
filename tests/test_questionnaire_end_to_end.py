@@ -1,4 +1,6 @@
 import json
+import importlib
+import os
 import re
 from datetime import date
 from pathlib import Path
@@ -55,6 +57,65 @@ def _value_for_question(question) -> object:
 
 def _complete_answers(questions) -> dict[str, object]:
     return {question.id: _value_for_question(question) for question in questions}
+
+
+def _unique_element(elements, *, key, label):
+    matches = [
+        element
+        for element in elements
+        if element.key == key and element.label == label
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _answer_and_continue(app, question, namespace, visit, value):
+    keys = questionnaire_state_keys(namespace, visit)
+    controls = app.radio if question.kind == "boolean" else app.slider
+    _unique_element(
+        controls, key=keys.widget(question.id), label=question.prompt
+    ).set_value(value).run()
+    matches = [button for button in app.button if button.key == keys.next_button]
+    assert len(matches) == 1
+    return matches[0].click().run()
+
+
+def _visible_text(app) -> str:
+    values = []
+    collection_names = (
+        "title",
+        "header",
+        "subheader",
+        "caption",
+        "markdown",
+        "text",
+        "info",
+        "warning",
+        "error",
+        "success",
+        "button",
+        "radio",
+        "slider",
+        "number_input",
+        "text_area",
+        "multiselect",
+        "selectbox",
+    )
+    for collection_name in collection_names:
+        for element in getattr(app, collection_name):
+            for attribute in ("value", "label", "help", "placeholder"):
+                value = getattr(element, attribute, None)
+                if value is not None:
+                    values.append(str(value))
+    return "\n".join(values)
+
+
+def _query_value(app, key):
+    value = app.query_params[key]
+    if isinstance(value, list):
+        assert len(value) == 1
+        return value[0]
+    return value
 
 
 def _recording_metadata(record_id: str) -> dict[str, str]:
@@ -472,17 +533,36 @@ def test_browser_fixture_hard_refresh_recovers_two_answers_and_step_from_store(
     first_session.query_params["scenario"] = "day1"
     first_session.run()
 
-    first_session.radio[0].set_value(False).run()
-    first_session.button[-1].click().run()
-    first_session.radio[0].set_value(False).run()
-    first_session.button[-1].click().run()
+    run_token = _query_value(first_session, "run")
+    _answer_and_continue(
+        first_session,
+        DAILY_CORE[0],
+        first_session.session_state["fixture_namespace"],
+        "daily",
+        False,
+    )
+    _answer_and_continue(
+        first_session,
+        DAILY_CORE[1],
+        first_session.session_state["fixture_namespace"],
+        "daily",
+        False,
+    )
     original_id = first_session.session_state["fixture_record"]["record_id"]
     original_namespace = first_session.session_state["fixture_namespace"]
 
-    assert len(list((store_root / "day1").glob("*_state.json"))) == 1
+    isolated_session = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    isolated_session.query_params["scenario"] = "day1"
+    isolated_session.run()
+    assert _query_value(isolated_session, "run") != run_token
+    assert isolated_session.session_state["fixture_record"]["record_id"] != original_id
+    assert questionnaire_answers(
+        isolated_session.session_state["fixture_record"], "daily"
+    ) == {}
 
     refreshed_session = AppTest.from_file(str(FIXTURE), default_timeout=10)
     refreshed_session.query_params["scenario"] = "day1"
+    refreshed_session.query_params["run"] = run_token
     refreshed_session.run()
 
     refreshed_record = refreshed_session.session_state["fixture_record"]
@@ -512,12 +592,19 @@ def test_browser_fixture_scenario_switches_use_isolated_records_and_ui_state(
     app = AppTest.from_file(str(FIXTURE), default_timeout=10)
     app.query_params["scenario"] = "day1"
     app.run()
-    app.radio[0].set_value(False).run()
-    app.button[-1].click().run()
+    run_token = _query_value(app, "run")
+    _answer_and_continue(
+        app,
+        DAILY_CORE[0],
+        app.session_state["fixture_namespace"],
+        "daily",
+        False,
+    )
     day1_id = app.session_state["fixture_record"]["record_id"]
 
     app.query_params["scenario"] = "day7"
     app.run()
+    assert _query_value(app, "run") == run_token
     day7_record = app.session_state["fixture_record"]
     day7_keys = questionnaire_state_keys(
         app.session_state["fixture_namespace"], "daily"
@@ -528,13 +615,18 @@ def test_browser_fixture_scenario_switches_use_isolated_records_and_ui_state(
 
     app.query_params["scenario"] = "V5"
     app.run()
-    first_formal_id = formal_flow("V5", {})[0].id
-    app.slider[0].set_value(2).run()
-    app.button[-1].click().run()
+    first_formal = formal_flow("V5", {})[0]
+    _answer_and_continue(
+        app,
+        first_formal,
+        app.session_state["fixture_namespace"],
+        "V5",
+        2,
+    )
     v5_id = app.session_state["fixture_record"]["record_id"]
     assert app.session_state["fixture_record"]["formal_visits"]["V5"][
         "raw_answers"
-    ] == {first_formal_id: 2}
+    ] == {first_formal.id: 2}
 
     app.query_params["scenario"] = "day1"
     app.run()
@@ -549,3 +641,104 @@ def test_browser_fixture_scenario_switches_use_isolated_records_and_ui_state(
     }
     assert "V5" not in day1_record["formal_visits"]
     assert app.session_state[day1_keys.step] == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_token", ["../escape", "abc/def", "A" * 16, "0" * 15]
+)
+def test_browser_fixture_replaces_invalid_run_token_with_safe_value(
+    tmp_path, monkeypatch, invalid_token
+):
+    store_root = tmp_path / "browser-fixture-store"
+    monkeypatch.setenv("QUESTIONNAIRE_FIXTURE_STORE", str(store_root))
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.query_params["scenario"] = "day1"
+    app.query_params["run"] = invalid_token
+    app.run()
+
+    safe_token = _query_value(app, "run")
+    assert safe_token != invalid_token
+    assert re.fullmatch(r"[0-9a-f]{16}", safe_token)
+    assert (store_root / safe_token / "day1").is_dir()
+
+
+def test_browser_fixture_visible_tree_omits_sensitive_operational_text(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "browser-fixture-store"
+    sentinel = "RAW-UPLOAD-RESPONSE-SENTINEL-7F31"
+    monkeypatch.setenv("QUESTIONNAIRE_FIXTURE_STORE", str(store_root))
+    monkeypatch.setenv("QUESTIONNAIRE_FIXTURE_SENTINEL", sentinel)
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.query_params["scenario"] = "day7"
+    app.run()
+
+    assert app.session_state["fixture_sensitive_sentinel"] == sentinel
+    visible = _visible_text(app)
+    forbidden = (
+        "score",
+        "分数",
+        "risk",
+        "风险等级",
+        "远端",
+        str(store_root.resolve()),
+        sentinel,
+        "原始上传响应",
+        "历史上传",
+        "运维信息",
+    )
+    assert all(value.casefold() not in visible.casefold() for value in forbidden)
+
+
+def test_browser_fixture_does_not_publish_internal_store_in_environment(monkeypatch):
+    monkeypatch.delenv("QUESTIONNAIRE_FIXTURE_STORE", raising=False)
+    monkeypatch.delenv("_QUESTIONNAIRE_FIXTURE_PROCESS_STORE", raising=False)
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.query_params["scenario"] = "day1"
+    app.run()
+
+    assert "_QUESTIONNAIRE_FIXTURE_PROCESS_STORE" not in os.environ
+
+
+def test_fixture_storage_registers_internal_cleanup_but_not_explicit_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.syspath_prepend(str(FIXTURE.parent))
+    storage = importlib.import_module("questionnaire_fixture_storage")
+    internal = tmp_path / "internal"
+    internal.mkdir()
+    (internal / "state.json").write_text("{}", encoding="utf-8")
+    registrations = []
+
+    storage.register_process_cleanup(
+        internal, register=lambda *args, **kwargs: registrations.append((args, kwargs))
+    )
+
+    assert len(registrations) == 1
+    args, kwargs = registrations[0]
+    cleanup, registered_root = args
+    assert registered_root == internal
+    assert kwargs == {"ignore_errors": True}
+    cleanup(registered_root, **kwargs)
+    assert not internal.exists()
+
+    automatic = tmp_path / "automatic"
+    automatic.mkdir()
+    automatic_registrations = []
+    monkeypatch.setattr(storage, "_internal_root", None)
+    monkeypatch.setattr(
+        storage.tempfile, "mkdtemp", lambda **kwargs: str(automatic)
+    )
+    monkeypatch.setattr(
+        storage,
+        "register_process_cleanup",
+        lambda root: automatic_registrations.append(root),
+    )
+    assert storage.resolve_store_root(None) == automatic
+    assert automatic_registrations == [automatic]
+
+    explicit = tmp_path / "caller-owned"
+    explicit.mkdir()
+    assert storage.resolve_store_root(str(explicit)) == explicit
+    assert automatic_registrations == [automatic]
+    assert explicit.is_dir()

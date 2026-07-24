@@ -9,13 +9,16 @@
 
 ## 配置
 
-以下值应放在部署平台的 Secrets 或环境变量中，不要提交到仓库：
+顶层配置 `LINK_SIGNING_KEY`、`SAFETY_CONTACT`、`TRUSTED_INTERVENTION_DAYS`、`APP_PASSWORD_SHA256` 可放在 Streamlit Secrets 或同名环境变量中，不要提交到仓库：
 
 - `LINK_SIGNING_KEY`：签名链接的共享密钥。生成链接和应用验签必须使用同一个值。
 - `SAFETY_CONTACT`：安全支持提示中展示给被试的研究团队联系方式；未配置时应用使用通用联系提示。
 - `TRUSTED_INTERVENTION_DAYS`：签名被试的服务端受试者编号到干预日映射。Secrets 可使用映射，环境变量可使用等价 JSON 字符串，例如 `{"sub-001": 7, "sub-002": "28"}`。顶层必须是对象，当前受试者编号必须存在；值可为整数或整数字符串，解析后必须在 `1..28`，布尔值、缺失值、非整数和范围外值均拒绝。研究团队负责在每日访问前更新该映射，应用不会根据链接参数或日期自行推进干预日。
 - `APP_PASSWORD_SHA256`：管理员口令的 SHA-256 十六进制摘要；配置后用于管理员登录，不应填写明文口令。未配置时应用允许无口令的内部/本地管理员入口，因此生产部署必须设置。
-- `[baidu]`：`app_key`、`secret_key` 为应用启动所需凭据；`refresh_token` 为上传前换取访问令牌所需；`save_dir` 为远端根目录，缺省为 `/apps/collector`；`redirect_uri` 缺省为 `http://localhost:8501/oauth/callback`，部署时必须与百度应用登记值一致。应用实际读取的字段如下：
+
+百度配置的来源与上述四项顶层配置不同：
+
+- `[baidu]`：只从 Streamlit Secrets 的 `[baidu]` 表或本地未提交的 `config.toml` 读取；普通环境变量不会进入应用的百度 `CFG`。`app_key`、`secret_key` 为应用启动所需凭据；`refresh_token` 为上传前换取访问令牌所需；`save_dir` 为远端根目录，缺省为 `/apps/collector`；`redirect_uri` 缺省为 `http://localhost:8501/oauth/callback`，部署时必须与百度应用登记值一致。应用实际读取的字段如下：
 
 ```toml
 [baidu]
