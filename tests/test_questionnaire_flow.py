@@ -501,6 +501,100 @@ def test_saved_answers_restore_widget_but_only_initial_ids_count_as_answered():
     assert [error.value for error in app.error] == ["请先确认当前答案。"]
 
 
+def test_initial_answered_ids_require_a_scoped_value_before_branch_activation():
+    controller_id = "nssi_thought_present_24h"
+    hidden_id = "nssi_thought_frequency_24h"
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = {controller_id: False}
+    app.session_state["fixture_initial_answered"] = [controller_id, hidden_id]
+    app = app.run()
+    keys = _fixture_keys()
+
+    assert app.radio[0].value is False
+    assert controller_id in set(app.session_state[keys.answered])
+    assert hidden_id not in set(app.session_state[keys.answered])
+
+    app.radio[0].set_value(True).run()
+    app = _button(app, "继续").click().run()
+    assert app.slider[0].label == DAILY_CONDITIONAL[0].prompt
+    assert app.slider[0].value == 0
+    assert hidden_id not in set(app.session_state[keys.answered])
+    app = _button(app, "继续").click().run()
+    assert [error.value for error in app.error] == ["请先确认当前答案。"]
+    assert app.session_state[keys.step] == 1
+
+
+def test_daily_callback_is_active_only_while_hidden_branch_answers_restore():
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 6
+    app = app.run()
+    app.radio[0].set_value(True).run()
+    app = _button(app, "继续").click().run()
+    app.slider[0].set_value(2).run()
+    app = _button(app, "继续").click().run()
+    app.slider[0].set_value(3).run()
+
+    app = _button(app, "←").click().run()
+    app = _button(app, "←").click().run()
+    app.radio[0].set_value(False).run()
+    app = _button(app, "继续").click().run()
+
+    hidden_ids = {
+        "nssi_thought_frequency_24h",
+        "nssi_thought_intensity_24h",
+    }
+    saved_answers = dict(app.session_state["fixture_answers"])
+    saved_answered = set(app.session_state["fixture_answered"])
+    assert hidden_ids.isdisjoint(saved_answers)
+    assert hidden_ids.isdisjoint(saved_answered)
+    assert hidden_ids.isdisjoint(app.session_state["fixture_rendered_answers"])
+    statuses = build_field_status(saved_answers, saved_answered, 6)
+    assert {statuses[field_id] for field_id in hidden_ids} == {"not_applicable"}
+
+    app = _button(app, "←").click().run()
+    app.radio[0].set_value(True).run()
+    app = _button(app, "继续").click().run()
+    assert app.slider[0].label == DAILY_CONDITIONAL[0].prompt
+    assert app.slider[0].value == 2
+    app = _button(app, "继续").click().run()
+    assert not app.error
+    assert app.slider[0].label == DAILY_CONDITIONAL[1].prompt
+    assert app.slider[0].value == 3
+
+
+def test_formal_callback_excludes_inactive_conditional_values_and_answered_ids():
+    controller_id = "nssi_ideation_6m_present"
+    hidden_ids = {
+        "nssi_ideation_6m_frequency",
+        "nssi_ideation_6m_intensity",
+    }
+    answers = {
+        controller_id: False,
+        "nssi_ideation_6m_frequency": 4,
+        "nssi_ideation_6m_intensity": 3,
+    }
+    flow = formal_flow("V1", answers)
+    controller_step = next(
+        index for index, question in enumerate(flow) if question.id == controller_id
+    )
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_visit"] = "V1"
+    app.session_state["fixture_answers"] = answers
+    app.session_state["fixture_initial_answered"] = [controller_id, *hidden_ids]
+    app.session_state["fixture_initial_step"] = controller_step
+    app = app.run()
+    app = _button(app, "继续").click().run()
+
+    saved_answers = dict(app.session_state["fixture_answers"])
+    saved_answered = set(app.session_state["fixture_answered"])
+    assert hidden_ids.isdisjoint(saved_answers)
+    assert hidden_ids.isdisjoint(saved_answered)
+    assert hidden_ids.isdisjoint(app.session_state["fixture_rendered_answers"])
+    statuses = build_formal_field_status("V1", saved_answers, saved_answered)
+    assert {statuses[field_id] for field_id in hidden_ids} == {"not_applicable"}
+
+
 def test_pending_errors_are_scoped_to_record_namespace():
     keys_a = _fixture_keys(namespace="record-A")
     app = AppTest.from_file(str(FIXTURE), default_timeout=10)

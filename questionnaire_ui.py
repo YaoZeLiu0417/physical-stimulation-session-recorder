@@ -560,25 +560,39 @@ def render_questionnaire(
         else f"{subject_id}:{intervention_day}"
     )
     state_keys = questionnaire_state_keys(namespace, visit)
+    if state_keys.values not in st.session_state:
+        st.session_state[state_keys.values] = dict(answers)
     if state_keys.answered not in st.session_state:
+        value_ids = set(st.session_state[state_keys.values])
         st.session_state[state_keys.answered] = sorted(
             {
                 field_id
                 for field_id in (initial_answered_field_ids or ())
-                if isinstance(field_id, str)
+                if isinstance(field_id, str) and field_id in value_ids
             }
         )
-    if state_keys.values not in st.session_state:
-        st.session_state[state_keys.values] = dict(answers)
     if state_keys.step not in st.session_state:
         st.session_state[state_keys.step] = initial_step
 
-    answered = _answered_field_ids(state_keys)
+    answered = _answered_field_ids(state_keys) & set(
+        st.session_state[state_keys.values]
+    )
+    st.session_state[state_keys.answered] = sorted(answered)
     _restore_scoped_values(answers, state_keys)
     flow = (
         build_flow(answers, intervention_day)
         if visit == "daily"
         else formal_flow(visit, answers)
+    )
+    active_ids = {question.id for question in flow}
+    scoped_values = st.session_state[state_keys.values]
+    answers.clear()
+    answers.update(
+        {
+            field_id: value
+            for field_id, value in scoped_values.items()
+            if field_id in active_ids
+        }
     )
     try:
         requested_step = int(st.session_state.get(state_keys.step, 0))
@@ -601,11 +615,11 @@ def render_questionnaire(
 
     question = flow[step]
     widget_key = state_keys.widget(question.id)
-    scoped_values = st.session_state.get(state_keys.values, {})
     if widget_key not in st.session_state and question.id in scoped_values:
         st.session_state[widget_key] = scoped_values[question.id]
     value = render_question(question, state_keys)
     answered = _answered_field_ids(state_keys)
+    active_answered = answered & active_ids
     if question.id in answered:
         answers[question.id] = value
 
@@ -619,7 +633,7 @@ def render_questionnaire(
         if not _save_draft_at_step(
             save_draft,
             answers,
-            answered,
+            active_answered,
             state_keys,
             previous_step=step,
             target_step=step - 1,
@@ -634,7 +648,8 @@ def render_questionnaire(
         key=state_keys.next_button,
     ):
         answered = _answered_field_ids(state_keys)
-        if question.required and question.id not in answered:
+        active_answered = answered & active_ids
+        if question.required and question.id not in active_answered:
             st.error("请先确认当前答案。")
             return answers, False
 
@@ -642,7 +657,7 @@ def render_questionnaire(
             if not _save_draft_at_step(
                 save_draft,
                 answers,
-                answered,
+                active_answered,
                 state_keys,
                 previous_step=step,
                 target_step=step + 1,
@@ -653,22 +668,22 @@ def render_questionnaire(
         if not _save_draft_at_step(
             save_draft,
             answers,
-            answered,
+            active_answered,
             state_keys,
             previous_step=step,
             target_step=step,
         ):
             return answers, False
         errors = (
-            validate_submission(answers, answered, intervention_day)
+            validate_submission(answers, active_answered, intervention_day)
             if visit == "daily"
-            else validate_formal_submission(visit, answers, answered)
+            else validate_formal_submission(visit, answers, active_answered)
         )
         if errors:
             missing_indices = [
                 index
                 for index, item in enumerate(flow)
-                if item.required and item.id not in answered
+                if item.required and item.id not in active_answered
             ]
             target_step = missing_indices[0] if missing_indices else None
             if target_step is None and BEHAVIOR_COUNT_ERROR in errors:
@@ -684,7 +699,7 @@ def render_questionnaire(
                 if not _save_draft_at_step(
                     save_draft,
                     answers,
-                    answered,
+                    active_answered,
                     state_keys,
                     previous_step=step,
                     target_step=target_step,
