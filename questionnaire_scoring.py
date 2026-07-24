@@ -24,12 +24,31 @@ COUNT_FIELDS = (
 )
 
 
+def _validate_integer_scale(
+    values: Sequence[Any], scale_name: str, minimum: int, maximum: int
+) -> tuple[int | None, ...]:
+    validated = []
+    for value in values:
+        if value is None:
+            validated.append(None)
+        elif isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{scale_name} values must be integers or None")
+        elif not minimum <= value <= maximum:
+            raise ValueError(
+                f"{scale_name} values must be between {minimum} and {maximum}"
+            )
+        else:
+            validated.append(value)
+    return tuple(validated)
+
+
 def score_sicq(values: Sequence[int | None]) -> ScoreResult:
     if len(values) != 7:
         raise ValueError("SICQ requires exactly 7 items")
 
-    scored_items = tuple(values[:6]) + (
-        None if values[6] is None else 4 - values[6],
+    validated = _validate_integer_scale(values, "SICQ", 0, 4)
+    scored_items = validated[:6] + (
+        None if validated[6] is None else 4 - validated[6],
     )
     complete = all(value is not None for value in scored_items)
     return ScoreResult(
@@ -40,8 +59,27 @@ def score_sicq(values: Sequence[int | None]) -> ScoreResult:
 
 
 def daily_derived_metrics(answers: Mapping[str, Any]) -> dict[str, Any]:
-    present = answers.get("nssi_behavior_present_24h") is True
-    total = sum((answers.get(field) or 0) for field in COUNT_FIELDS) if present else 0
+    present = answers.get("nssi_behavior_present_24h")
+    if present is not None and not isinstance(present, bool):
+        raise TypeError("nssi_behavior_present_24h must be a boolean or None")
+
+    if present is True:
+        counts = []
+        for field in COUNT_FIELDS:
+            value = answers.get(field)
+            if value is None:
+                counts.append(None)
+            elif isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{field} must be a nonnegative integer or None")
+            elif value < 0:
+                raise ValueError(f"{field} must be a nonnegative integer or None")
+            else:
+                counts.append(value)
+        total = sum(counts) if all(value is not None for value in counts) else None
+    elif present is False:
+        total = 0
+    else:
+        total = None
     return {
         "nssi_any_24h": present,
         "nssi_total_count_24h": total,
@@ -67,10 +105,15 @@ def score_formal_instrument(
     instrument_id: str, answers: Mapping[str, Any]
 ) -> dict[str, Any]:
     if instrument_id in {"dshi_lifetime", "dshi_12m"}:
-        return _sum_result(_required_values(answers, instrument_id, 6))
+        values = _validate_integer_scale(
+            _required_values(answers, instrument_id, 6), "DSHI", 1, 5
+        )
+        return _sum_result(values)
 
     if instrument_id == "fasm":
-        values = _required_values(answers, "fasm", 15)
+        values = _validate_integer_scale(
+            _required_values(answers, "fasm", 15), "FASM", 0, 3
+        )
         if not all(value is not None for value in values):
             return {
                 "total": None,
@@ -96,7 +139,9 @@ def score_formal_instrument(
         }
 
     if instrument_id == "readiness":
-        importance, ready, confidence = _required_values(answers, "readiness", 3)
+        importance, ready, confidence = _validate_integer_scale(
+            _required_values(answers, "readiness", 3), "readiness", 1, 10
+        )
         return {
             "importance": importance,
             "ready": ready,
@@ -105,13 +150,16 @@ def score_formal_instrument(
         }
 
     if instrument_id == "siss":
-        return _sum_result(_required_values(answers, "siss", 13))
+        values = _validate_integer_scale(
+            _required_values(answers, "siss", 13), "SISS", 1, 5
+        )
+        return _sum_result(values)
 
     if instrument_id == "pss":
-        values = tuple(
-            None if value is None else int(bool(value))
-            for value in _required_values(answers, "pss", 5)
-        )
+        raw_values = _required_values(answers, "pss", 5)
+        if any(value is not None and not isinstance(value, bool) for value in raw_values):
+            raise TypeError("PSS values must be booleans or None")
+        values = tuple(None if value is None else int(value) for value in raw_values)
         return _sum_result(values)
 
     raise KeyError(f"No aggregate scoring rule for {instrument_id}")
