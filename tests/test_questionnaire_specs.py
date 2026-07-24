@@ -1,5 +1,7 @@
 import pytest
 
+import questionnaire_specs
+
 from questionnaire_specs import (
     DAILY_CORE,
     FASM_MOTIVES,
@@ -85,3 +87,56 @@ def test_weekly_instruments_have_expected_item_counts_and_motives():
         "readiness_weekly": 3,
     }
     assert len(FASM_MOTIVES) == 15
+
+
+def test_formal_instruments_have_expected_keys():
+    assert set(questionnaire_specs.FORMAL_INSTRUMENTS) == {
+        "dshi_lifetime",
+        "dshi_12m",
+        "fasm",
+        "nssi_ideation",
+        "nssi_impulse",
+        "nssi_future",
+        "nssi_stop",
+        "sicq",
+        "readiness",
+        "siss",
+        "pss",
+    }
+
+
+def test_formal_visit_mapping_matches_schedule_rules():
+    visits = questionnaire_specs.VISIT_INSTRUMENT_IDS
+
+    assert "fasm" in visits["V1"]
+    assert "fasm" in visits["V3"]
+    assert "fasm" not in visits["V4"]
+    assert visits["V5"] == visits["V4"]
+    assert "fasm" in visits["V6"]
+    assert "dshi_12m" in visits["V5"]
+
+
+def test_formal_instruments_have_expected_question_counts():
+    assert {
+        instrument_id: len(instrument.questions)
+        for instrument_id, instrument in questionnaire_specs.FORMAL_INSTRUMENTS.items()
+    } == {
+        "dshi_lifetime": 6,
+        "dshi_12m": 6,
+        "fasm": 15,
+        "nssi_ideation": 6,
+        "nssi_impulse": 2,
+        "nssi_future": 1,
+        "nssi_stop": 1,
+        "sicq": 7,
+        "readiness": 3,
+        "siss": 13,
+        "pss": 5,
+    }
+
+
+def test_formal_instrument_mapping_keys_match_instrument_ids():
+    assert all(
+        instrument_id == instrument.id
+        for instrument_id, instrument in questionnaire_specs.FORMAL_INSTRUMENTS.items()
+    )

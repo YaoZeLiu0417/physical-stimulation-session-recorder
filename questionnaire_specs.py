@@ -250,6 +250,239 @@ WEEKLY_INSTRUMENTS = (
     ),
 )
 
+
+def _likert(
+    id_: str,
+    prompt: str,
+    minimum: int,
+    maximum: int,
+    show_if: tuple[str, object] | None = None,
+) -> QuestionSpec:
+    return QuestionSpec(
+        id_,
+        prompt,
+        "slider",
+        min_value=minimum,
+        max_value=maximum,
+        show_if=show_if,
+    )
+
+
+def _instrument(
+    id_: str,
+    label: str,
+    time_window: str,
+    questions: tuple[QuestionSpec, ...],
+) -> InstrumentSpec:
+    return InstrumentSpec(id_, label, time_window, questions)
+
+
+def _weekly_questions(instrument_id: str) -> tuple[QuestionSpec, ...]:
+    return next(
+        instrument.questions
+        for instrument in WEEKLY_INSTRUMENTS
+        if instrument.id == instrument_id
+    )
+
+
+DSHI_BEHAVIORS = (
+    "故意用玻璃、小刀等划伤自己的皮肤",
+    "故意用烟头、打火机或其他东西烧伤或烫伤自己的皮肤",
+    "故意猛烈抓挠自己，达到留下伤痕或流血的程度",
+    "故意咬自己以致皮肤破损",
+    "故意用头撞击某物，以致出现瘀伤",
+    "故意捶打自己以致出现瘀伤",
+)
+
+FASM_ITEMS = FASM_MOTIVES
+SICQ_ITEMS = tuple(question.prompt for question in _weekly_questions("sicq_weekly"))
+READINESS_ITEMS = tuple(
+    question.prompt for question in _weekly_questions("readiness_weekly")
+)
+
+SISS_ITEMS = (
+    "因为我曾经自伤，所以我认为我是寻求关注的人。",
+    "因为我曾经自伤，所以我认为我是变化无常的人。",
+    "因为我曾经自伤，所以我认为我是自寻烦恼的人。",
+    "因为我曾经自伤，所以我认为我是疯狂的人。",
+    "因为我曾经自伤，所以我认为我是不值得被爱的人。",
+    "因为我曾经自伤，所以我认为我是软弱的人。",
+    "因为我曾经自伤，所以我是不负责任的人。",
+    "因为我曾经自伤，所以我是不完美的人。",
+    "因为我曾经自伤，所以我是有控制欲的人。",
+    "因为我曾经自伤，所以我是有自杀倾向的人。",
+    "因为我曾经自伤，所以我是不理智的人。",
+    "因为我曾经自伤，所以我是不堪重负的人。",
+    "因为我曾经自伤，所以我是自私的人。",
+)
+
+PSS_ITEMS = (
+    "你有没有觉得生活不值得过？",
+    "你有没有希望自己死掉，例如睡觉时希望自己醒不过来？",
+    "你有没有想过结束自己的生命，即使你真的不打算这样做？",
+    "你是否已经到了真正考虑结束自己的生命或为如何结束生命制定计划的地步？",
+    "你有没有试图结束自己的生命？",
+)
+
+_NSSI_IDEATION_6M_PRESENT = "nssi_ideation_6m_present"
+_NSSI_IDEATION_1M_PRESENT = "nssi_ideation_1m_present"
+
+FORMAL_INSTRUMENTS = {
+    "dshi_lifetime": _instrument(
+        "dshi_lifetime",
+        "故意自伤量表-青少年版（终生）",
+        "从有记忆到目前",
+        tuple(
+            _likert(f"dshi_lifetime_{index}", prompt, 1, 5)
+            for index, prompt in enumerate(DSHI_BEHAVIORS, start=1)
+        ),
+    ),
+    "dshi_12m": _instrument(
+        "dshi_12m",
+        "故意自伤量表-青少年版（过去一年）",
+        "过去一年",
+        tuple(
+            _likert(f"dshi_12m_{index}", prompt, 1, 5)
+            for index, prompt in enumerate(DSHI_BEHAVIORS, start=1)
+        ),
+    ),
+    "fasm": _instrument(
+        "fasm",
+        "中文版自伤功能评估量表",
+        "根据已报告的自伤行为",
+        tuple(
+            _likert(f"fasm_{index}", prompt, 0, 3)
+            for index, prompt in enumerate(FASM_ITEMS, start=1)
+        ),
+    ),
+    "nssi_ideation": _instrument(
+        "nssi_ideation",
+        "自伤意念",
+        "过去六个月及过去一个月",
+        (
+            QuestionSpec(
+                _NSSI_IDEATION_6M_PRESENT,
+                "过去六个月中，是否有过想故意伤害自己但并不想死的想法？",
+                "boolean",
+            ),
+            _likert(
+                "nssi_ideation_6m_frequency",
+                "过去六个月中，自伤想法出现的频率",
+                1,
+                6,
+                (_NSSI_IDEATION_6M_PRESENT, True),
+            ),
+            _likert(
+                "nssi_ideation_6m_intensity",
+                "过去六个月中，自伤想法的强度",
+                1,
+                5,
+                (_NSSI_IDEATION_6M_PRESENT, True),
+            ),
+            QuestionSpec(
+                _NSSI_IDEATION_1M_PRESENT,
+                "过去一个月中，是否有过自伤想法？",
+                "boolean",
+            ),
+            _likert(
+                "nssi_ideation_1m_frequency",
+                "过去一个月中，自伤想法出现的频率",
+                1,
+                6,
+                (_NSSI_IDEATION_1M_PRESENT, True),
+            ),
+            _likert(
+                "nssi_ideation_1m_intensity",
+                "过去一个月中，自伤想法的强度",
+                1,
+                5,
+                (_NSSI_IDEATION_1M_PRESENT, True),
+            ),
+        ),
+    ),
+    "nssi_impulse": _instrument(
+        "nssi_impulse",
+        "自伤冲动",
+        "过去一周",
+        (
+            _likert("nssi_impulse_time", "过去一周里，你多长时间想过伤害自己？", 1, 100),
+            _likert("nssi_impulse_resistance", "过去一周里，抵制伤害自己的冲动有多难？", 1, 7),
+        ),
+    ),
+    "nssi_future": _instrument(
+        "nssi_future",
+        "未来 NSSI 可能性",
+        "当前",
+        (_likert("nssi_future_likelihood", "你认为未来发生 NSSI 的可能性有多大？", 0, 4),),
+    ),
+    "nssi_stop": _instrument(
+        "nssi_stop",
+        "停止未来 NSSI 的愿望",
+        "当前",
+        (_likert("nssi_stop_desire", "你有多想停止 NSSI？", 0, 4),),
+    ),
+    "sicq": _instrument(
+        "sicq",
+        "自伤渴望问卷",
+        "当前",
+        tuple(
+            _likert(f"sicq_{index}", prompt, 0, 4)
+            for index, prompt in enumerate(SICQ_ITEMS, start=1)
+        ),
+    ),
+    "readiness": _instrument(
+        "readiness",
+        "准备改变自伤",
+        "当前",
+        tuple(
+            _likert(f"readiness_{index}", prompt, 1, 10)
+            for index, prompt in enumerate(READINESS_ITEMS, start=1)
+        ),
+    ),
+    "siss": _instrument(
+        "siss",
+        "自伤耻感量表",
+        "当前",
+        tuple(
+            _likert(f"siss_{index}", prompt, 1, 5)
+            for index, prompt in enumerate(SISS_ITEMS, start=1)
+        ),
+    ),
+    "pss": _instrument(
+        "pss",
+        "Paykel 自杀量表",
+        "过去一年",
+        tuple(
+            QuestionSpec(f"pss_{index}", prompt, "boolean")
+            for index, prompt in enumerate(PSS_ITEMS, start=1)
+        ),
+    ),
+}
+
+_FULL_FORMAL = (
+    "dshi_lifetime",
+    "dshi_12m",
+    "fasm",
+    "nssi_ideation",
+    "nssi_impulse",
+    "nssi_future",
+    "nssi_stop",
+    "sicq",
+    "readiness",
+    "siss",
+    "pss",
+)
+_FOLLOW_UP_WITHOUT_FASM = tuple(
+    instrument_id for instrument_id in _FULL_FORMAL if instrument_id != "fasm"
+)
+VISIT_INSTRUMENT_IDS = {
+    "V1": _FULL_FORMAL,
+    "V3": _FULL_FORMAL,
+    "V4": _FOLLOW_UP_WITHOUT_FASM,
+    "V5": _FOLLOW_UP_WITHOUT_FASM,
+    "V6": _FULL_FORMAL,
+}
+
 WEEKLY_DAYS = frozenset({7, 14, 21, 28})
 
 
