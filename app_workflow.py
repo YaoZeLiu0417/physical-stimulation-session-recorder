@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -215,6 +217,85 @@ def trusted_recording_path(candidate: object, recordings_dir: Path) -> Path | No
     )
 
 
+def trusted_recording_files(recordings_dir: Path) -> tuple[Path, ...]:
+    """Return validated recordings ordered by a race-checked captured mtime."""
+
+    try:
+        candidates = tuple(recordings_dir.iterdir())
+    except OSError:
+        return ()
+    ranked: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        try:
+            before = os.lstat(candidate)
+            trusted = trusted_recording_path(candidate, recordings_dir)
+            if trusted is None:
+                continue
+            after = os.lstat(trusted)
+        except OSError:
+            continue
+        inode_is_meaningful = before.st_ino != 0 and after.st_ino != 0
+        same_file = before.st_dev == after.st_dev and before.st_ino == after.st_ino
+        if (
+            (inode_is_meaningful and not same_file)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+        ):
+            continue
+        ranked.append((after.st_mtime, trusted))
+    return tuple(path for _, path in sorted(ranked, key=lambda item: item[0], reverse=True))
+
+
+def _open_trusted_recording(candidate: object, recordings_dir: Path) -> tuple[Path, int]:
+    trusted_path = trusted_recording_path(candidate, recordings_dir)
+    if trusted_path is None:
+        raise UnsafeRecordingPathError("Selected recording is unavailable or unsafe.")
+    file_descriptor: int | None = None
+    try:
+        path_stat = os.lstat(trusted_path)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = os.open(trusted_path, flags)
+        fd_stat = os.fstat(file_descriptor)
+        current_stat = os.lstat(trusted_path)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        inode_is_meaningful = (
+            path_stat.st_ino != 0
+            and fd_stat.st_ino != 0
+            and current_stat.st_ino != 0
+        )
+        same_open_file = (
+            path_stat.st_dev == fd_stat.st_dev
+            and path_stat.st_ino == fd_stat.st_ino
+            and current_stat.st_dev == fd_stat.st_dev
+            and current_stat.st_ino == fd_stat.st_ino
+        )
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or path_stat.st_nlink != 1
+            or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+            or not stat.S_ISREG(fd_stat.st_mode)
+            or fd_stat.st_nlink != 1
+            or getattr(fd_stat, "st_file_attributes", 0) & reparse_flag
+            or not stat.S_ISREG(current_stat.st_mode)
+            or stat.S_ISLNK(current_stat.st_mode)
+            or current_stat.st_nlink != 1
+            or getattr(current_stat, "st_file_attributes", 0) & reparse_flag
+            or (inode_is_meaningful and not same_open_file)
+        ):
+            raise OSError("recording changed during secure open")
+        opened_descriptor = file_descriptor
+        file_descriptor = None
+        return trusted_path, opened_descriptor
+    except OSError as exc:
+        raise UnsafeRecordingPathError(
+            "Selected recording is unavailable or unsafe."
+        ) from exc
+    finally:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+
+
 def upload_trusted_recording(
     candidate: object,
     *,
@@ -225,10 +306,30 @@ def upload_trusted_recording(
 ) -> Any:
     """Revalidate a historical recording immediately before invoking upload."""
 
-    trusted_path = trusted_recording_path(candidate, recordings_dir)
-    if trusted_path is None:
-        raise UnsafeRecordingPathError("Selected recording is unavailable or unsafe.")
-    return upload_fn(trusted_path, remote_path, progress_cb=progress_cb)
+    trusted_path, source_descriptor = _open_trusted_recording(
+        candidate, recordings_dir
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="recording-upload-") as temporary_dir:
+            snapshot = Path(temporary_dir) / f"recording.snapshot{trusted_path.suffix.lower()}"
+            snapshot_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            snapshot_descriptor = os.open(snapshot, snapshot_flags, 0o600)
+            try:
+                with os.fdopen(source_descriptor, "rb") as source:
+                    source_descriptor = -1
+                    with os.fdopen(snapshot_descriptor, "wb") as target:
+                        snapshot_descriptor = -1
+                        shutil.copyfileobj(source, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+            finally:
+                if snapshot_descriptor >= 0:
+                    os.close(snapshot_descriptor)
+            os.chmod(snapshot, 0o600)
+            return upload_fn(snapshot, remote_path, progress_cb=progress_cb)
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
 
 
 def resolve_completed_recording(

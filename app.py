@@ -54,7 +54,7 @@ from app_workflow import (
     resolve_trusted_intervention_day,
     set_local_cleanup_intent,
     support_needed,
-    trusted_recording_path,
+    trusted_recording_files,
     upload_ready_for_visit,
     upload_trusted_recording,
     uploaded_cleanup_recovery,
@@ -883,15 +883,7 @@ st.subheader("④ 从 recordings 目录选择历史文件上传")
 with st.expander("使用 & 运维提示"):
     st.caption("管理员可使用历史文件上传工具。")
 
-files = sorted(
-    [
-        trusted
-        for path in REC_DIR.glob("*")
-        if (trusted := trusted_recording_path(path, REC_DIR)) is not None
-    ],
-    key=lambda path: os.lstat(path).st_mtime,
-    reverse=True,
-)
+files = list(trusted_recording_files(REC_DIR))
 if not files:
     st.caption("recordings/ 目录尚无 .mp4/.flv 文件。完成一次录制后这里会列出文件。")
 else:
@@ -956,9 +948,14 @@ else:
                 except Exception:
                     pass
 
-        except Exception as e:
+        except Exception as error:
+            LOGGER.warning(
+                "historical upload failed filename=%s exception_type=%s",
+                picked.name,
+                type(error).__name__,
+            )
             prog2.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
+            st.error("Historical upload could not be completed. Please retry.")
 
 # =========================
 # 页脚提示

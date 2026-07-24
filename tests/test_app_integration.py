@@ -2,6 +2,7 @@ import ast
 import importlib
 import json
 import os
+import stat
 import time
 from datetime import date
 from pathlib import Path
@@ -1198,6 +1199,125 @@ def test_historical_upload_rejects_symlink_before_callback_when_supported(tmp_pa
     assert str(candidate) not in str(captured.value)
 
 
+def test_historical_upload_uses_private_snapshot_when_source_is_swapped(tmp_path):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    candidate = recordings_dir / "history.mp4"
+    candidate.write_bytes(b"ORIGINAL-VIDEO")
+    outside = tmp_path / "outside-secret.mp4"
+    outside.write_bytes(b"SECRET-OUTSIDE")
+    observed = {}
+
+    def swap_then_read(snapshot, remote_path, *, progress_cb):
+        candidate.unlink()
+        os.link(outside, candidate)
+        observed["path"] = snapshot
+        observed["bytes"] = snapshot.read_bytes()
+        observed["mode"] = stat.S_IMODE(os.lstat(snapshot).st_mode)
+        return {"ok": True}
+
+    result = workflow.upload_trusted_recording(
+        candidate,
+        recordings_dir=recordings_dir,
+        remote_path="/remote/history.mp4",
+        upload_fn=swap_then_read,
+    )
+
+    assert result == {"ok": True}
+    assert observed["path"] != candidate
+    assert observed["path"].parent != recordings_dir
+    assert observed["bytes"] == b"ORIGINAL-VIDEO"
+    assert observed["mode"] & 0o600 == 0o600
+    assert not observed["path"].exists()
+    assert candidate.read_bytes() == b"SECRET-OUTSIDE"
+
+
+def test_trusted_recording_files_skips_races_and_unsafe_entries(tmp_path, monkeypatch):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    older = recordings_dir / "older.mp4"
+    newer = recordings_dir / "newer.flv"
+    vanishing = recordings_dir / "vanishing.mp4"
+    outside = tmp_path / "outside.mp4"
+    older.write_bytes(b"older")
+    newer.write_bytes(b"newer")
+    vanishing.write_bytes(b"vanishing")
+    outside.write_bytes(b"outside")
+    os.link(outside, recordings_dir / "hardlink.mp4")
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+    original_validator = workflow.trusted_recording_path
+
+    def remove_after_validation(candidate, root):
+        result = original_validator(candidate, root)
+        if candidate == vanishing and result is not None:
+            candidate.unlink()
+        return result
+
+    monkeypatch.setattr(workflow, "trusted_recording_path", remove_after_validation)
+    files = workflow.trusted_recording_files(recordings_dir)
+
+    assert files == (newer, older)
+
+
+def test_app_uses_race_safe_history_enumeration_and_redacted_failure_copy():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    called_names = {
+        call.func.id
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    assert "trusted_recording_files" in called_names
+
+    upload_try = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(call.func, ast.Name)
+            and call.func.id == "upload_trusted_recording"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    )
+    error_calls = [
+        call
+        for handler in upload_try.handlers
+        for call in ast.walk(handler)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "error"
+    ]
+    assert error_calls
+    assert all(
+        call.args and isinstance(call.args[0], ast.Constant)
+        for call in error_calls
+    )
+    log_calls = [
+        call
+        for handler in upload_try.handlers
+        for call in ast.walk(handler)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "LOGGER"
+        and call.func.attr == "warning"
+    ]
+    assert log_calls
+    assert any(
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "picked"
+        and node.attr == "name"
+        for call in log_calls
+        for node in ast.walk(call)
+    )
+
+
 def test_app_filters_and_revalidates_historical_recordings_with_shared_validator():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
     called_names = {
@@ -1205,7 +1325,7 @@ def test_app_filters_and_revalidates_historical_recordings_with_shared_validator
         for call in ast.walk(tree)
         if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
     }
-    assert "trusted_recording_path" in called_names
+    assert "trusted_recording_files" in called_names
     assert "upload_trusted_recording" in called_names
 
 
