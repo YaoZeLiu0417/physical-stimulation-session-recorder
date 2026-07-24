@@ -205,6 +205,34 @@ def test_consistent_markerless_revision_one_backfills_before_identity_loss(tmp_p
         )
 
 
+def test_markerless_newer_identity_persists_generation_before_archiving_old_state(
+    tmp_path,
+):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    revised = store.revise(first)
+    generation_path = store._generation_path("sub-001", date(2026, 7, 24))
+    identity_path = store._identity_path("sub-001", date(2026, 7, 24))
+    generation_path.unlink()
+    store.path_for(revised).unlink()
+
+    with pytest.raises(RecordArchivedError):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    assert generation["highest_revision"] == 2
+    assert generation["record_id"] == revised["record_id"]
+
+    identity_path.unlink()
+    with pytest.raises(RecordArchivedError):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+    assert store.path_for(first).is_file()
+
+
 def test_generation_marker_blocks_same_day_recreation_when_all_states_are_lost(
     tmp_path,
 ):
