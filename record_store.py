@@ -646,6 +646,29 @@ class DailyRecordStore:
             if latest is not None:
                 latest_updated = self._parse_timestamp(latest["updated_at_iso"])
                 generation_updated = self._parse_timestamp(generation["record_updated_at_iso"])
+                if latest["revision"] == generation["highest_revision"]:
+                    if generation_updated > latest_updated:
+                        raise RecordArchivedError(generation)
+                    if generation_updated == latest_updated:
+                        try:
+                            latest_summary = self._index_from_record(latest)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise RecordCorruptionError(
+                                "generation marker conflicts with state summary"
+                            ) from exc
+                        summary_keys = (
+                            "subject_id", "record_date", "record_id",
+                            "intervention_day", "latest_revision",
+                            "record_updated_at_iso", "completion_status",
+                            "completed_visits", "upload", "lifecycle",
+                        )
+                        if any(
+                            latest_summary[key] != generation[key]
+                            for key in summary_keys
+                        ):
+                            raise RecordCorruptionError(
+                                "generation marker conflicts with state summary"
+                            )
                 if (
                     latest["revision"] > generation["highest_revision"]
                     or latest_updated > generation_updated

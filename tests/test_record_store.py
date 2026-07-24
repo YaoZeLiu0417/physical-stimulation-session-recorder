@@ -99,6 +99,61 @@ def test_generation_marker_blocks_old_revision_resurrection_when_latest_is_lost(
     assert store.path_for(first).is_file()
 
 
+def test_generation_marker_blocks_older_same_revision_state_downgrade(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    state_path = store.path_for(record)
+    earlier_draft = state_path.read_text(encoding="utf-8")
+    record["completion"] = {
+        "status": "complete",
+        "answered_field_ids": {"daily": ["suicide_thought_present_24h"]},
+        "current_step": {"daily": 4},
+        "questionnaire_visits": {"daily": {"status": "complete", "revision": 1}},
+    }
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    store.save(record)
+
+    state_path.write_text(earlier_draft, encoding="utf-8")
+    identity_path = store._identity_path("sub-001", date(2026, 7, 24))
+    identity_path.unlink()
+
+    with pytest.raises((RecordArchivedError, RecordCorruptionError)):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+    assert not identity_path.exists()
+
+
+def test_generation_marker_rejects_same_timestamp_lifecycle_summary_conflict(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["completion"] = {
+        "status": "complete",
+        "answered_field_ids": {"daily": ["suicide_thought_present_24h"]},
+        "current_step": {"daily": 4},
+        "questionnaire_visits": {"daily": {"status": "complete", "revision": 1}},
+    }
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    state_path = store.save(record)
+    downgraded = json.loads(state_path.read_text(encoding="utf-8"))
+    downgraded["completion"] = {
+        "status": "draft",
+        "answered_field_ids": {},
+        "current_step": {},
+        "questionnaire_visits": {},
+    }
+    downgraded["upload"] = {"json": "pending", "video": "pending"}
+    state_path.write_text(json.dumps(downgraded), encoding="utf-8")
+    identity_path = store._identity_path("sub-001", date(2026, 7, 24))
+    identity_path.unlink()
+
+    with pytest.raises(RecordCorruptionError):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+    assert not identity_path.exists()
+
+
 def test_generation_marker_blocks_same_day_recreation_when_all_states_are_lost(
     tmp_path,
 ):
@@ -339,6 +394,7 @@ def test_legacy_naive_v4_timestamp_loads_and_migrates_on_save(tmp_path):
     payload["updated_at_iso"] = "2026-07-24T10:00:00"
     path.write_text(json.dumps(payload), encoding="utf-8")
     store._identity_path("sub-001", date(2026, 7, 24)).unlink()
+    store._generation_path("sub-001", date(2026, 7, 24)).unlink()
 
     resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
     store.save(resumed)
