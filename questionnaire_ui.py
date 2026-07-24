@@ -332,13 +332,39 @@ def build_formal_field_status(
     return _field_status(questions, active_ids, answered_field_ids)
 
 
+def question_context_label(question: QuestionSpec, visit: str) -> str:
+    """Return the protocol time context for the currently visible question."""
+
+    if visit == "daily":
+        if question.id.endswith("_24h"):
+            return "过去 24 小时"
+        if question.id.endswith("_now"):
+            return "此时此刻"
+        instruments = WEEKLY_INSTRUMENTS
+    else:
+        instruments = tuple(
+            FORMAL_INSTRUMENTS[instrument_id]
+            for instrument_id in VISIT_INSTRUMENT_IDS[visit]
+        )
+
+    for instrument in instruments:
+        if any(item.id == question.id for item in instrument.questions):
+            return f"{instrument.label} · {instrument.time_window}"
+    raise KeyError(f"No questionnaire context for {visit}:{question.id}")
+
+
 def inject_alto_theme(
-    subject_id: str, intervention_day: int, current: int, total: int
+    subject_id: str,
+    intervention_day: int,
+    context_label: str,
+    current: int,
+    total: int,
 ) -> None:
     """Render the static theme and escaped participant context header."""
 
     safe_subject = html.escape(str(subject_id), quote=True)
     safe_day = html.escape(str(intervention_day), quote=True)
+    safe_context = html.escape(str(context_label), quote=True)
     safe_current = html.escape(str(current), quote=True)
     safe_total = html.escape(str(total), quote=True)
     st.markdown(ALTO_CSS, unsafe_allow_html=True)
@@ -350,7 +376,7 @@ def inject_alto_theme(
         '<div class="alto-progress" aria-hidden="true">'
         "<span></span><span></span><span></span><span></span>"
         "</div>"
-        f'<div class="alto-kicker">过去 24 小时 · {safe_current} / {safe_total}</div>',
+        f'<div class="alto-kicker">{safe_context} · {safe_current} / {safe_total}</div>',
         unsafe_allow_html=True,
     )
 
@@ -471,6 +497,7 @@ def render_questionnaire(
     inject_alto_theme(
         subject_id,
         intervention_day,
+        question_context_label(flow[step], visit) if flow else "当前",
         step + 1 if flow else 0,
         len(flow),
     )

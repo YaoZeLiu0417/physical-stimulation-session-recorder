@@ -166,7 +166,7 @@ WEEKLY_INSTRUMENTS = (
                 min_value=0,
                 max_value=4,
                 low_label="完全不会",
-                high_label="极其可能",
+                high_label="极其",
             ),
         ),
     ),
@@ -181,8 +181,8 @@ WEEKLY_INSTRUMENTS = (
                 "slider",
                 min_value=0,
                 max_value=4,
-                low_label="根本不想停止",
-                high_label="绝对想停止",
+                low_label="我根本不想停止",
+                high_label="我绝对想停止",
             ),
         ),
     ),
@@ -257,6 +257,9 @@ def _likert(
     minimum: int,
     maximum: int,
     show_if: tuple[str, object] | None = None,
+    *,
+    low_label: str = "",
+    high_label: str = "",
 ) -> QuestionSpec:
     return QuestionSpec(
         id_,
@@ -264,6 +267,8 @@ def _likert(
         "slider",
         min_value=minimum,
         max_value=maximum,
+        low_label=low_label,
+        high_label=high_label,
         show_if=show_if,
     )
 
@@ -282,6 +287,29 @@ def _weekly_questions(instrument_id: str) -> tuple[QuestionSpec, ...]:
         instrument.questions
         for instrument in WEEKLY_INSTRUMENTS
         if instrument.id == instrument_id
+    )
+
+
+def _weekly_question(question_id: str) -> QuestionSpec:
+    return next(
+        question
+        for instrument in WEEKLY_INSTRUMENTS
+        for question in instrument.questions
+        if question.id == question_id
+    )
+
+
+def _likert_like_weekly(
+    id_: str, prompt: str, source_id: str | None = None
+) -> QuestionSpec:
+    source = _weekly_question(source_id or id_)
+    return _likert(
+        id_,
+        prompt,
+        source.min_value,
+        source.max_value,
+        low_label=source.low_label,
+        high_label=source.high_label,
     )
 
 
@@ -333,7 +361,14 @@ FORMAL_INSTRUMENTS = {
         "故意自伤量表-青少年版（终生）",
         "从有记忆到目前",
         tuple(
-            _likert(f"dshi_lifetime_{index}", prompt, 1, 5)
+            _likert(
+                f"dshi_lifetime_{index}",
+                prompt,
+                1,
+                5,
+                low_label="我从未这样做过",
+                high_label="做过超过10次",
+            )
             for index, prompt in enumerate(DSHI_BEHAVIORS, start=1)
         ),
     ),
@@ -342,7 +377,14 @@ FORMAL_INSTRUMENTS = {
         "故意自伤量表-青少年版（过去一年）",
         "过去一年",
         tuple(
-            _likert(f"dshi_12m_{index}", prompt, 1, 5)
+            _likert(
+                f"dshi_12m_{index}",
+                prompt,
+                1,
+                5,
+                low_label="我从未这样做过",
+                high_label="做过超过10次",
+            )
             for index, prompt in enumerate(DSHI_BEHAVIORS, start=1)
         ),
     ),
@@ -351,7 +393,14 @@ FORMAL_INSTRUMENTS = {
         "中文版自伤功能评估量表",
         "根据已报告的自伤行为",
         tuple(
-            _likert(f"fasm_{index}", prompt, 0, 3)
+            _likert(
+                f"fasm_{index}",
+                prompt,
+                0,
+                3,
+                low_label="从不",
+                high_label="经常",
+            )
             for index, prompt in enumerate(FASM_ITEMS, start=1)
         ),
     ),
@@ -371,6 +420,8 @@ FORMAL_INSTRUMENTS = {
                 1,
                 6,
                 (_NSSI_IDEATION_6M_PRESENT, True),
+                low_label="1月1次",
+                high_label="几乎每天",
             ),
             _likert(
                 "nssi_ideation_6m_intensity",
@@ -378,6 +429,8 @@ FORMAL_INSTRUMENTS = {
                 1,
                 5,
                 (_NSSI_IDEATION_6M_PRESENT, True),
+                low_label="很弱",
+                high_label="很强",
             ),
             QuestionSpec(
                 _NSSI_IDEATION_1M_PRESENT,
@@ -390,6 +443,8 @@ FORMAL_INSTRUMENTS = {
                 1,
                 6,
                 (_NSSI_IDEATION_1M_PRESENT, True),
+                low_label="只有1次/很少",
+                high_label="很多",
             ),
             _likert(
                 "nssi_ideation_1m_intensity",
@@ -397,6 +452,8 @@ FORMAL_INSTRUMENTS = {
                 1,
                 5,
                 (_NSSI_IDEATION_1M_PRESENT, True),
+                low_label="很弱",
+                high_label="很强",
             ),
         ),
     ),
@@ -405,28 +462,36 @@ FORMAL_INSTRUMENTS = {
         "自伤冲动",
         "过去一周",
         (
-            _likert("nssi_impulse_time", "过去一周里，你多长时间想过伤害自己？", 1, 100),
-            _likert("nssi_impulse_resistance", "过去一周里，抵制伤害自己有多难？", 1, 7),
+            _likert_like_weekly(
+                "nssi_impulse_time", "过去一周里，你多长时间想过伤害自己？"
+            ),
+            _likert_like_weekly(
+                "nssi_impulse_resistance", "过去一周里，抵制伤害自己有多难？"
+            ),
         ),
     ),
     "nssi_future": _instrument(
         "nssi_future",
         "未来 NSSI 可能性",
         "当前",
-        (_likert("nssi_future_likelihood", "你认为未来发生 NSSI 的可能性有多大？", 0, 4),),
+        (
+            _likert_like_weekly(
+                "nssi_future_likelihood", "你认为未来发生 NSSI 的可能性有多大？"
+            ),
+        ),
     ),
     "nssi_stop": _instrument(
         "nssi_stop",
         "停止未来 NSSI 的愿望",
         "当前",
-        (_likert("nssi_stop_desire", "你有多想停止 NSSI？", 0, 4),),
+        (_likert_like_weekly("nssi_stop_desire", "你有多想停止 NSSI？"),),
     ),
     "sicq": _instrument(
         "sicq",
         "自伤渴望问卷",
         "当前",
         tuple(
-            _likert(f"sicq_{index}", prompt, 0, 4)
+            _likert_like_weekly(f"sicq_{index}", prompt)
             for index, prompt in enumerate(SICQ_ITEMS, start=1)
         ),
     ),
@@ -435,8 +500,19 @@ FORMAL_INSTRUMENTS = {
         "准备改变自伤",
         "当前",
         tuple(
-            _likert(f"readiness_{index}", prompt, 1, 10)
-            for index, prompt in enumerate(READINESS_ITEMS, start=1)
+            _likert_like_weekly(f"readiness_{index}", prompt, source_id)
+            for index, (prompt, source_id) in enumerate(
+                zip(
+                    READINESS_ITEMS,
+                    (
+                        "readiness_importance",
+                        "readiness_ready",
+                        "readiness_confidence",
+                    ),
+                    strict=True,
+                ),
+                start=1,
+            )
         ),
     ),
     "siss": _instrument(
@@ -444,7 +520,14 @@ FORMAL_INSTRUMENTS = {
         "自伤耻感量表",
         "当前",
         tuple(
-            _likert(f"siss_{index}", prompt, 1, 5)
+            _likert(
+                f"siss_{index}",
+                prompt,
+                1,
+                5,
+                low_label="非常不同意",
+                high_label="非常同意",
+            )
             for index, prompt in enumerate(SISS_ITEMS, start=1)
         ),
     ),

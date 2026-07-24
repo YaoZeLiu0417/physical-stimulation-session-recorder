@@ -19,6 +19,7 @@ from questionnaire_ui import (
     build_flow,
     formal_flow,
     inject_alto_theme,
+    question_context_label,
     render_question,
     validate_formal_submission,
     validate_submission,
@@ -199,12 +200,35 @@ def test_unsafe_header_values_are_html_escaped(monkeypatch):
         rendered.append((body, kwargs))
 
     monkeypatch.setattr("questionnaire_ui.st.markdown", capture)
-    inject_alto_theme('<script id="subject">bad()</script>', 7, 1, 5)
+    inject_alto_theme(
+        '<script id="subject">bad()</script>',
+        7,
+        '<img src=x onerror="bad()">',
+        1,
+        5,
+    )
 
     body = "".join(item[0] for item in rendered)
     assert '<script id="subject">' not in body
+    assert "<img src=x" not in body
     assert "&lt;script id=&quot;subject&quot;&gt;" in body
+    assert "&lt;img src=x onerror=&quot;bad()&quot;&gt;" in body
     assert all(item[1].get("unsafe_allow_html") for item in rendered)
+
+
+def test_question_context_uses_current_question_time_window():
+    assert question_context_label(DAILY_CORE[0], "daily") == "过去 24 小时"
+    assert question_context_label(DAILY_CORE[3], "daily") == "此时此刻"
+
+    weekly = WEEKLY_INSTRUMENTS[0]
+    assert question_context_label(weekly.questions[0], "daily") == (
+        f"{weekly.label} · {weekly.time_window}"
+    )
+
+    formal = FORMAL_INSTRUMENTS["dshi_lifetime"]
+    assert question_context_label(formal.questions[0], "V1") == (
+        f"{formal.label} · {formal.time_window}"
+    )
 
 
 def test_slider_endpoint_labels_are_html_escaped(monkeypatch):
@@ -238,6 +262,36 @@ def test_participant_fixture_hides_score_and_risk_labels():
     visible = str(app)
     assert "总分" not in visible
     assert "高风险" not in visible
+
+
+def test_daily_now_and_weekly_steps_render_accurate_context_titles():
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_day"] = 7
+    app.session_state["fixture_answers"] = _negative_daily_answers()
+    app.session_state["question_step_daily"] = 3
+    app = app.run()
+    markup = "\n".join(item.value for item in app.markdown)
+    assert "此时此刻 · 4 /" in markup
+    assert "过去 24 小时 · 4 /" not in markup
+
+    app.session_state["question_step_daily"] = 5
+    app = app.run()
+    weekly = WEEKLY_INSTRUMENTS[0]
+    markup = "\n".join(item.value for item in app.markdown)
+    assert f"{weekly.label} · {weekly.time_window} · 6 /" in markup
+
+
+def test_formal_first_item_renders_instrument_context_and_crf_endpoints():
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_visit"] = "V1"
+    app = app.run()
+    markup = "\n".join(item.value for item in app.markdown)
+    formal = FORMAL_INSTRUMENTS["dshi_lifetime"]
+
+    assert f"{formal.label} · {formal.time_window} · 1 /" in markup
+    assert "过去 24 小时" not in markup
+    assert "1 我从未这样做过" in markup
+    assert "5 做过超过10次" in markup
 
 
 def test_required_boolean_must_be_actively_answered_before_continuing():

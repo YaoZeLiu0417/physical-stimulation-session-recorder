@@ -5,6 +5,8 @@ from questionnaire_ui import render_questionnaire
 
 answers = st.session_state.setdefault("fixture_answers", {})
 st.session_state.setdefault("fixture_save_calls", 0)
+visit = st.session_state.setdefault("fixture_visit", "daily")
+intervention_day = st.session_state.setdefault("fixture_day", 7)
 
 
 def save_draft(updated, answered):
@@ -15,8 +17,9 @@ def save_draft(updated, answered):
 
 _, completed = render_questionnaire(
     subject_id="sub-001",
-    intervention_day=7,
+    intervention_day=intervention_day,
     answers=answers,
     save_draft=save_draft,
+    visit=visit,
 )
 st.session_state["fixture_completed"] = completed

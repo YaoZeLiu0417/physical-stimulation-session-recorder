@@ -195,3 +195,90 @@ def test_formal_question_ids_are_exact_ordered_and_unique():
         for question in instrument.questions
     )
     assert len(ids) == len(set(ids))
+
+
+def test_all_formal_sliders_have_semantic_endpoint_labels():
+    sliders = [
+        question
+        for instrument in questionnaire_specs.FORMAL_INSTRUMENTS.values()
+        for question in instrument.questions
+        if question.kind == "slider"
+    ]
+
+    assert len(sliders) == 58
+    assert all(question.low_label and question.high_label for question in sliders)
+
+
+def test_formal_slider_endpoint_labels_match_crf_scales():
+    questions = {
+        question.id: question
+        for instrument in questionnaire_specs.FORMAL_INSTRUMENTS.values()
+        for question in instrument.questions
+    }
+    expected_families = {
+        "dshi_lifetime": ("我从未这样做过", "做过超过10次"),
+        "dshi_12m": ("我从未这样做过", "做过超过10次"),
+        "fasm": ("从不", "经常"),
+        "sicq": ("非常不同意", "非常同意"),
+        "readiness": ("完全不符合", "完全符合"),
+        "siss": ("非常不同意", "非常同意"),
+    }
+    family_counts = {
+        "dshi_lifetime": 6,
+        "dshi_12m": 6,
+        "fasm": 15,
+        "sicq": 7,
+        "readiness": 3,
+        "siss": 13,
+    }
+    for prefix, endpoints in expected_families.items():
+        for index in range(1, family_counts[prefix] + 1):
+            question = questions[f"{prefix}_{index}"]
+            assert (question.low_label, question.high_label) == endpoints
+
+    exact = {
+        "nssi_ideation_6m_frequency": ("1月1次", "几乎每天"),
+        "nssi_ideation_1m_frequency": ("只有1次/很少", "很多"),
+        "nssi_ideation_6m_intensity": ("很弱", "很强"),
+        "nssi_ideation_1m_intensity": ("很弱", "很强"),
+        "nssi_impulse_time": ("从不", "几乎所有时间"),
+        "nssi_impulse_resistance": ("完全不难", "无法抵制"),
+        "nssi_future_likelihood": ("完全不会", "极其"),
+        "nssi_stop_desire": ("我根本不想停止", "我绝对想停止"),
+    }
+    for question_id, endpoints in exact.items():
+        question = questions[question_id]
+        assert (question.low_label, question.high_label) == endpoints
+
+
+def test_formal_scales_reuse_matching_weekly_endpoints():
+    weekly = {
+        question.id: question
+        for instrument in questionnaire_specs.WEEKLY_INSTRUMENTS
+        for question in instrument.questions
+    }
+    formal = {
+        question.id: question
+        for instrument in questionnaire_specs.FORMAL_INSTRUMENTS.values()
+        for question in instrument.questions
+    }
+    for question_id in (
+        "nssi_impulse_time",
+        "nssi_impulse_resistance",
+        "nssi_future_likelihood",
+        "nssi_stop_desire",
+        *(f"sicq_{index}" for index in range(1, 8)),
+    ):
+        assert (formal[question_id].low_label, formal[question_id].high_label) == (
+            weekly[question_id].low_label,
+            weekly[question_id].high_label,
+        )
+
+    for index, weekly_id in enumerate(
+        ("readiness_importance", "readiness_ready", "readiness_confidence"),
+        start=1,
+    ):
+        assert (
+            formal[f"readiness_{index}"].low_label,
+            formal[f"readiness_{index}"].high_label,
+        ) == (weekly[weekly_id].low_label, weekly[weekly_id].high_label)
