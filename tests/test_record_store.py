@@ -58,6 +58,39 @@ def test_get_or_create_uses_one_record_per_subject_and_calendar_date(tmp_path):
     assert next_day["record_id"] != first["record_id"]
 
 
+def test_identity_index_prevents_a_new_record_after_archived_state_cleanup(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    store.path_for(record).unlink()
+
+    with pytest.raises(RecordConflictError, match=re.escape(record["record_id"])):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_identity_index_is_repaired_from_a_valid_state_file(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    identity_path = store._identity_path("sub-001", date(2026, 7, 24))
+    identity_path.unlink()
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    assert resumed["record_id"] == record["record_id"]
+    assert identity_path.is_file()
+
+
+def test_identity_index_rejects_a_state_file_for_a_different_record_id(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    conflicting = deepcopy(record)
+    conflicting["record_id"] = "sub-001_20260724_deadbeef"
+    conflicting_path = store.path_for(conflicting)
+    conflicting_path.write_text(json.dumps(conflicting), encoding="utf-8")
+
+    with pytest.raises(RecordCorruptionError, match="身份"):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
 def test_initial_record_has_exact_structural_contract(tmp_path):
     record = DailyRecordStore(tmp_path).get_or_create(
         "sub-001", date(2026, 7, 24), intervention_day=7
@@ -110,6 +143,7 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "status": "draft",
         "answered_field_ids": {},
         "current_step": {},
+        "questionnaire_visits": {},
     }
     assert record["upload"] == {"json": "pending", "video": "pending"}
     for timestamp in (record["created_at_iso"], record["updated_at_iso"]):
@@ -117,6 +151,7 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         parsed = datetime.fromisoformat(timestamp)
         assert timestamp == parsed.isoformat(timespec="seconds")
         assert parsed.microsecond == 0
+        assert parsed.tzinfo is not None
 
 
 def test_save_resume_and_revise_preserve_history_and_reset_draft_state(tmp_path):
@@ -148,6 +183,7 @@ def test_save_resume_and_revise_preserve_history_and_reset_draft_state(tmp_path)
         "status": "draft",
         "answered_field_ids": {},
         "current_step": {},
+        "questionnaire_visits": {},
     }
     assert revised["upload"] == {"json": "pending", "video": "uploaded"}
     assert store.path_for(revised).is_file()

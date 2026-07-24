@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -82,6 +84,16 @@ def daily_context_values(record: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+def recording_context(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only stable daily context fields when persisting a recorder gate."""
+
+    return {
+        field_id: values[field_id]
+        for field_id in DAILY_CONTEXT_DEFAULTS
+        if field_id in values
+    }
+
+
 def daily_context_state_keys(record: Mapping[str, Any]) -> dict[str, str]:
     return {
         field_id: f"daily_context::{record['record_id']}:r{record['revision']}::{field_id}"
@@ -103,7 +115,7 @@ def _parse_recording_times(
         ended = datetime.fromisoformat(ended_at_iso)
     except (TypeError, ValueError):
         return None
-    if (started.tzinfo is None) != (ended.tzinfo is None):
+    if started.tzinfo is None or ended.tzinfo is None:
         return None
     try:
         valid_order = started < ended
@@ -123,7 +135,30 @@ def _safe_recording_path(
     if candidate.name not in allowed_names:
         return None
     try:
-        if candidate.parent.resolve() != recordings_dir.resolve() or not candidate.is_file():
+        root_stat = os.lstat(recordings_dir)
+        path_stat = os.lstat(candidate)
+        target_stat = os.stat(candidate)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        root_reparse = getattr(root_stat, "st_file_attributes", 0) & reparse_flag
+        path_reparse = getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+        same_inode = (
+            path_stat.st_dev == target_stat.st_dev
+            and path_stat.st_ino == target_stat.st_ino
+        )
+        inode_is_meaningful = path_stat.st_ino != 0 and target_stat.st_ino != 0
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or stat.S_ISLNK(root_stat.st_mode)
+            or root_reparse
+            or candidate.parent.resolve() != recordings_dir.resolve()
+            or candidate.resolve().parent != recordings_dir.resolve()
+            or not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or path_reparse
+            or path_stat.st_nlink != 1
+            or target_stat.st_nlink != 1
+            or (inode_is_meaningful and not same_inode)
+        ):
             return None
     except OSError:
         return None
@@ -139,6 +174,7 @@ def resolve_completed_recording(
     *,
     recordings_dir: Path,
     persisted_recording: Mapping[str, Any] | None,
+    suppress_persisted_resume: bool = False,
 ) -> CompletedRecording | None:
     """Return only a current completed recording or a safe persisted resume file."""
 
@@ -147,7 +183,11 @@ def resolve_completed_recording(
     if completion_marker == record_id and path is not None and times is not None:
         return CompletedRecording(path, *times, path.suffix.lstrip(".").lower())
 
-    if completion_marker is not None or not isinstance(persisted_recording, Mapping):
+    if (
+        completion_marker is not None
+        or suppress_persisted_resume
+        or not isinstance(persisted_recording, Mapping)
+    ):
         return None
     filename = persisted_recording.get("video_filename")
     if not isinstance(filename, str) or Path(filename).name != filename:
@@ -219,6 +259,35 @@ def _store_completion(
     completion.setdefault("current_step", {})[visit] = int(current_step)
 
 
+def questionnaire_visit_complete(record: Mapping[str, Any], visit: str) -> bool:
+    completion = record.get("completion", {})
+    if not isinstance(completion, Mapping):
+        return False
+    visits = completion.get("questionnaire_visits", {})
+    if not isinstance(visits, Mapping):
+        return False
+    status = visits.get(visit)
+    return (
+        isinstance(status, Mapping)
+        and status.get("status") == "complete"
+        and status.get("revision") == record.get("revision")
+    )
+
+
+def mark_questionnaire_visit_complete(record: dict[str, Any], visit: str) -> None:
+    completion = record.setdefault("completion", {})
+    completion.setdefault("questionnaire_visits", {})[visit] = {
+        "status": "complete",
+        "revision": record["revision"],
+    }
+
+
+def upload_ready_for_visit(record: Mapping[str, Any], visit: str) -> bool:
+    """Return whether this record/revision has a completed questionnaire visit."""
+
+    return questionnaire_visit_complete(record, visit)
+
+
 def persist_daily_questionnaire(
     record: dict[str, Any],
     answers: Mapping[str, Any],
@@ -263,26 +332,34 @@ def persist_daily_questionnaire(
     if weekly_due(day):
         sicq_values = tuple(filtered.get(f"sicq_{index}") for index in range(1, 8))
         sicq = score_sicq(sicq_values)
-        record["derived_metrics"]["weekly_sicq"] = {
+        record["derived_metrics"]["sicq_weekly"] = {
             "total": sicq.total,
             "complete": sicq.complete,
             "scored_items": list(sicq.scored_items),
         }
     else:
-        record["derived_metrics"].pop("weekly_sicq", None)
+        record["derived_metrics"].pop("sicq_weekly", None)
+    record["derived_metrics"].pop("weekly_sicq", None)
 
-    daily_safety = {}
-    if "suicide_thought_present_24h" in filtered:
-        daily_safety["suicide_thought_present_24h"] = filtered[
-            "suicide_thought_present_24h"
-        ]
-    if "nssi_medical_care_24h" in filtered:
-        daily_safety["nssi_medical_care_24h"] = filtered["nssi_medical_care_24h"]
     safety_signals = record.setdefault("safety_signals", {})
-    if daily_safety:
-        safety_signals["daily"] = daily_safety
-    else:
-        safety_signals.pop("daily", None)
+    daily_safety_keys = {
+        "nssi_thought_present_24h",
+        "nssi_thought_frequency_24h",
+        "nssi_behavior_present_24h",
+        "nssi_medical_care_24h",
+        "suicide_thought_present_24h",
+        "suicide_thought_frequency_24h",
+    }
+    safety_signals.pop("daily", None)
+    for field_id in daily_safety_keys:
+        safety_signals.pop(field_id, None)
+    safety_signals.update(
+        {
+            field_id: filtered[field_id]
+            for field_id in daily_safety_keys
+            if field_id in filtered
+        }
+    )
 
     _store_completion(record, "daily", filtered, current_step)
     return filtered
@@ -330,7 +407,7 @@ def persist_formal_questionnaire(
             score = {"complete": complete}
         instruments[instrument_id] = {
             "instrument_id": instrument_id,
-            "version": version,
+            "instrument_version": version,
             "time_window": spec.time_window,
             "raw_answers": instrument_answers,
             "scored_answers": _formal_scored_answers(
@@ -357,10 +434,12 @@ def persist_formal_questionnaire(
         if field_id.startswith("pss_")
     ]
     safety_signals = record.setdefault("safety_signals", {})
+    safety_signals.pop(visit, None)
+    formal_safety_key = f"{visit}_pss_positive"
     if pss_values:
-        safety_signals[visit] = {"pss_positive": any(value is True for value in pss_values)}
+        safety_signals[formal_safety_key] = any(value is True for value in pss_values)
     else:
-        safety_signals.pop(visit, None)
+        safety_signals.pop(formal_safety_key, None)
 
     _store_completion(record, visit, filtered, current_step)
     return filtered

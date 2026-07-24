@@ -1,6 +1,7 @@
 import ast
 import importlib
 import json
+import os
 from datetime import date
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def _record(day=6):
             "status": "draft",
             "answered_field_ids": {},
             "current_step": {},
+            "questionnaire_visits": {},
         },
         "upload": {"json": "pending", "video": "pending"},
     }
@@ -236,6 +238,32 @@ def test_app_uses_revision_scoped_questionnaire_state_and_callback_step():
     assert "initial_step=step_by_visit.get(visit, 0)" in source
 
 
+def test_app_controller_uses_canonical_record_date_and_completion_boundaries():
+    source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "date.fromisoformat(record[\"record_date\"]).strftime(\"%Y%m%d\")" in source
+    assert "upload_ready_for_visit(record, visit)" in source
+    assert "mark_questionnaire_visit_complete(record, visit)" in source
+    assert "suppress_persisted_resume=" in source
+    assert (
+        "RecordConflictError" in source
+        and "RecordCorruptionError" in source
+        and "RecordLockError" in source
+    )
+    assert "logging.exception(\"record upload failed\")" in source
+
+
+def test_admin_confirmation_is_scoped_to_subject_and_record_date():
+    source = APP_PATH.read_text(encoding="utf-8")
+    assert 'admin_intervention_day_confirmed::{safe_subject_id}::{record_date.isoformat()}' in source
+
+
+def test_app_generated_iso_timestamps_are_offset_aware():
+    source = APP_PATH.read_text(encoding="utf-8")
+    assert "datetime.now().isoformat" not in source
+    assert "datetime.now(timezone.utc).isoformat" in source
+
+
 def test_app_has_no_legacy_global_questionnaire_restoration():
     source = APP_PATH.read_text(encoding="utf-8")
     assert "questionnaire_restored_" not in source
@@ -281,9 +309,10 @@ def test_daily_persistence_keeps_only_active_answered_and_removes_stale_safety()
         "suicide_thought_frequency_24h": 4,
         "nssi_medical_care_24h": True,
     }
-    record["safety_signals"]["daily"] = {
+    record["safety_signals"] = {
         "suicide_thought_present_24h": True,
         "nssi_medical_care_24h": True,
+        "V1_pss_positive": True,
     }
     answers = {
         "nssi_thought_present_24h": False,
@@ -311,8 +340,11 @@ def test_daily_persistence_keeps_only_active_answered_and_removes_stale_safety()
     assert record["conditional_details"] == {}
     assert record["weekly_extension"] == {}
     assert record["derived_metrics"]["daily"]["nssi_total_count_24h"] == 0
-    assert record["safety_signals"]["daily"] == {
-        "suicide_thought_present_24h": False
+    assert record["safety_signals"] == {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+        "suicide_thought_present_24h": False,
+        "V1_pss_positive": True,
     }
     assert record["completion"]["answered_field_ids"]["daily"] == sorted(filtered)
     assert record["completion"]["current_step"]["daily"] == 4
@@ -336,7 +368,7 @@ def test_daily_weekly_sicq_scores_only_current_active_answered_values():
     workflow.persist_daily_questionnaire(record, answers, answered, current_step=1)
 
     assert record["weekly_extension"] == weekly
-    assert record["derived_metrics"]["weekly_sicq"] == {
+    assert record["derived_metrics"]["sicq_weekly"] == {
         "total": 4,
         "complete": True,
         "scored_items": [0, 0, 0, 0, 0, 0, 4],
@@ -346,7 +378,7 @@ def test_daily_weekly_sicq_scores_only_current_active_answered_values():
 def test_formal_persistence_filters_branches_and_unanswered_pss_signal():
     workflow = _workflow()
     record = _record()
-    record["safety_signals"]["V1"] = {"pss_positive": True}
+    record["safety_signals"]["V1_pss_positive"] = True
     answers = {
         "nssi_ideation_6m_present": False,
         "nssi_ideation_6m_frequency": 6,
@@ -372,7 +404,7 @@ def test_formal_persistence_filters_branches_and_unanswered_pss_signal():
         "nssi_ideation_6m_present": False
     }
     assert visit["instruments"]["pss"]["raw_answers"] == {"pss_1": False}
-    assert record["safety_signals"]["V1"] == {"pss_positive": False}
+    assert record["safety_signals"]["V1_pss_positive"] is False
     assert record["field_status"]["V1"]["nssi_ideation_6m_frequency"] == "not_applicable"
     assert record["field_status"]["V1"]["pss_2"] == "missing"
     assert record["completion"]["answered_field_ids"]["V1"] == sorted(filtered)
@@ -389,7 +421,8 @@ def test_formal_instrument_payload_has_protocol_metadata_and_defined_score():
 
     payload = record["formal_visits"]["V1"]["instruments"]["dshi_lifetime"]
     assert payload["instrument_id"] == "dshi_lifetime"
-    assert payload["version"] == "1.0"
+    assert payload["instrument_version"] == "1.0"
+    assert "version" not in payload
     assert payload["time_window"] == FORMAL_INSTRUMENTS["dshi_lifetime"].time_window
     assert payload["raw_answers"] == answers
     assert payload["scored_answers"] == answers
@@ -412,6 +445,29 @@ def test_questionnaire_answers_restore_only_the_current_visit_sections():
     }
     assert workflow.questionnaire_answers(record, "V3") == {"pss_1": True}
     assert workflow.questionnaire_answers(record, "V1") == {}
+
+
+def test_questionnaire_completion_is_scoped_to_the_current_visit_and_revision():
+    workflow = _workflow()
+    record = _record()
+
+    workflow.mark_questionnaire_visit_complete(record, "daily")
+
+    assert workflow.questionnaire_visit_complete(record, "daily") is True
+    assert workflow.questionnaire_visit_complete(record, "V1") is False
+    record["revision"] += 1
+    assert workflow.questionnaire_visit_complete(record, "daily") is False
+
+
+def test_upload_readiness_survives_retry_but_not_an_incomplete_sibling_visit():
+    workflow = _workflow()
+    record = _record()
+
+    workflow.mark_questionnaire_visit_complete(record, "daily")
+
+    assert workflow.upload_ready_for_visit(record, "daily") is True
+    assert workflow.upload_ready_for_visit(record, "V1") is False
+    assert workflow.upload_ready_for_visit(record, "daily") is True
 
 
 def test_support_signal_uses_only_current_active_answered_values():
@@ -615,6 +671,18 @@ def test_daily_context_defaults_only_fill_missing_persisted_values():
     assert values["tags"] == []
 
 
+def test_recording_context_projection_excludes_transient_state_payload_fields():
+    workflow = _workflow()
+    payload = {
+        **workflow.DAILY_CONTEXT_DEFAULTS,
+        "timestamp_client_open_iso": "2026-07-24T10:00:00+00:00",
+        "schema_version": 3,
+        "subject_id": "sub-001",
+    }
+
+    assert workflow.recording_context(payload) == workflow.DAILY_CONTEXT_DEFAULTS
+
+
 def test_recording_eligibility_requires_current_marker_safe_file_and_ordered_times(tmp_path):
     workflow = _workflow()
     record_id = "sub-001_20260724_deadbeef"
@@ -625,19 +693,19 @@ def test_recording_eligibility_requires_current_marker_safe_file_and_ordered_tim
         record_id,
         record_id,
         video,
-        "2026-07-24T10:00:00",
-        "2026-07-24T10:01:00",
+        "2026-07-24T10:00:00+00:00",
+        "2026-07-24T10:01:00+00:00",
         recordings_dir=tmp_path,
         persisted_recording=None,
     )
     assert accepted is not None and accepted.path == video
 
     for marker, path, started, ended in (
-        (None, video, "2026-07-24T10:00:00", "2026-07-24T10:01:00"),
-        (record_id, tmp_path / f"{record_id}.mp4", "2026-07-24T10:00:00", "2026-07-24T10:01:00"),
-        (record_id, video, "", "2026-07-24T10:01:00"),
-        (record_id, video, "not-an-iso-date", "2026-07-24T10:01:00"),
-        (record_id, video, "2026-07-24T10:02:00", "2026-07-24T10:01:00"),
+        (None, video, "2026-07-24T10:00:00+00:00", "2026-07-24T10:01:00+00:00"),
+        (record_id, tmp_path / f"{record_id}.mp4", "2026-07-24T10:00:00+00:00", "2026-07-24T10:01:00+00:00"),
+        (record_id, video, "", "2026-07-24T10:01:00+00:00"),
+        (record_id, video, "not-an-iso-date", "2026-07-24T10:01:00+00:00"),
+        (record_id, video, "2026-07-24T10:02:00+00:00", "2026-07-24T10:01:00+00:00"),
     ):
         assert workflow.resolve_completed_recording(
             record_id, marker, path, started, ended,
@@ -657,11 +725,11 @@ def test_recording_timestamps_require_full_consistent_iso_datetimes(tmp_path):
             recordings_dir=tmp_path, persisted_recording=None,
         )
 
-    assert resolve("2026-07-24T10:00:00", "2026-07-24T10:01:00") is not None
     assert resolve(
         "2026-07-24T10:00:00+08:00", "2026-07-24T10:01:00+08:00"
     ) is not None
     for started, ended in (
+        ("2026-07-24T10:00:00", "2026-07-24T10:01:00"),
         ("2026-07-24", "2026-07-25"),
         ("2026-07-24T10:00:00", "2026-07-24T10:01:00+08:00"),
         ("2026-07-24T10:00:00+08:00", "2026-07-24T10:01:00"),
@@ -676,8 +744,8 @@ def test_recording_resume_only_accepts_safe_current_record_basename(tmp_path):
     video.write_bytes(b"video")
     persisted = {
         "video_filename": video.name,
-        "started_at_iso": "2026-07-24T10:00:00",
-        "ended_at_iso": "2026-07-24T10:01:00",
+        "started_at_iso": "2026-07-24T10:00:00+00:00",
+        "ended_at_iso": "2026-07-24T10:01:00+00:00",
         "format": "mp4",
     }
 
@@ -692,6 +760,50 @@ def test_recording_resume_only_accepts_safe_current_record_basename(tmp_path):
         record_id, None, None, None, None,
         recordings_dir=tmp_path, persisted_recording=persisted,
     ) is None
+
+
+def test_recording_path_rejects_symlinks_hardlinks_and_rerecord_resume_suppression(tmp_path):
+    workflow = _workflow()
+    record_id = "sub-001_20260724_deadbeef"
+    video = tmp_path / f"{record_id}.mp4"
+    video.write_bytes(b"video")
+    persisted = {
+        "video_filename": video.name,
+        "started_at_iso": "2026-07-24T10:00:00+00:00",
+        "ended_at_iso": "2026-07-24T10:01:00+00:00",
+        "format": "mp4",
+    }
+
+    assert workflow.resolve_completed_recording(
+        record_id, None, None, None, None,
+        recordings_dir=tmp_path, persisted_recording=persisted,
+        suppress_persisted_resume=True,
+    ) is None
+
+    hardlink = tmp_path / "source.mp4"
+    hardlink.write_bytes(b"video")
+    video.unlink()
+    os.link(hardlink, video)
+    assert workflow.resolve_completed_recording(
+        record_id, None, None, None, None,
+        recordings_dir=tmp_path, persisted_recording=persisted,
+    ) is None
+
+
+def test_remote_directory_uses_a_real_store_record_date_key(tmp_path):
+    from record_store import remote_record_dir
+
+    record = DailyRecordStore(tmp_path).get_or_create(
+        "sub-001", date(2026, 7, 24), intervention_day=7
+    )
+    remote_dir = remote_record_dir(
+        "/apps/collector",
+        record["subject_id"],
+        date.fromisoformat(record["record_date"]).strftime("%Y%m%d"),
+        record["record_id"],
+    )
+
+    assert remote_dir.endswith(f"/sub-001/20260724/{record['record_id']}")
 
 
 def test_app_uses_scoped_context_keys_and_recorder_gate_helpers():
@@ -723,13 +835,20 @@ def test_app_orders_day_confirmation_recorder_gate_and_draft_context_save():
     get_record_index = next(
         index
         for index, node in enumerate(top_level)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "record" for target in node.targets)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-        and isinstance(node.value.func.value, ast.Name)
-        and node.value.func.value.id == "record_store"
-        and node.value.func.attr == "get_or_create"
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(assignment, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "record"
+                for target in assignment.targets
+            )
+            and isinstance(assignment.value, ast.Call)
+            and isinstance(assignment.value.func, ast.Attribute)
+            and isinstance(assignment.value.func.value, ast.Name)
+            and assignment.value.func.value.id == "record_store"
+            and assignment.value.func.attr == "get_or_create"
+            for assignment in ast.walk(node)
+        )
     )
     get_record = top_level[get_record_index]
     confirmation = next(

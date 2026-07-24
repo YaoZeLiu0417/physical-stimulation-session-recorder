@@ -7,7 +7,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -171,6 +171,13 @@ class DailyRecordStore:
         date_key = record_date.strftime("%Y%m%d")
         return sorted(self.root.glob(f"{safe_subject_id}_{date_key}_*_r*_state.json"))
 
+    def _identity_path(self, subject_id: str, record_date: date) -> Path:
+        token = self._day_lock_token(subject_id, record_date)
+        path = self.root / f".{token}_identity.json"
+        if path.parent.resolve() != self._root_resolved:
+            raise ValueError("记录身份索引必须保存在记录根目录中。")
+        return path
+
     @staticmethod
     def _day_lock_token(subject_id: str, record_date: date) -> str:
         safe_subject_id = validate_subject_id(subject_id)
@@ -182,7 +189,7 @@ class DailyRecordStore:
         self, subject_id: str, record_date: date, intervention_day: int
     ) -> dict[str, Any]:
         safe_subject_id = validate_subject_id(subject_id)
-        now = datetime.now().isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return {
             "schema_version": 4,
             "record_id": f"{safe_subject_id}_{record_date:%Y%m%d}_{uuid.uuid4().hex[:8]}",
@@ -207,6 +214,7 @@ class DailyRecordStore:
                 "status": "draft",
                 "answered_field_ids": {},
                 "current_step": {},
+                "questionnaire_visits": {},
             },
             "upload": {"json": "pending", "video": "pending"},
             "created_at_iso": now,
@@ -224,7 +232,11 @@ class DailyRecordStore:
         if not isinstance(timestamp, str) or "T" not in timestamp:
             raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
         parsed = datetime.fromisoformat(timestamp)
-        if parsed.microsecond != 0 or timestamp != parsed.isoformat(timespec="seconds"):
+        if (
+            parsed.tzinfo is None
+            or parsed.microsecond != 0
+            or timestamp != parsed.isoformat(timespec="seconds")
+        ):
             raise ValueError("更新时间必须是秒精度 ISO 日期时间。")
         return parsed
 
@@ -277,6 +289,71 @@ class DailyRecordStore:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise RecordCorruptionError(f"记录文件损坏或无效: {path.name}") from exc
 
+    def _load_identity_unlocked(
+        self, subject_id: str, record_date: date
+    ) -> dict[str, Any] | None:
+        path = self._identity_path(subject_id, record_date)
+        if not path.exists():
+            return None
+        try:
+            path_stat = os.lstat(path)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or stat.S_ISLNK(path_stat.st_mode)
+                or path_stat.st_nlink != 1
+                or path.parent.resolve() != self._root_resolved
+            ):
+                raise ValueError("记录身份索引路径不安全。")
+            with path.open(encoding="utf-8") as handle:
+                identity = json.load(handle)
+            if not isinstance(identity, dict):
+                raise ValueError("记录身份索引必须是对象。")
+            actual_subject = validate_subject_id(identity["subject_id"])
+            actual_date = date.fromisoformat(identity["record_date"])
+            if actual_date.isoformat() != identity["record_date"]:
+                raise ValueError("记录身份索引日期无效。")
+            record_id = validate_record_id(
+                identity["record_id"], actual_subject, actual_date.strftime("%Y%m%d")
+            )
+            if actual_subject != subject_id or actual_date != record_date:
+                raise ValueError("记录身份索引与请求不匹配。")
+            return {
+                "subject_id": actual_subject,
+                "record_date": actual_date.isoformat(),
+                "record_id": record_id,
+            }
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise RecordCorruptionError(f"记录身份索引损坏或无效: {path.name}") from exc
+
+    def _write_identity_unlocked(self, record: Mapping[str, Any]) -> None:
+        subject_id, record_date, record_id, _ = self._identity_from_record(record)
+        path = self._identity_path(subject_id, record_date)
+        identity = {
+            "subject_id": subject_id,
+            "record_date": record_date.isoformat(),
+            "record_id": record_id,
+        }
+        serialized = json.dumps(identity, ensure_ascii=False, indent=2)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _ensure_identity_unlocked(self, record: Mapping[str, Any]) -> None:
+        subject_id, record_date, record_id, _ = self._identity_from_record(record)
+        identity = self._load_identity_unlocked(subject_id, record_date)
+        if identity is None:
+            self._write_identity_unlocked(record)
+            return
+        if identity["record_id"] != record_id:
+            raise RecordCorruptionError("记录身份索引与状态文件冲突。")
+
     def _latest_unlocked(self, subject_id: str, record_date: date) -> dict[str, Any] | None:
         candidates = [
             self._load_candidate(path, subject_id, record_date)
@@ -284,6 +361,9 @@ class DailyRecordStore:
         ]
         if not candidates:
             return None
+        record_ids = {record["record_id"] for record in candidates}
+        if len(record_ids) != 1:
+            raise RecordCorruptionError("同一日期的状态文件包含冲突的记录身份。")
         return max(candidates, key=lambda record: record["revision"])
 
     def get_or_create(
@@ -293,16 +373,25 @@ class DailyRecordStore:
         if not isinstance(record_date, date):
             raise ValueError("记录日期必须是 date 对象。")
         with self._lock(self._day_lock_token(safe_subject_id, record_date)):
+            identity = self._load_identity_unlocked(safe_subject_id, record_date)
             latest = self._latest_unlocked(safe_subject_id, record_date)
             if latest is not None:
+                if identity is not None and identity["record_id"] != latest["record_id"]:
+                    raise RecordCorruptionError("记录身份索引与状态文件冲突。")
+                if identity is None:
+                    self._write_identity_unlocked(latest)
                 return latest
+            if identity is not None:
+                raise RecordConflictError(
+                    f"记录 {identity['record_id']} 的状态文件已归档，无法创建新的当日记录。"
+                )
             record = self._new_record(safe_subject_id, record_date, intervention_day)
             self._write_unlocked(record, previous_updated_at=None, require_absent=True)
             return record
 
     @staticmethod
     def _next_updated_at(previous_updated_at: str | None) -> str:
-        now = datetime.now().replace(microsecond=0)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         if previous_updated_at is not None:
             previous = DailyRecordStore._parse_timestamp(previous_updated_at)
             if now <= previous:
@@ -316,6 +405,7 @@ class DailyRecordStore:
         require_absent: bool,
     ) -> Path:
         target = self.path_for(record)
+        self._ensure_identity_unlocked(record)
         if require_absent and target.exists():
             raise RecordConflictError(f"修订文件已存在: {target.name}")
         payload = deepcopy(record)
@@ -368,6 +458,7 @@ class DailyRecordStore:
                 "status": "draft",
                 "answered_field_ids": {},
                 "current_step": {},
+                "questionnaire_visits": {},
             }
             prior_upload = revised.get("upload", {})
             video_status = prior_upload.get("video", "pending")

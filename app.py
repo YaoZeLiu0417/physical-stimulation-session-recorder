@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import time
 import hmac
 import hashlib
 import random
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 
@@ -44,15 +45,25 @@ from app_workflow import (
     ensure_record_intervention_day,
     persist_daily_questionnaire,
     persist_formal_questionnaire,
+    mark_questionnaire_visit_complete,
     questionnaire_answers,
+    recording_context,
     resolve_completed_recording,
     resolve_trusted_intervention_day,
     support_needed,
+    upload_ready_for_visit,
     upload_failure_message,
 )
 from questionnaire_specs import VISIT_INSTRUMENT_IDS
 from questionnaire_ui import questionnaire_state_keys, render_questionnaire
-from record_store import DailyRecordStore, remote_record_dir, validate_subject_id
+from record_store import (
+    DailyRecordStore,
+    RecordConflictError,
+    RecordCorruptionError,
+    RecordLockError,
+    remote_record_dir,
+    validate_subject_id,
+)
 from upload_workflow import LocalCleanupError, upload_record_bundle
 
 # =========================
@@ -412,7 +423,9 @@ if is_participant:
         st.error("无法确认本次干预日期，请联系研究团队。")
         st.stop()
 else:
-    admin_day_confirmation_key = f"admin_intervention_day_confirmed::{safe_subject_id}"
+    admin_day_confirmation_key = (
+        f"admin_intervention_day_confirmed::{safe_subject_id}::{record_date.isoformat()}"
+    )
     intervention_day = st.number_input(
         "干预第几天",
         min_value=1,
@@ -431,9 +444,14 @@ else:
         intervention_day, confirmed=True
     )
 
-record = record_store.get_or_create(
-    safe_subject_id, record_date, int(intervention_day)
-)
+try:
+    record = record_store.get_or_create(
+        safe_subject_id, record_date, int(intervention_day)
+    )
+except (RecordConflictError, RecordCorruptionError, RecordLockError):
+    logging.exception("record retrieval failed")
+    st.error("当日记录无法安全恢复，请联系研究团队。")
+    st.stop()
 try:
     ensure_record_intervention_day(record, intervention_day)
 except ValueError:
@@ -500,7 +518,7 @@ coping_used = st.multiselect(
 st.session_state["state_payload"] = {
     "schema_version": 3,
     "subject_id": subject_id,
-    "timestamp_client_open_iso": datetime.now().isoformat(timespec="seconds"),
+    "timestamp_client_open_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "sleep_hours": float(sleep_hours),
     "mood_1to9": int(mood),
     "stress_1to9": int(stress),
@@ -531,6 +549,7 @@ if st.session_state.get("recorder_record_id") != record["record_id"]:
     st.session_state.last_saved = None
     st.session_state["recorder_completed_record_id"] = None
     st.session_state["recorder_was_playing"] = False
+    st.session_state["rerecord_requested_record_id"] = None
     st.session_state["record_started_at_iso"] = ""
     st.session_state["record_ended_at_iso"] = ""
 st.session_state.setdefault("recorder_format", "flv")
@@ -540,7 +559,7 @@ st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测�
 def out_recorder_factory():
     st.session_state["recorder_out_path"] = str(flv_path)
     st.session_state["recorder_format"] = "flv"
-    st.session_state["record_started_at_iso"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["record_started_at_iso"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     st.session_state["record_ended_at_iso"] = ""
     st.session_state["recorder_completed_record_id"] = None
     return MediaRecorder(st.session_state["recorder_out_path"], format="flv")
@@ -599,7 +618,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
     )
     if just_finished:
         st.session_state.last_saved = str(out_file)
-        st.session_state["record_ended_at_iso"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["record_ended_at_iso"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         st.session_state["recorder_was_playing"] = False
         st.info("正在尝试将 FLV 转码为 MP4…（需要本机已安装 ffmpeg）")
         mp4_path = transcode_to_mp4(out_file)
@@ -610,6 +629,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
             st.warning("未检测到 ffmpeg 或转码失败，将保留 FLV。")
             st.session_state["recorder_converted_mp4"] = None
         st.session_state["recorder_completed_record_id"] = record["record_id"]
+        st.session_state["rerecord_requested_record_id"] = None
 
     selected_path = (
         Path(st.session_state["recorder_converted_mp4"])
@@ -624,6 +644,9 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
         st.session_state.get("record_ended_at_iso"),
         recordings_dir=REC_DIR,
         persisted_recording=record.get("recording"),
+        suppress_persisted_resume=(
+            st.session_state.get("rerecord_requested_record_id") == record["record_id"]
+        ),
     )
     if completed_recording is None:
         st.info("请完成一次新的录制后继续。")
@@ -634,6 +657,20 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
 
     # 状态 JSON
     state_payload = st.session_state.get("state_payload", {}) or {}
+    persisted_context = recording_context(state_payload)
+    recording_metadata = {
+        "video_filename": final_play.name,
+        "started_at_iso": completed_recording.started_at_iso,
+        "ended_at_iso": completed_recording.ended_at_iso,
+        "format": completed_recording.format,
+    }
+    if (
+        record.get("recording") != recording_metadata
+        or record.get("daily_context") != persisted_context
+    ):
+        record["recording"] = recording_metadata
+        record["daily_context"] = persisted_context
+        record_store.save(record)
     state_namespace = f"{record['record_id']}:r{record['revision']}"
     state_keys = questionnaire_state_keys(state_namespace, visit)
     answered_by_visit = record.get("completion", {}).get("answered_field_ids", {})
@@ -641,7 +678,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
     answers = questionnaire_answers(record, visit)
 
     def save_questionnaire_draft(
-        updated_answers: dict[str, Any], answered_field_ids: set[str]
+        updated_answers: dict[str, Any], answered_field_ids: set[str], *, persist: bool = True
     ) -> None:
         current_step = int(st.session_state.get(state_keys.step, 0))
         draft_context = {
@@ -662,43 +699,39 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
                 record, visit, updated_answers, answered_field_ids,
                 current_step=current_step,
             )
-        record_store.save(record)
+        if persist:
+            record_store.save(record)
 
-    answers, questionnaire_complete = render_questionnaire(
-        subject_id=safe_subject_id,
-        intervention_day=int(record["intervention_day"]),
-        answers=answers,
-        save_draft=save_questionnaire_draft,
-        visit=visit,
-        state_namespace=state_namespace,
-        initial_answered_field_ids=answered_by_visit.get(visit, []),
-        initial_step=step_by_visit.get(visit, 0),
-    )
-    current_answered = set(st.session_state.get(state_keys.answered, []))
-    if support_needed(visit, answers, current_answered, int(record["intervention_day"])):
-        contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
-        st.warning(
-            "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
-            "如果你正处于紧急危险中，请联系当地急救服务。\n"
-            f"{contact or '请联系研究团队。'}"
+    if not upload_ready_for_visit(record, visit):
+        answers, questionnaire_complete = render_questionnaire(
+            subject_id=safe_subject_id,
+            intervention_day=int(record["intervention_day"]),
+            answers=answers,
+            save_draft=save_questionnaire_draft,
+            visit=visit,
+            state_namespace=state_namespace,
+            initial_answered_field_ids=answered_by_visit.get(visit, []),
+            initial_step=step_by_visit.get(visit, 0),
         )
-    if not questionnaire_complete:
-        st.info("请完成问卷后继续上传。")
-        st.stop()
+        current_answered = set(st.session_state.get(state_keys.answered, []))
+        if support_needed(visit, answers, current_answered, int(record["intervention_day"])):
+            contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
+            st.warning(
+                "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
+                "如果你正处于紧急危险中，请联系当地急救服务。\n"
+                f"{contact or '请联系研究团队。'}"
+            )
+        if not questionnaire_complete:
+            st.info("请完成问卷后继续上传。")
+            st.stop()
 
-    save_questionnaire_draft(answers, current_answered)
-    record["daily_context"] = state_payload
-    record["recording"] = {
-        "video_filename": final_play.name,
-        "started_at_iso": completed_recording.started_at_iso,
-        "ended_at_iso": completed_recording.ended_at_iso,
-        "format": completed_recording.format,
-    }
-    record.setdefault("completion", {})["status"] = "complete"
-    record_store.save(record)
+        save_questionnaire_draft(answers, current_answered, persist=False)
+        mark_questionnaire_visit_complete(record, visit)
+        record_store.save(record)
     meta_path = record_store.path_for(record)
+    record_date_key = date.fromisoformat(record["record_date"]).strftime("%Y%m%d")
     remote_dir = remote_record_dir(
-        SAVE_DIR, safe_subject_id, record["record_date"], record["record_id"]
+        SAVE_DIR, safe_subject_id, record_date_key, record["record_id"]
     )
 
     delete_after_upload = True
@@ -747,6 +780,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
         except LocalCleanupError as error:
             st.warning(cleanup_pending_message(error, participant=is_participant))
         except Exception:
+            logging.exception("record upload failed")
             st.error(upload_failure_message(record["record_id"], participant=is_participant))
 
     if c2.button("重新录制"):
@@ -755,6 +789,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
         st.session_state["recorder_completed_record_id"] = None
         st.session_state["record_started_at_iso"] = ""
         st.session_state["record_ended_at_iso"] = ""
+        st.session_state["rerecord_requested_record_id"] = record["record_id"]
         st.rerun()
 
 else:
@@ -815,7 +850,7 @@ else:
                     **meta2,
                     "file_basename": base2,
                     "video_filename": picked.name,
-                    "timestamp_iso_generated": datetime.now().isoformat(timespec="seconds"),
+                    "timestamp_iso_generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 }
                 meta_path2 = REC_DIR / f"{base2}_state.json"
                 meta_path2.write_text(json.dumps(meta2, ensure_ascii=False, indent=2), encoding="utf-8")
