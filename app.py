@@ -350,9 +350,9 @@ def transcode_to_mp4(src: Path) -> Optional[Path]:
 # =========================
 st.subheader("① 当日状态")
 
-locked_sid, why_not = verify_link_params()
-if locked_sid:
-    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_sid, disabled=True)
+locked_link, why_not = verify_link_params()
+if locked_link:
+    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_link.subject_id, disabled=True)
 else:
     subject_id = st.text_input("来访者编号", value=st.session_state.get("subject_id", "sub-001"))
     if why_not and LINK_SIGNING_KEY:

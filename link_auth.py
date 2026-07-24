@@ -51,6 +51,11 @@ def verify_subject_link(
         expected = sign_subject_link(key, safe_subject_id, exp_ts, visit)
     except (TypeError, ValueError):
         return None
-    if not hmac.compare_digest(expected, signature):
+    try:
+        expected_bytes = expected.encode("ascii")
+        signature_bytes = signature.encode("ascii")
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        return None
+    if not hmac.compare_digest(expected_bytes, signature_bytes):
         return None
     return VerifiedLink(safe_subject_id, visit)

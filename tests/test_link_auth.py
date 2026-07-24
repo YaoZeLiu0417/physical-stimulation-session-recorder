@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import hmac
+import re
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -69,6 +71,17 @@ def test_invalid_or_expired_links_are_rejected() -> None:
     assert verify_subject_link(
         "test-key", "sub-001", 2000000000, signature + "x", now=1900000000
     ) is None
+    assert verify_subject_link(
+        "test-key", "sub-001", 2000000000, "\u00e9", now=1900000000
+    ) is None
+
+
+def test_app_renders_authenticated_subject_id_from_verified_link() -> None:
+    app_source = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8")
+
+    assert "locked_link, why_not = verify_link_params()" in app_source
+    assert "value=locked_link.subject_id, disabled=True" in app_source
+    assert not re.search(r"value=locked_link(?:[,)])", app_source)
 
 
 def test_generated_urls_only_include_formal_visit_when_needed() -> None:
