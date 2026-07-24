@@ -92,8 +92,11 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "current_step": {},
     }
     assert record["upload"] == {"json": "pending", "video": "pending"}
-    assert datetime.fromisoformat(record["created_at_iso"]).microsecond == 0
-    assert datetime.fromisoformat(record["updated_at_iso"]).microsecond == 0
+    for timestamp in (record["created_at_iso"], record["updated_at_iso"]):
+        assert "T" in timestamp
+        parsed = datetime.fromisoformat(timestamp)
+        assert timestamp == parsed.isoformat(timespec="seconds")
+        assert parsed.microsecond == 0
 
 
 def test_save_resume_and_revise_preserve_history_and_reset_draft_state(tmp_path):
