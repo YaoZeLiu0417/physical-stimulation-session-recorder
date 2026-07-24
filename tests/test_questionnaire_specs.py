@@ -106,14 +106,28 @@ def test_formal_instruments_have_expected_keys():
 
 
 def test_formal_visit_mapping_matches_schedule_rules():
-    visits = questionnaire_specs.VISIT_INSTRUMENT_IDS
+    full = (
+        "dshi_lifetime",
+        "dshi_12m",
+        "fasm",
+        "nssi_ideation",
+        "nssi_impulse",
+        "nssi_future",
+        "nssi_stop",
+        "sicq",
+        "readiness",
+        "siss",
+        "pss",
+    )
+    follow_up = tuple(instrument_id for instrument_id in full if instrument_id != "fasm")
 
-    assert "fasm" in visits["V1"]
-    assert "fasm" in visits["V3"]
-    assert "fasm" not in visits["V4"]
-    assert visits["V5"] == visits["V4"]
-    assert "fasm" in visits["V6"]
-    assert "dshi_12m" in visits["V5"]
+    assert questionnaire_specs.VISIT_INSTRUMENT_IDS == {
+        "V1": full,
+        "V3": full,
+        "V4": follow_up,
+        "V5": follow_up,
+        "V6": full,
+    }
 
 
 def test_formal_instruments_have_expected_question_counts():
@@ -140,3 +154,12 @@ def test_formal_instrument_mapping_keys_match_instrument_ids():
         instrument_id == instrument.id
         for instrument_id, instrument in questionnaire_specs.FORMAL_INSTRUMENTS.items()
     )
+
+
+def test_formal_nssi_impulse_prompts_are_exact_and_ordered():
+    impulse = questionnaire_specs.FORMAL_INSTRUMENTS["nssi_impulse"]
+
+    assert [question.prompt for question in impulse.questions] == [
+        "过去一周里，你多长时间想过伤害自己？",
+        "过去一周里，抵制伤害自己有多难？",
+    ]

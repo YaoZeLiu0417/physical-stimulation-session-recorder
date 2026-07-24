@@ -406,7 +406,7 @@ FORMAL_INSTRUMENTS = {
         "过去一周",
         (
             _likert("nssi_impulse_time", "过去一周里，你多长时间想过伤害自己？", 1, 100),
-            _likert("nssi_impulse_resistance", "过去一周里，抵制伤害自己的冲动有多难？", 1, 7),
+            _likert("nssi_impulse_resistance", "过去一周里，抵制伤害自己有多难？", 1, 7),
         ),
     ),
     "nssi_future": _instrument(
