@@ -256,6 +256,127 @@ def test_app_imports_required_integration_interfaces():
     } <= imported
 
 
+def test_missing_upload_configuration_uses_only_fixed_redacted_startup_boundary():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    config_guard = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and {
+            name.id
+            for name in ast.walk(node.test)
+            if isinstance(name, ast.Name)
+        }
+        == {"AK", "SK"}
+    )
+    participant_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "is_participant"
+            for target in node.targets
+        )
+    )
+    assert config_guard.lineno < participant_assignment.lineno
+
+    calls = [node for node in ast.walk(config_guard) if isinstance(node, ast.Call)]
+    log_calls = [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "LOGGER"
+    ]
+    assert len(log_calls) == 1
+    assert log_calls[0].func.attr == "warning"
+    assert len(log_calls[0].args) == 1
+    assert isinstance(log_calls[0].args[0], ast.Constant)
+    assert log_calls[0].args[0].value == "application configuration unavailable"
+    assert log_calls[0].keywords == []
+
+    ui_calls = [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr != "stop"
+    ]
+    assert len(ui_calls) == 1
+    assert ui_calls[0].func.attr == "error"
+    assert len(ui_calls[0].args) == 1
+    assert isinstance(ui_calls[0].args[0], ast.Constant)
+    startup_message = ui_calls[0].args[0].value
+    assert startup_message == "应用配置暂不可用，请联系研究团队。"
+    for forbidden in (
+        "AK",
+        "SK",
+        "Secrets",
+        "config.toml",
+        "baidu",
+        "app_key",
+        "secret_key",
+    ):
+        assert forbidden not in startup_message
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "stop"
+        for call in calls
+    )
+
+
+def test_refresh_token_rotation_is_log_only_and_redacted():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    ensure_token = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "ensure_token"
+    )
+    rotation_guard = next(
+        node
+        for node in ast.walk(ensure_token)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(operator, ast.NotEq)
+            for operator in ast.walk(node.test)
+        )
+        and any(
+            isinstance(value, ast.Constant) and value.value == "refresh_token"
+            for value in ast.walk(node.test)
+        )
+    )
+
+    ui_calls = [
+        call
+        for call in ast.walk(ensure_token)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+    ]
+    assert ui_calls == []
+
+    log_calls = [
+        call
+        for call in ast.walk(rotation_guard)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "LOGGER"
+    ]
+    assert len(log_calls) == 1
+    assert log_calls[0].func.attr == "warning"
+    assert len(log_calls[0].args) == 1
+    assert isinstance(log_calls[0].args[0], ast.Constant)
+    assert log_calls[0].args[0].value == (
+        "baidu refresh token rotated manual_update_required=true"
+    )
+    assert log_calls[0].keywords == []
+
+
 def test_try_save_record_calls_store_and_returns_none():
     workflow = _workflow()
     record = _record()

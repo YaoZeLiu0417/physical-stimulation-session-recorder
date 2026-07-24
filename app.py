@@ -136,7 +136,8 @@ REDIR = CFG.get("redirect_uri", "http://localhost:8501/oauth/callback")
 SAVE_DIR = CFG.get("save_dir", "/apps/collector")
 
 if not AK or not SK:
-    st.error("未找到百度网盘 AK/SK。请在 Cloud 的 Secrets 填写 [baidu] 配置，或在本地提供 config.toml（不提交仓库）。")
+    LOGGER.warning("application configuration unavailable")
+    st.error("应用配置暂不可用，请联系研究团队。")
     st.stop()
 
 # =========================
@@ -297,9 +298,11 @@ def ensure_token(max_retries: int = 5) -> str:
             # 记一次缓存（优先用服务端返回的 expires_in；没有就默认 1 小时）
             ttl = int(j.get("expires_in", 3600))
             st.session_state["bd_token_cache"] = {"token": token, "exp_ts": now + ttl}
-            # 如果百度顺带换发了新的 refresh_token，仅提示手动更新 Secrets（不自动写）
+            # 如果百度顺带换发了新的 refresh_token，仅记录固定运维事件（不自动写）
             if j.get("refresh_token") and j["refresh_token"] != refresh_token:
-                st.info("百度返回了新的 refresh_token，请到 Secrets 手动更新。")
+                LOGGER.warning(
+                    "baidu refresh token rotated manual_update_required=true"
+                )
             return token
 
         # 处理常见错误
