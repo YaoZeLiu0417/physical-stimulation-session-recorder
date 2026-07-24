@@ -75,6 +75,7 @@ from record_store import (
 from upload_workflow import (
     LocalCleanupError,
     cleanup_uploaded_bundle,
+    upload_generated_json,
     upload_record_bundle,
 )
 
@@ -906,18 +907,11 @@ else:
         prog2 = st.progress(0, text="上传历史视频中…")
         def on_prog2(p: float, msg: str):
             prog2.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
-        try:
-            res2 = upload_trusted_recording(
-                picked,
-                recordings_dir=REC_DIR,
-                remote_path=remote_video2,
-                upload_fn=upload_to_baidu,
-                progress_cb=on_prog2,
-                delete_after_upload=delete_after_upload_hist,
-            )
+
+        def after_history_video_upload(video_result: object) -> None:
             prog2.progress(1.0, text="[视频] 上传完成 ✔")
             st.success("历史视频上传成功！")
-            st.json(res2)
+            st.json(video_result)
 
             if upload_state_too:
                 base2 = Path(picked).stem
@@ -928,19 +922,31 @@ else:
                     "video_filename": picked.name,
                     "timestamp_iso_generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 }
-                meta_path2 = REC_DIR / f"{base2}_state.json"
-                meta_path2.write_text(json.dumps(meta2, ensure_ascii=False, indent=2), encoding="utf-8")
+                meta_filename2 = f"{base2}_state.json"
                 prog3 = st.progress(0, text="上传历史状态JSON中…")
                 def on_prog3(p: float, msg: str):
                     prog3.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-                res3 = upload_to_baidu(meta_path2, f"{remote_dir2}/{meta_path2.name}", progress_cb=on_prog3)
+                res3 = upload_generated_json(
+                    meta2,
+                    filename=meta_filename2,
+                    remote_path=f"{remote_dir2}/{meta_filename2}",
+                    upload_fn=upload_to_baidu,
+                    progress_cb=on_prog3,
+                )
                 prog3.progress(1.0, text="[JSON] 上传完成 ✔")
                 st.success("历史状态JSON上传成功！")
                 st.json(res3)
-                try:
-                    meta_path2.unlink(missing_ok=True)
-                except Exception:
-                    pass
+
+        try:
+            upload_trusted_recording(
+                picked,
+                recordings_dir=REC_DIR,
+                remote_path=remote_video2,
+                upload_fn=upload_to_baidu,
+                progress_cb=on_prog2,
+                delete_after_upload=delete_after_upload_hist,
+                after_upload_success=after_history_video_upload,
+            )
 
             if delete_after_upload_hist:
                 st.caption("已从服务器删除该本地视频（历史）。")

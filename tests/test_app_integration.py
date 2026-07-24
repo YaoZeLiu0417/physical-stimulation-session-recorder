@@ -14,7 +14,7 @@ from streamlit.testing.v1 import AppTest
 from link_auth import sign_subject_link
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
 from record_store import DailyRecordStore, RecordArchivedError
-from upload_workflow import LocalCleanupError
+from upload_workflow import LocalCleanupError, UploadResultError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1264,6 +1264,29 @@ def test_historical_upload_reports_incomplete_cleanup_when_source_is_swapped(
     assert candidate.read_bytes() == b"SECRET-OUTSIDE"
 
 
+def test_historical_video_delete_waits_for_selected_metadata_success(tmp_path):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    candidate = recordings_dir / "history.mp4"
+    candidate.write_bytes(b"ORIGINAL-VIDEO")
+
+    def fail_metadata(_video_result):
+        raise UploadResultError("metadata upload failed")
+
+    with pytest.raises(UploadResultError, match="metadata upload failed"):
+        workflow.upload_trusted_recording(
+            candidate,
+            recordings_dir=recordings_dir,
+            remote_path="/remote/history.mp4",
+            upload_fn=lambda *args, **kwargs: {"ok": True},
+            delete_after_upload=True,
+            after_upload_success=fail_metadata,
+        )
+
+    assert candidate.read_bytes() == b"ORIGINAL-VIDEO"
+
+
 def test_app_historical_video_cleanup_stays_inside_trusted_upload_boundary():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
     trusted_upload = next(
@@ -1287,6 +1310,21 @@ def test_app_historical_video_cleanup_stays_inside_trusted_upload_boundary():
         and call.func.value.id == "picked"
         and call.func.attr == "unlink"
         for call in ast.walk(tree)
+    )
+
+
+def test_app_historical_state_json_uses_generated_private_upload_only():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call)]
+
+    assert any(
+        isinstance(call.func, ast.Name)
+        and call.func.id == "upload_generated_json"
+        for call in calls
+    )
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "meta_path2"
+        for node in ast.walk(tree)
     )
 
 

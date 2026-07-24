@@ -256,6 +256,7 @@ def upload_trusted_recording(
     upload_fn: Callable[..., Any],
     progress_cb: Any = None,
     delete_after_upload: bool = False,
+    after_upload_success: Callable[[Any], None] | None = None,
 ) -> Any:
     """Revalidate a historical recording immediately before invoking upload."""
 
@@ -269,6 +270,7 @@ def upload_trusted_recording(
             upload_fn,
             progress_cb=progress_cb,
             delete_after_upload=delete_after_upload,
+            after_upload_success=after_upload_success,
         )
     except UnsafeUploadSourceError as exc:
         raise UnsafeRecordingPathError(

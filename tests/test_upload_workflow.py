@@ -140,6 +140,83 @@ def test_bundle_rejects_video_replaced_by_external_hardlink_before_upload(
     assert video_path.read_bytes() == b"SECRET-CONTENT"
 
 
+@pytest.mark.parametrize("failure_result", [False, {"ok": False}])
+def test_private_snapshot_rejects_failed_result_before_deleting_source(
+    tmp_path, failure_result
+):
+    source_path = tmp_path / "history.mp4"
+    source_path.write_bytes(b"video")
+
+    with pytest.raises(UploadResultError, match="did not report success"):
+        upload_workflow.upload_private_snapshot(
+            source_path,
+            "/remote/history.mp4",
+            lambda *args, **kwargs: failure_result,
+            delete_after_upload=True,
+        )
+
+    assert source_path.read_bytes() == b"video"
+
+
+def test_generated_json_upload_uses_private_file_and_ignores_preexisting_hardlink(
+    tmp_path,
+):
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    outside = tmp_path / "outside-secret.json"
+    outside.write_bytes(b"SECRET-CONTENT")
+    hostile_path = recordings_dir / "history_state.json"
+    os.link(outside, hostile_path)
+    observed = {}
+    payload = {"subject": "sub-001", "status": "complete"}
+
+    def upload(local_path, remote_path, *, progress_cb):
+        observed["path"] = local_path
+        observed["remote"] = remote_path
+        observed["payload"] = json.loads(local_path.read_text(encoding="utf-8"))
+        observed["mode"] = stat.S_IMODE(local_path.lstat().st_mode)
+        return {"ok": True}
+
+    result = upload_workflow.upload_generated_json(
+        payload,
+        filename=hostile_path.name,
+        remote_path=f"/remote/{hostile_path.name}",
+        upload_fn=upload,
+    )
+
+    assert result == {"ok": True}
+    assert observed["path"] != hostile_path
+    assert observed["path"].parent != recordings_dir
+    assert observed["path"].name == hostile_path.name
+    assert observed["remote"] == "/remote/history_state.json"
+    assert observed["payload"] == payload
+    assert observed["mode"] & 0o600 == 0o600
+    assert not observed["path"].exists()
+    assert hostile_path.read_bytes() == b"SECRET-CONTENT"
+    assert outside.read_bytes() == b"SECRET-CONTENT"
+
+
+def test_generated_json_rejects_failed_result_and_removes_temporary_file(tmp_path):
+    observed_path = None
+
+    def fail_upload(local_path, remote_path, *, progress_cb):
+        nonlocal observed_path
+        observed_path = local_path
+        assert local_path.is_file()
+        return {"ok": False}
+
+    with pytest.raises(UploadResultError, match="did not report success"):
+        upload_workflow.upload_generated_json(
+            {"status": "complete"},
+            filename="history_state.json",
+            remote_path="/remote/history_state.json",
+            upload_fn=fail_upload,
+        )
+
+    assert observed_path is not None
+    assert not observed_path.exists()
+
+
 def test_initial_json_failure_persists_failure_and_keeps_every_local_file(tmp_path):
     json_path, video_path, raw_video_path = _bundle(tmp_path)
     uploads = []
@@ -625,6 +702,59 @@ def test_cleanup_rechecks_identity_before_unlink_and_preserves_replacement(
     assert raw_video_path.read_bytes() == b"REPLACEMENT-CONTENT"
     assert video_path.exists()
     assert json_path.exists()
+
+
+def test_bundle_rejects_extra_cleanup_file_replaced_during_final_json_upload(
+    tmp_path,
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    replacement = tmp_path / "replacement.flv"
+    replacement.write_bytes(b"REPLACEMENT-FLV")
+    uploads = []
+
+    def replace_extra_on_final_json(local_path, remote_path, *, progress_cb):
+        uploads.append((local_path.name, remote_path))
+        if len(uploads) == 3:
+            os.replace(replacement, raw_video_path)
+
+    with pytest.raises(LocalCleanupError) as captured:
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            replace_extra_on_final_json,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+        )
+
+    assert len(uploads) == 3
+    assert captured.value.failed_path == raw_video_path
+    assert captured.value.remaining_paths == (
+        raw_video_path,
+        video_path,
+        json_path,
+    )
+    assert raw_video_path.read_bytes() == b"REPLACEMENT-FLV"
+    assert video_path.exists()
+    assert json_path.exists()
+
+
+def test_cleanup_error_omits_paths_confirmed_missing_during_preflight(tmp_path):
+    json_path, video_path, _ = _bundle(tmp_path)
+    json_path.unlink()
+    invalid_directory = tmp_path / "invalid-directory"
+    invalid_directory.mkdir()
+
+    with pytest.raises(LocalCleanupError) as captured:
+        upload_workflow.cleanup_uploaded_bundle(
+            json_path, video_path, cleanup_paths=(invalid_directory,)
+        )
+
+    assert captured.value.failed_path == invalid_directory
+    assert captured.value.remaining_paths == (invalid_directory, video_path)
+    assert invalid_directory.exists()
+    assert video_path.exists()
 
 
 def test_preflight_failure_reports_every_untouched_cleanup_candidate(tmp_path):
