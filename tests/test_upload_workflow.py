@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from upload_workflow import upload_record_bundle
+from upload_workflow import LocalCleanupError, UploadResultError, upload_record_bundle
 
 
 def _bundle(tmp_path):
@@ -30,9 +30,14 @@ def _json_persister(json_path, events=None):
 def test_success_uploads_json_video_json_then_cleans_all_local_files(tmp_path):
     json_path, video_path, raw_video_path = _bundle(tmp_path)
     events = []
+    json_snapshots = []
 
     def upload(local_path, remote_path, *, progress_cb):
         events.append(("upload", local_path, remote_path, progress_cb))
+        if local_path == json_path:
+            json_snapshots.append(
+                json.loads(json_path.read_text(encoding="utf-8"))
+            )
 
     result = upload_record_bundle(
         json_path,
@@ -51,6 +56,11 @@ def test_success_uploads_json_video_json_then_cleans_all_local_files(tmp_path):
         ("persist", {"json": "uploaded", "video": "uploaded"}),
         ("upload", json_path, "/remote/record/record.json", None),
     ]
+    assert json_snapshots[0]["upload"] == {}
+    assert json_snapshots[1]["upload"] == {
+        "json": "uploaded",
+        "video": "uploaded",
+    }
     assert not json_path.exists()
     assert not video_path.exists()
     assert not raw_video_path.exists()
@@ -180,7 +190,91 @@ def test_cleanup_deduplicates_paths_including_bundle_files(tmp_path, monkeypatch
         cleanup_paths=(raw_video_path, video_path, json_path, raw_video_path),
     )
 
-    assert unlinked == [json_path, video_path, raw_video_path]
+    assert unlinked == [raw_video_path, video_path, json_path]
+
+
+@pytest.mark.parametrize(
+    ("failed_call", "expected_state"),
+    [
+        (1, {"json": "failed", "video": "pending"}),
+        (2, {"json": "uploaded", "video": "failed"}),
+        (3, {"json": "failed", "video": "uploaded"}),
+    ],
+    ids=("initial-json", "video", "final-json"),
+)
+@pytest.mark.parametrize(
+    "failure_result",
+    [False, {"ok": False}],
+    ids=("literal-false", "mapping-false"),
+)
+def test_unsuccessful_upload_result_fails_the_corresponding_stage_without_cleanup(
+    tmp_path, failed_call, expected_state, failure_result
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    calls = []
+
+    def upload(local_path, remote_path, *, progress_cb):
+        calls.append(local_path)
+        if len(calls) == failed_call:
+            return failure_result
+        return None
+
+    with pytest.raises(UploadResultError, match="did not report success"):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+        )
+
+    assert len(calls) == failed_call
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == expected_state
+    assert video_path.exists()
+    assert raw_video_path.exists()
+
+
+@pytest.mark.parametrize("success_result", [None, True, {"ok": True}])
+def test_upload_result_protocol_accepts_only_explicit_success_forms(
+    tmp_path, success_result
+):
+    json_path, video_path, _ = _bundle(tmp_path)
+
+    result = upload_record_bundle(
+        json_path,
+        video_path,
+        "/remote/record",
+        lambda *args, **kwargs: success_result,
+        persist_state=_json_persister(json_path),
+        delete_after_upload=False,
+    )
+
+    assert result == {"json": "uploaded", "video": "uploaded"}
+
+
+@pytest.mark.parametrize(
+    "ambiguous_result",
+    [{}, {"status": "ok"}, {"ok": 1}, 0, 1, "ok"],
+)
+def test_upload_result_protocol_rejects_ambiguous_values(tmp_path, ambiguous_result):
+    json_path, video_path, _ = _bundle(tmp_path)
+
+    with pytest.raises(UploadResultError, match="did not report success"):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            lambda *args, **kwargs: ambiguous_result,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=False,
+        )
+
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == {
+        "json": "failed",
+        "video": "pending",
+    }
 
 
 def test_remote_paths_and_progress_callbacks_are_passed_exactly(tmp_path):
@@ -239,12 +333,14 @@ def test_persist_failure_after_video_upload_stops_before_final_sync_and_cleanup(
     assert raw_video_path.exists()
 
 
-def test_cleanup_failure_is_not_silently_ignored(tmp_path):
-    json_path, video_path, _ = _bundle(tmp_path)
+def test_invalid_extra_cleanup_target_is_rejected_before_deleting_bundle(tmp_path):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
     directory = tmp_path / "cannot-unlink-directory"
     directory.mkdir()
 
-    with pytest.raises(OSError):
+    with pytest.raises(
+        LocalCleanupError, match="Upload completed.*cleanup is incomplete"
+    ) as captured:
         upload_record_bundle(
             json_path,
             video_path,
@@ -254,3 +350,95 @@ def test_cleanup_failure_is_not_silently_ignored(tmp_path):
             delete_after_upload=True,
             cleanup_paths=(directory,),
         )
+
+    assert captured.value.uploads_completed is True
+    assert captured.value.failed_path == directory
+    assert captured.value.remaining_paths == (directory, video_path, json_path)
+    assert isinstance(captured.value.__cause__, OSError)
+    assert json_path.exists()
+    assert video_path.exists()
+    assert raw_video_path.exists()
+
+
+def test_extra_cleanup_unlink_failure_keeps_bundle_files_and_is_distinct(
+    tmp_path, monkeypatch
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    original_unlink = Path.unlink
+
+    def fail_raw_cleanup(path, *args, **kwargs):
+        if path == raw_video_path:
+            raise PermissionError("raw video is busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_raw_cleanup)
+    with pytest.raises(
+        LocalCleanupError, match="Upload completed.*cleanup is incomplete"
+    ) as captured:
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            lambda *args, **kwargs: None,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+        )
+
+    assert captured.value.uploads_completed is True
+    assert captured.value.failed_path == raw_video_path
+    assert captured.value.remaining_paths == (raw_video_path, video_path, json_path)
+    assert isinstance(captured.value.__cause__, PermissionError)
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == {
+        "json": "uploaded",
+        "video": "uploaded",
+    }
+    assert video_path.exists()
+    assert raw_video_path.exists()
+
+
+def test_final_json_failure_can_retry_with_stable_paths_and_final_snapshot(tmp_path):
+    json_path, video_path, _ = _bundle(tmp_path)
+    calls = []
+    json_snapshots = []
+    fail_final_once = True
+
+    def upload(local_path, remote_path, *, progress_cb):
+        nonlocal fail_final_once
+        calls.append((local_path, remote_path))
+        if local_path == json_path:
+            json_snapshots.append(
+                json.loads(json_path.read_text(encoding="utf-8"))["upload"]
+            )
+        if len(calls) == 3 and fail_final_once:
+            fail_final_once = False
+            raise RuntimeError("temporary final JSON failure")
+
+    with pytest.raises(RuntimeError, match="temporary final JSON failure"):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=False,
+        )
+
+    result = upload_record_bundle(
+        json_path,
+        video_path,
+        "/remote/record",
+        upload,
+        persist_state=_json_persister(json_path),
+        delete_after_upload=False,
+    )
+
+    expected_paths = [
+        (json_path, "/remote/record/record.json"),
+        (video_path, "/remote/record/record.mp4"),
+        (json_path, "/remote/record/record.json"),
+    ]
+    assert calls == expected_paths * 2
+    assert result == {"json": "uploaded", "video": "uploaded"}
+    assert json_snapshots[-1] == {"json": "uploaded", "video": "uploaded"}
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == result
