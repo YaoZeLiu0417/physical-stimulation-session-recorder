@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import stat
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -13,7 +14,13 @@ from streamlit.testing.v1 import AppTest
 
 from link_auth import sign_subject_link
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
-from record_store import DailyRecordStore, RecordArchivedError
+from record_store import (
+    DailyRecordStore,
+    RecordArchivedError,
+    RecordConflictError,
+    RecordCorruptionError,
+    RecordLockError,
+)
 from upload_workflow import LocalCleanupError, UploadResultError, upload_record_bundle
 
 
@@ -247,6 +254,155 @@ def test_app_imports_required_integration_interfaces():
         "upload_record_bundle",
         "validate_subject_id",
     } <= imported
+
+
+def test_try_save_record_calls_store_and_returns_none():
+    workflow = _workflow()
+    record = _record()
+    saved = []
+
+    class Store:
+        def save(self, current):
+            saved.append(current)
+
+    assert workflow.try_save_record(Store(), record) is None
+    assert saved == [record]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [RecordConflictError, RecordCorruptionError, RecordLockError, OSError],
+)
+def test_try_save_record_returns_only_expected_exception_type(error_type):
+    workflow = _workflow()
+    sentinel = r"C:\SENTINEL\private-record.json"
+
+    class Store:
+        def save(self, current):
+            raise error_type(sentinel)
+
+    result = workflow.try_save_record(Store(), _record())
+
+    assert result == error_type.__name__
+    assert "SENTINEL" not in result
+
+
+def test_try_save_record_does_not_catch_system_exit():
+    workflow = _workflow()
+
+    class Store:
+        def save(self, current):
+            raise SystemExit(2)
+
+    with pytest.raises(SystemExit, match="2"):
+        workflow.try_save_record(Store(), _record())
+
+
+def test_app_routes_participant_record_saves_through_fixed_failure_boundary():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    boundary = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "save_record_or_stop"
+        ),
+        None,
+    )
+    assert boundary is not None
+
+    helper_calls = [
+        call
+        for call in ast.walk(boundary)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "try_save_record"
+    ]
+    assert len(helper_calls) == 1
+
+    warning_calls = [
+        call
+        for call in ast.walk(boundary)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "LOGGER"
+        and call.func.attr == "warning"
+    ]
+    assert len(warning_calls) == 1
+    warning = warning_calls[0]
+    assert len(warning.args) == 4
+    assert isinstance(warning.args[0], ast.Constant)
+    assert warning.args[0].value == (
+        "record save failed record_id=%s stage=%s exception_type=%s"
+    )
+    record_id_arg = warning.args[1]
+    assert isinstance(record_id_arg, ast.Call)
+    assert isinstance(record_id_arg.func, ast.Attribute)
+    assert isinstance(record_id_arg.func.value, ast.Name)
+    assert record_id_arg.func.value.id == "record"
+    assert record_id_arg.func.attr == "get"
+    assert [arg.value for arg in record_id_arg.args if isinstance(arg, ast.Constant)] == [
+        "record_id",
+        "unknown",
+    ]
+    assert isinstance(warning.args[2], ast.Name) and warning.args[2].id == "stage"
+    assert (
+        isinstance(warning.args[3], ast.Name)
+        and warning.args[3].id == "exception_type"
+    )
+    assert warning.keywords == []
+
+    error_calls = [
+        call
+        for call in ast.walk(boundary)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "error"
+    ]
+    assert len(error_calls) == 1
+    assert len(error_calls[0].args) == 1
+    assert isinstance(error_calls[0].args[0], ast.Constant)
+    assert error_calls[0].args[0].value == "记录暂时无法保存，请重试。"
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "stop"
+        for call in ast.walk(boundary)
+    )
+
+    upload_branch = _upload_button_branch(tree)
+    routed_calls = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "save_record_or_stop"
+        and call.lineno < upload_branch.lineno
+    ]
+    assert len(routed_calls) == 3
+    stages = {
+        keyword.value.value
+        for call in routed_calls
+        for keyword in call.keywords
+        if keyword.arg == "stage"
+        and isinstance(keyword.value, ast.Constant)
+        and isinstance(keyword.value.value, str)
+    }
+    assert stages == {
+        "recording_metadata",
+        "questionnaire_draft",
+        "questionnaire_completion",
+    }
+    assert [
+        call
+        for call in _record_store_saves(tree.body)
+        if call.lineno < upload_branch.lineno
+    ] == []
 
 
 def test_app_uses_revision_scoped_questionnaire_state_and_callback_step():
@@ -1051,32 +1207,43 @@ def test_production_participant_visible_tree_omits_sensitive_record_payload(
     )
     key = "production-app-test-key"
     expiry = int(time.time()) + 3600
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
-    app.secrets["baidu"] = {
-        "app_key": "fake-app-key",
-        "secret_key": "fake-secret-key",
-        "save_dir": "/apps/test",
-    }
-    app.secrets["LINK_SIGNING_KEY"] = key
-    app.secrets["TRUSTED_INTERVENTION_DAYS"] = {"sub-001": 7}
-    app.query_params["sid"] = "sub-001"
-    app.query_params["exp"] = str(expiry)
-    app.query_params["sig"] = sign_subject_link(key, "sub-001", expiry)
-    app.query_params["visit"] = "daily"
-    app.run()
+    main_module = sys.modules["__main__"]
+    missing = object()
+    original_main_file = getattr(main_module, "__file__", missing)
+    try:
+        app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+        app.secrets["baidu"] = {
+            "app_key": "fake-app-key",
+            "secret_key": "fake-secret-key",
+            "save_dir": "/apps/test",
+        }
+        app.secrets["LINK_SIGNING_KEY"] = key
+        app.secrets["TRUSTED_INTERVENTION_DAYS"] = {"sub-001": 7}
+        app.query_params["sid"] = "sub-001"
+        app.query_params["exp"] = str(expiry)
+        app.query_params["sig"] = sign_subject_link(key, "sub-001", expiry)
+        app.query_params["visit"] = "daily"
+        app.run()
 
-    assert not app.exception
-    visible = _visible_app_text(app)
-    for forbidden in (
-        f"{sentinel}:score",
-        f"{sentinel}:risk",
-        f"/remote/{sentinel}",
-        str(tmp_path / sentinel),
-        f"{sentinel}:response",
-        f"{sentinel}:history",
-        f"{sentinel}:operations",
-    ):
-        assert forbidden not in visible
+        assert not app.exception
+        visible = _visible_app_text(app)
+        for forbidden in (
+            f"{sentinel}:score",
+            f"{sentinel}:risk",
+            f"/remote/{sentinel}",
+            str(tmp_path / sentinel),
+            f"{sentinel}:response",
+            f"{sentinel}:history",
+            f"{sentinel}:operations",
+        ):
+            assert forbidden not in visible
+    finally:
+        current_main_module = sys.modules["__main__"]
+        if original_main_file is missing:
+            if hasattr(current_main_module, "__file__"):
+                delattr(current_main_module, "__file__")
+        else:
+            current_main_module.__file__ = original_main_file
 
 
 def test_app_does_not_save_after_successful_bundle_cleanup():
@@ -1765,12 +1932,16 @@ def test_app_orders_day_confirmation_recorder_gate_and_draft_context_save():
     draft_save = next(
         call for call in ast.walk(save_draft)
         if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "record_store"
-        and call.func.attr == "save"
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "save_record_or_stop"
     )
     assert context_assignment.lineno < draft_save.lineno
+    assert any(
+        keyword.arg == "stage"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value == "questionnaire_draft"
+        for keyword in draft_save.keywords
+    )
 
 
 def test_app_signed_operational_surfaces_follow_participant_stop_guard():

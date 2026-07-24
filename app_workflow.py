@@ -21,7 +21,13 @@ from questionnaire_specs import (
     weekly_due,
 )
 from questionnaire_ui import build_field_status, build_formal_field_status
-from record_store import RecordArchivedError, validate_subject_id
+from record_store import (
+    RecordArchivedError,
+    RecordConflictError,
+    RecordCorruptionError,
+    RecordLockError,
+    validate_subject_id,
+)
 from upload_workflow import (
     LocalCleanupError,
     UnsafeUploadSourceError,
@@ -68,6 +74,19 @@ class UnsafeRecordingPathError(ValueError):
 class AdminInterventionStateKeys:
     selection: str
     confirmation: str
+
+
+def try_save_record(store: Any, record: dict[str, Any]) -> str | None:
+    try:
+        store.save(record)
+    except (
+        RecordConflictError,
+        RecordCorruptionError,
+        RecordLockError,
+        OSError,
+    ) as error:
+        return type(error).__name__
+    return None
 
 
 def validate_intervention_day(value: object) -> int:

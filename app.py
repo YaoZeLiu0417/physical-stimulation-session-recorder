@@ -56,6 +56,7 @@ from app_workflow import (
     set_local_cleanup_intent,
     support_needed,
     trusted_recording_files,
+    try_save_record,
     upload_ready_for_visit,
     upload_trusted_recording,
     uploaded_cleanup_recovery,
@@ -104,6 +105,20 @@ REC_DIR = ROOT / "recordings"
 REC_DIR.mkdir(parents=True, exist_ok=True)
 record_store = DailyRecordStore(REC_DIR)
 CONF_PATH = ROOT / "config.toml"
+
+
+def save_record_or_stop(record: dict[str, Any], *, stage: str) -> None:
+    exception_type = try_save_record(record_store, record)
+    if exception_type is None:
+        return
+    LOGGER.warning(
+        "record save failed record_id=%s stage=%s exception_type=%s",
+        record.get("record_id", "unknown"),
+        stage,
+        exception_type,
+    )
+    st.error("记录暂时无法保存，请重试。")
+    st.stop()
 
 # ---- 读取配置：优先 Secrets，其次本地 config.toml（仅本地调试用） ----
 CFG: Dict[str, Any] = {}
@@ -729,7 +744,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
     ):
         record["recording"] = recording_metadata
         record["daily_context"] = persisted_context
-        record_store.save(record)
+        save_record_or_stop(record, stage="recording_metadata")
     state_namespace = f"{record['record_id']}:r{record['revision']}"
     state_keys = questionnaire_state_keys(state_namespace, visit)
     answered_by_visit = record.get("completion", {}).get("answered_field_ids", {})
@@ -759,7 +774,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
                 current_step=current_step,
             )
         if persist:
-            record_store.save(record)
+            save_record_or_stop(record, stage="questionnaire_draft")
 
     if not upload_ready_for_visit(record, visit):
         answers, questionnaire_complete = render_questionnaire(
@@ -789,7 +804,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
 
         save_questionnaire_draft(answers, current_answered, persist=False)
         mark_questionnaire_visit_complete(record, visit)
-        record_store.save(record)
+        save_record_or_stop(record, stage="questionnaire_completion")
     if persisted_support_needed(record, visit):
         contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
         st.warning(
