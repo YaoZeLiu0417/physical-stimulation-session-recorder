@@ -328,20 +328,29 @@ def persisted_support_needed(record: Mapping[str, Any], visit: str) -> bool:
 
 
 def archived_record_is_completed(
-    error: RecordArchivedError, expected_intervention_day: object
+    error: RecordArchivedError,
+    expected_intervention_day: object,
+    expected_visit: object,
 ) -> bool:
     return (
         type(expected_intervention_day) is int
+        and isinstance(expected_visit, str)
+        and expected_visit in {"daily", *VISIT_INSTRUMENT_IDS}
         and error.intervention_day == expected_intervention_day
         and error.completion_status == "complete"
         and error.lifecycle in {"complete", "uploaded"}
+        and expected_visit in error.completed_visits
     )
 
 
 def archived_record_success_message(
-    error: RecordArchivedError, expected_intervention_day: object
+    error: RecordArchivedError,
+    expected_intervention_day: object,
+    expected_visit: object,
 ) -> str | None:
-    if not archived_record_is_completed(error, expected_intervention_day):
+    if not archived_record_is_completed(
+        error, expected_intervention_day, expected_visit
+    ):
         return None
     return f"本次记录已完成（记录编号：{error.record_id}）。"
 

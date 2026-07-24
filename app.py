@@ -449,12 +449,27 @@ else:
         intervention_day, confirmed=True
     )
 
+visit_options = ("daily", *VISIT_INSTRUMENT_IDS)
+if locked_link:
+    visit = locked_link.visit
+    if visit not in visit_options:
+        st.error("无法确认本次问卷访视，请联系研究团队。")
+        st.stop()
+else:
+    selected_visit = st.session_state.get("visit", "daily")
+    if selected_visit not in visit_options:
+        selected_visit = "daily"
+    visit = st.selectbox(
+        "问卷访视", visit_options, index=visit_options.index(selected_visit)
+    )
+st.session_state["visit"] = visit
+
 try:
     record = record_store.get_or_create(
         safe_subject_id, record_date, int(intervention_day)
     )
 except RecordArchivedError as error:
-    archived_message = archived_record_success_message(error, intervention_day)
+    archived_message = archived_record_success_message(error, intervention_day, visit)
     if archived_message is not None:
         st.success(archived_message)
     else:
@@ -474,12 +489,6 @@ try:
 except ValueError:
     st.error("无法确认本次干预日期，请联系研究团队。")
     st.stop()
-visit = locked_link.visit if locked_link else st.selectbox(
-    "问卷访视", ("daily", *VISIT_INSTRUMENT_IDS),
-    index=("daily", *VISIT_INSTRUMENT_IDS).index(st.session_state.get("visit", "daily")),
-)
-st.session_state["visit"] = visit
-
 st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
 context_defaults = daily_context_values(record)

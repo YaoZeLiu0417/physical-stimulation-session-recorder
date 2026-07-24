@@ -571,12 +571,32 @@ def test_archived_uploaded_record_uses_the_completed_lifecycle_policy(tmp_path):
     with pytest.raises(RecordArchivedError) as raised:
         store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
 
-    assert workflow.archived_record_is_completed(raised.value, 6) is True
-    assert workflow.archived_record_is_completed(raised.value, 7) is False
-    assert workflow.archived_record_success_message(raised.value, 6) == (
+    assert workflow.archived_record_is_completed(raised.value, 6, "daily") is True
+    assert workflow.archived_record_is_completed(raised.value, 6, "V1") is False
+    assert workflow.archived_record_is_completed(raised.value, 7, "daily") is False
+    assert workflow.archived_record_success_message(raised.value, 6, "daily") == (
         f"本次记录已完成（记录编号：{record['record_id']}）。"
     )
-    assert workflow.archived_record_success_message(raised.value, 7) is None
+    assert workflow.archived_record_success_message(raised.value, 6, "V1") is None
+    assert workflow.archived_record_success_message(raised.value, 7, "daily") is None
+    assert workflow.archived_record_success_message(raised.value, 6, "unknown") is None
+    assert workflow.archived_record_success_message(raised.value, 6, None) is None
+
+
+def test_archived_complete_record_without_the_requested_completed_visit_fails_closed(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+    record["completion"]["status"] = "complete"
+    record["completion"]["questionnaire_visits"] = {}
+    record["upload"] = {"json": "uploaded", "video": "uploaded"}
+    store.save(record)
+    store.path_for(record).unlink()
+
+    with pytest.raises(RecordArchivedError) as raised:
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=6)
+
+    assert workflow.archived_record_success_message(raised.value, 6, "daily") is None
 
 
 def test_admin_day_state_keys_are_isolated_by_subject_and_date():
@@ -983,6 +1003,14 @@ def test_app_orders_day_confirmation_recorder_gate_and_draft_context_save():
         )
     )
     get_record = top_level[get_record_index]
+    visit_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "visit" for target in node.targets)
+    ]
+    assert visit_assignments
+    assert all(node.lineno < get_record.lineno for node in visit_assignments)
     confirmation = next(
         call for call in ast.walk(tree)
         if isinstance(call, ast.Call)
