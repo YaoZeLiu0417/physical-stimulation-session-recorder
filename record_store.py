@@ -616,6 +616,8 @@ class DailyRecordStore:
                 ):
                     self._write_generation_unlocked(latest)
                     generation = self._load_generation_unlocked(subject_id, record_date)
+            elif index is None:
+                raise RecordArchivedError(generation)
         if index is None:
             if latest is not None:
                 self._write_identity_unlocked(latest)
