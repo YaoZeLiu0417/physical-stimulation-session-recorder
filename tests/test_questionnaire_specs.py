@@ -163,3 +163,35 @@ def test_formal_nssi_impulse_prompts_are_exact_and_ordered():
         "过去一周里，你多长时间想过伤害自己？",
         "过去一周里，抵制伤害自己有多难？",
     ]
+
+
+def test_formal_question_ids_are_exact_ordered_and_unique():
+    assert {
+        instrument_id: tuple(question.id for question in instrument.questions)
+        for instrument_id, instrument in questionnaire_specs.FORMAL_INSTRUMENTS.items()
+    } == {
+        "dshi_lifetime": tuple(f"dshi_lifetime_{index}" for index in range(1, 7)),
+        "dshi_12m": tuple(f"dshi_12m_{index}" for index in range(1, 7)),
+        "fasm": tuple(f"fasm_{index}" for index in range(1, 16)),
+        "nssi_ideation": (
+            "nssi_ideation_6m_present",
+            "nssi_ideation_6m_frequency",
+            "nssi_ideation_6m_intensity",
+            "nssi_ideation_1m_present",
+            "nssi_ideation_1m_frequency",
+            "nssi_ideation_1m_intensity",
+        ),
+        "nssi_impulse": ("nssi_impulse_time", "nssi_impulse_resistance"),
+        "nssi_future": ("nssi_future_likelihood",),
+        "nssi_stop": ("nssi_stop_desire",),
+        "sicq": tuple(f"sicq_{index}" for index in range(1, 8)),
+        "readiness": tuple(f"readiness_{index}" for index in range(1, 4)),
+        "siss": tuple(f"siss_{index}" for index in range(1, 14)),
+        "pss": tuple(f"pss_{index}" for index in range(1, 6)),
+    }
+    ids = tuple(
+        question.id
+        for instrument in questionnaire_specs.FORMAL_INSTRUMENTS.values()
+        for question in instrument.questions
+    )
+    assert len(ids) == len(set(ids))
