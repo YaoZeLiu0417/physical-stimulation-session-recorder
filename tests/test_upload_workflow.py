@@ -360,6 +360,36 @@ def test_invalid_extra_cleanup_target_is_rejected_before_deleting_bundle(tmp_pat
     assert raw_video_path.exists()
 
 
+def test_preflight_failure_reports_every_untouched_cleanup_candidate(tmp_path):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    invalid_directory = tmp_path / "invalid-cleanup-directory"
+    invalid_directory.mkdir()
+
+    with pytest.raises(LocalCleanupError) as captured:
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            lambda *args, **kwargs: None,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path, invalid_directory),
+        )
+
+    assert captured.value.failed_path == invalid_directory
+    assert captured.value.remaining_paths == (
+        raw_video_path,
+        invalid_directory,
+        video_path,
+        json_path,
+    )
+    assert isinstance(captured.value.__cause__, OSError)
+    assert raw_video_path.exists()
+    assert invalid_directory.exists()
+    assert video_path.exists()
+    assert json_path.exists()
+
+
 def test_extra_cleanup_unlink_failure_keeps_bundle_files_and_is_distinct(
     tmp_path, monkeypatch
 ):

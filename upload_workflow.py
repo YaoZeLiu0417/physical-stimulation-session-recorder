@@ -52,16 +52,16 @@ def _cleanup_candidates(
 
 
 def _cleanup_local_files(paths: tuple[Path, ...]) -> None:
-    for index, path in enumerate(paths):
+    for path in paths:
         try:
             target_stat = path.lstat()
         except FileNotFoundError:
             continue
         except OSError as exc:
-            raise LocalCleanupError(path, paths[index:]) from exc
+            raise LocalCleanupError(path, paths) from exc
         if not stat.S_ISREG(target_stat.st_mode):
             exc = OSError("Local cleanup target is not a regular file.")
-            raise LocalCleanupError(path, paths[index:]) from exc
+            raise LocalCleanupError(path, paths) from exc
 
     for index, path in enumerate(paths):
         try:
