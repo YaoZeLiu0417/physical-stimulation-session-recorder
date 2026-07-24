@@ -12,10 +12,27 @@ SUBJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def validate_subject_id(subject_id: str) -> str:
+    if not isinstance(subject_id, str):
+        raise ValueError("受试者编号仅允许字母、数字、下划线和连字符，长度为 1-64 个字符。")
     safe_subject_id = subject_id.strip()
     if not SUBJECT_ID_RE.fullmatch(safe_subject_id):
         raise ValueError("受试者编号仅允许字母、数字、下划线和连字符，长度为 1-64 个字符。")
     return safe_subject_id
+
+
+def validate_record_id(record_id: str, subject_id: str, date_key: str) -> str:
+    safe_subject_id = validate_subject_id(subject_id)
+    if not isinstance(date_key, str) or not re.fullmatch(r"\d{8}", date_key):
+        raise ValueError("记录日期必须是有效的 YYYYMMDD 日期。")
+    try:
+        datetime.strptime(date_key, "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError("记录日期必须是有效的 YYYYMMDD 日期。") from exc
+
+    expected_pattern = rf"{re.escape(safe_subject_id)}_{date_key}_[0-9a-f]{{8}}"
+    if not isinstance(record_id, str) or not re.fullmatch(expected_pattern, record_id):
+        raise ValueError("记录编号必须匹配受试者、日期和 8 位小写十六进制后缀。")
+    return record_id
 
 
 def can_cleanup(upload: Mapping[str, str]) -> bool:
@@ -25,8 +42,10 @@ def can_cleanup(upload: Mapping[str, str]) -> bool:
 def remote_record_dir(
     save_dir: str, subject_id: str, record_date: str, record_id: str
 ) -> str:
+    safe_subject_id = validate_subject_id(subject_id)
+    validate_record_id(record_id, safe_subject_id, record_date)
     return "/".join(
-        (save_dir.rstrip("/"), validate_subject_id(subject_id), record_date, record_id)
+        (save_dir.rstrip("/"), safe_subject_id, record_date, record_id)
     )
 
 
@@ -90,7 +109,23 @@ class DailyRecordStore:
         return record
 
     def path_for(self, record: Mapping[str, Any]) -> Path:
-        return self.root / f"{record['record_id']}_r{record['revision']}_state.json"
+        subject_id = record["subject_id"]
+        record_date = record["record_date"]
+        if not isinstance(record_date, str):
+            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
+        try:
+            parsed_date = date.fromisoformat(record_date)
+        except ValueError as exc:
+            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。") from exc
+        if parsed_date.isoformat() != record_date:
+            raise ValueError("记录日期必须是 ISO YYYY-MM-DD 格式。")
+
+        date_key = parsed_date.strftime("%Y%m%d")
+        record_id = validate_record_id(record["record_id"], subject_id, date_key)
+        target = self.root / f"{record_id}_r{record['revision']}_state.json"
+        if target.parent.resolve() != self.root.resolve():
+            raise ValueError("记录文件必须保存在记录根目录中。")
+        return target
 
     def save(self, record: dict[str, Any]) -> Path:
         record["updated_at_iso"] = datetime.now().isoformat(timespec="seconds")

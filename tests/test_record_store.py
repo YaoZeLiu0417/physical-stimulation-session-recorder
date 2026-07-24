@@ -1,4 +1,5 @@
-from datetime import date
+from copy import deepcopy
+from datetime import date, datetime
 import json
 import re
 
@@ -42,6 +43,27 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "sub-001", date(2026, 7, 24), intervention_day=7
     )
 
+    assert set(record) == {
+        "schema_version",
+        "record_id",
+        "subject_id",
+        "record_date",
+        "intervention_day",
+        "revision",
+        "instrument_versions",
+        "daily_core",
+        "conditional_details",
+        "weekly_extension",
+        "formal_visits",
+        "field_status",
+        "derived_metrics",
+        "safety_signals",
+        "recording",
+        "completion",
+        "upload",
+        "created_at_iso",
+        "updated_at_iso",
+    }
     assert record["schema_version"] == 4
     assert re.fullmatch(r"sub-001_20260724_[0-9a-f]{8}", record["record_id"])
     assert record["subject_id"] == "sub-001"
@@ -70,8 +92,8 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "current_step": {},
     }
     assert record["upload"] == {"json": "pending", "video": "pending"}
-    assert record["created_at_iso"]
-    assert record["updated_at_iso"]
+    assert datetime.fromisoformat(record["created_at_iso"]).microsecond == 0
+    assert datetime.fromisoformat(record["updated_at_iso"]).microsecond == 0
 
 
 def test_save_resume_and_revise_preserve_history_and_reset_draft_state(tmp_path):
@@ -108,6 +130,46 @@ def test_save_resume_and_revise_preserve_history_and_reset_draft_state(tmp_path)
     assert store.path_for(revised).is_file()
 
 
+def test_save_persists_literal_chinese_utf8_and_reloads_it(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["daily_core"]["context"] = "触发情境：和家人争吵"
+    saved_path = store.save(record)
+
+    contents = saved_path.read_text(encoding="utf-8")
+    assert "触发情境：和家人争吵" in contents
+    assert "\\u" not in contents
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert resumed["daily_core"]["context"] == "触发情境：和家人争吵"
+
+
+def test_revise_deep_copies_preserved_nested_content(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    original = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    original["daily_core"] = {"nested": {"items": [1]}}
+
+    revised = store.revise(original)
+    revised["daily_core"]["nested"]["items"].append(2)
+    assert original["daily_core"]["nested"]["items"] == [1]
+
+    original["daily_core"]["nested"]["items"].append(3)
+    assert revised["daily_core"]["nested"]["items"] == [1, 2]
+
+
+def test_get_or_create_selects_highest_numeric_revision_not_filename_order(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    revision_nine = deepcopy(record)
+    revision_nine["revision"] = 9
+    store.save(revision_nine)
+    revision_ten = deepcopy(record)
+    revision_ten["revision"] = 10
+    store.save(revision_ten)
+
+    resumed = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    assert resumed["revision"] == 10
+
+
 @pytest.mark.parametrize(
     ("upload", "expected"),
     [
@@ -130,3 +192,48 @@ def test_remote_record_dir_uses_stable_segments_without_double_slash():
 def test_remote_record_dir_validates_subject():
     with pytest.raises(ValueError):
         remote_record_dir("/apps/collector", "../other", "20260724", "record")
+
+
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        "../escaped",
+        "sub-001_20260724_zzzzzzzz",
+        "sub-002_20260724_deadbeef",
+        "sub-001_20260725_deadbeef",
+        "sub-001_20260724_deadbeef/extra",
+        "sub-001_20260724_deadbeef\\extra",
+    ],
+)
+def test_local_paths_reject_hostile_or_mismatched_record_ids(tmp_path, record_id):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    record["record_id"] = record_id
+
+    with pytest.raises(ValueError):
+        store.save(record)
+    assert not (tmp_path.parent / "escaped_r1_state.json").exists()
+
+
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        "../escaped",
+        "sub-001_20260724_zzzzzzzz",
+        "sub-002_20260724_deadbeef",
+        "sub-001_20260725_deadbeef",
+        "sub-001_20260724_deadbeef/extra",
+        "sub-001_20260724_deadbeef\\extra",
+    ],
+)
+def test_remote_paths_reject_hostile_or_mismatched_record_ids(record_id):
+    with pytest.raises(ValueError):
+        remote_record_dir("/apps/collector", "sub-001", "20260724", record_id)
+
+
+@pytest.mark.parametrize("date_key", ["20260229", "2026072", "202607240"])
+def test_remote_paths_require_a_real_eight_digit_calendar_date(date_key):
+    with pytest.raises(ValueError):
+        remote_record_dir(
+            "/apps/collector", "sub-001", date_key, f"sub-001_{date_key}_deadbeef"
+        )
