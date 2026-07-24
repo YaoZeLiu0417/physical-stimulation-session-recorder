@@ -30,7 +30,12 @@ from streamlit.components.v1 import html
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from aiortc.contrib.media import MediaRecorder
 
-from link_auth import VerifiedLink, verify_subject_link
+from link_auth import (
+    VerifiedLink,
+    mark_admin_authenticated,
+    reconcile_link_auth_state,
+    verify_subject_link,
+)
 
 # =========================
 # 基础：页面设置 & 工具函数
@@ -84,17 +89,18 @@ def _get_query_params() -> Dict[str, str]:
         qp = st.experimental_get_query_params()
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in qp.items()}
 
-def verify_link_params() -> tuple[Optional[VerifiedLink], str]:
+def verify_link_params() -> tuple[Optional[VerifiedLink], str, bool]:
     q = _get_query_params()
     sid = q.get("sid", "")
     exp_raw = q.get("exp", "")
     sig = q.get("sig", "")
+    signed_link_attempted = bool(sid or exp_raw or sig)
     if not (sid and exp_raw and sig and LINK_SIGNING_KEY):
-        return None, "参数/密钥缺失"
+        return None, "参数/密钥缺失", signed_link_attempted
     try:
         exp = int(exp_raw)
     except Exception:
-        return None, "exp 非法"
+        return None, "exp 非法", signed_link_attempted
     verified = verify_subject_link(
         LINK_SIGNING_KEY,
         sid,
@@ -104,26 +110,37 @@ def verify_link_params() -> tuple[Optional[VerifiedLink], str]:
         now=int(datetime.now(timezone.utc).timestamp()),
     )
     if verified is None:
-        return None, "签名或访视不匹配"
-    return verified, ""
+        return None, "签名或访视不匹配", signed_link_attempted
+    return verified, "", signed_link_attempted
+
+
+verified_link, why_not, signed_link_attempted = verify_link_params()
+invalid_signed_link = reconcile_link_auth_state(
+    st.session_state,
+    verified_link,
+    signed_link_attempted=signed_link_attempted,
+)
 
 # =========================
 # 入口门禁：先验签（被试免口令），否则走口令
 # =========================
 def require_app_password():
     # ① 验签成功（被试入口）→ 直接放行并锁定编号
-    verified, why = verify_link_params()
-    if verified:
-        st.session_state["authed"] = True
-        st.session_state["subject_id"] = verified.subject_id
-        st.session_state["visit"] = verified.visit
+    if verified_link:
         return
+
+    if invalid_signed_link:
+        st.error(f"链接未锁定：{why_not}")
+        st.stop()
 
     # ② 否则需要口令（管理员/调试）
     expected_hash = _safe_secret("APP_PASSWORD_SHA256", "")
     if not expected_hash:
         return  # 未配置口令则放行（仅内部/本地）
-    if st.session_state.get("authed", False):
+    if (
+        st.session_state.get("authed", False)
+        and st.session_state.get("auth_source") == "admin"
+    ):
         return
 
     st.title("🔒 taVNS干预视频日志准入界面")
@@ -132,7 +149,7 @@ def require_app_password():
     if st.button("登录", type="primary"):
         got = hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
         if hmac.compare_digest(got, expected_hash):
-            st.session_state["authed"] = True
+            mark_admin_authenticated(st.session_state)
             st.rerun()
         else:
             st.error("密码错误"); st.stop()
@@ -350,7 +367,7 @@ def transcode_to_mp4(src: Path) -> Optional[Path]:
 # =========================
 st.subheader("① 当日状态")
 
-locked_link, why_not = verify_link_params()
+locked_link = verified_link
 if locked_link:
     subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_link.subject_id, disabled=True)
 else:

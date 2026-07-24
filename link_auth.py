@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 from dataclasses import dataclass
+from typing import Any, MutableMapping
 
 from record_store import validate_subject_id
 
@@ -15,6 +16,41 @@ ALLOWED_VISITS = frozenset({"daily", "V1", "V3", "V4", "V5", "V6"})
 class VerifiedLink:
     subject_id: str
     visit: str
+
+
+def _clear_signed_link_state(state: MutableMapping[str, Any]) -> None:
+    for key in ("authed", "auth_source", "subject_id", "visit"):
+        state.pop(key, None)
+
+
+def reconcile_link_auth_state(
+    state: MutableMapping[str, Any],
+    verified: VerifiedLink | None,
+    *,
+    signed_link_attempted: bool,
+) -> bool:
+    """Apply signed-link identity and report whether an invalid link must stop access."""
+    if verified is not None:
+        state["authed"] = True
+        state["auth_source"] = "signed_link"
+        state["subject_id"] = verified.subject_id
+        state["visit"] = verified.visit
+        return False
+    if signed_link_attempted:
+        _clear_signed_link_state(state)
+        return True
+    if state.get("auth_source") == "signed_link":
+        _clear_signed_link_state(state)
+    return False
+
+
+def mark_admin_authenticated(state: MutableMapping[str, Any]) -> None:
+    if state.get("auth_source") == "signed_link":
+        _clear_signed_link_state(state)
+    else:
+        state.pop("visit", None)
+    state["authed"] = True
+    state["auth_source"] = "admin"
 
 
 def _b64url(value: bytes) -> str:
