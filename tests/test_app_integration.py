@@ -1233,6 +1233,63 @@ def test_historical_upload_uses_private_snapshot_when_source_is_swapped(tmp_path
     assert candidate.read_bytes() == b"SECRET-OUTSIDE"
 
 
+def test_historical_upload_reports_incomplete_cleanup_when_source_is_swapped(
+    tmp_path,
+):
+    workflow = _workflow()
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    candidate = recordings_dir / "history.mp4"
+    candidate.write_bytes(b"ORIGINAL-VIDEO")
+    outside = tmp_path / "outside-secret.mp4"
+    outside.write_bytes(b"SECRET-OUTSIDE")
+
+    def swap_after_snapshot(snapshot, remote_path, *, progress_cb):
+        candidate.unlink()
+        os.link(outside, candidate)
+        assert snapshot.read_bytes() == b"ORIGINAL-VIDEO"
+        return {"ok": True}
+
+    with pytest.raises(LocalCleanupError) as captured:
+        workflow.upload_trusted_recording(
+            candidate,
+            recordings_dir=recordings_dir,
+            remote_path="/remote/history.mp4",
+            upload_fn=swap_after_snapshot,
+            delete_after_upload=True,
+        )
+
+    assert captured.value.failed_path == candidate
+    assert captured.value.remaining_paths == (candidate,)
+    assert candidate.read_bytes() == b"SECRET-OUTSIDE"
+
+
+def test_app_historical_video_cleanup_stays_inside_trusted_upload_boundary():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    trusted_upload = next(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "upload_trusted_recording"
+    )
+
+    assert any(
+        keyword.arg == "delete_after_upload"
+        and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "delete_after_upload_hist"
+        for keyword in trusted_upload.keywords
+    )
+    assert not any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "picked"
+        and call.func.attr == "unlink"
+        for call in ast.walk(tree)
+    )
+
+
 def test_trusted_recording_files_skips_races_and_unsafe_entries(tmp_path, monkeypatch):
     workflow = _workflow()
     recordings_dir = tmp_path / "recordings"

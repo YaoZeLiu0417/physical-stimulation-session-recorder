@@ -408,28 +408,56 @@ class DailyRecordStore:
             "lifecycle": lifecycle,
         }
 
+    def _load_secure_json_unlocked(self, path: Path) -> Any | None:
+        try:
+            path_stat = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or path_stat.st_nlink != 1
+            or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+            or path.parent.resolve() != self._root_resolved
+        ):
+            raise ValueError("lifecycle index path is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "r", encoding="utf-8") as handle:
+            descriptor_stat = os.fstat(handle.fileno())
+            current_stat = os.lstat(path)
+            inode_is_meaningful = (
+                path_stat.st_ino != 0
+                and descriptor_stat.st_ino != 0
+                and current_stat.st_ino != 0
+            )
+            same_open_file = (
+                path_stat.st_dev == descriptor_stat.st_dev
+                and path_stat.st_ino == descriptor_stat.st_ino
+                and current_stat.st_dev == descriptor_stat.st_dev
+                and current_stat.st_ino == descriptor_stat.st_ino
+            )
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_stat.st_nlink != 1
+                or getattr(descriptor_stat, "st_file_attributes", 0) & reparse_flag
+                or not stat.S_ISREG(current_stat.st_mode)
+                or stat.S_ISLNK(current_stat.st_mode)
+                or current_stat.st_nlink != 1
+                or getattr(current_stat, "st_file_attributes", 0) & reparse_flag
+                or (inode_is_meaningful and not same_open_file)
+            ):
+                raise ValueError("lifecycle index changed during open")
+            return json.load(handle)
+
     def _load_identity_unlocked(
         self, subject_id: str, record_date: date
     ) -> dict[str, Any] | None:
         path = self._identity_path(subject_id, record_date)
         try:
-            path_stat = os.lstat(path)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise RecordCorruptionError(f"记录身份索引损坏或无效: {path.name}") from exc
-        try:
-            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-            if (
-                not stat.S_ISREG(path_stat.st_mode)
-                or stat.S_ISLNK(path_stat.st_mode)
-                or path_stat.st_nlink != 1
-                or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
-                or path.parent.resolve() != self._root_resolved
-            ):
-                raise ValueError("记录身份索引路径不安全。")
-            with path.open(encoding="utf-8") as handle:
-                identity = json.load(handle)
+            identity = self._load_secure_json_unlocked(path)
+            if identity is None:
+                return None
             if not isinstance(identity, dict):
                 raise ValueError("记录身份索引必须是对象。")
             if set(identity) != {
@@ -505,23 +533,9 @@ class DailyRecordStore:
     ) -> dict[str, Any] | None:
         path = self._generation_path(subject_id, record_date)
         try:
-            path_stat = os.lstat(path)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise RecordCorruptionError(f"generation marker unavailable: {path.name}") from exc
-        try:
-            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-            if (
-                not stat.S_ISREG(path_stat.st_mode)
-                or stat.S_ISLNK(path_stat.st_mode)
-                or path_stat.st_nlink != 1
-                or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
-                or path.parent.resolve() != self._root_resolved
-            ):
-                raise ValueError("generation marker path is unsafe")
-            with path.open(encoding="utf-8") as handle:
-                generation = json.load(handle)
+            generation = self._load_secure_json_unlocked(path)
+            if generation is None:
+                return None
             expected_keys = {
                 "generation_version", "subject_id", "record_date", "record_id",
                 "intervention_day", "highest_revision", "record_updated_at_iso",

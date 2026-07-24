@@ -504,6 +504,62 @@ def test_lifecycle_index_rejects_reparse_point_attributes(tmp_path, monkeypatch)
         store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
 
 
+def test_generation_marker_swap_before_open_is_rejected(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    generation_path = store._generation_path("sub-001", date(2026, 7, 24))
+    forged_path = tmp_path / "forged-generation.json"
+    forged = json.loads(generation_path.read_text(encoding="utf-8"))
+    forged["upload"] = {"json": "uploaded", "video": "uploaded"}
+    forged["lifecycle"] = "uploaded"
+    forged_path.write_text(json.dumps(forged), encoding="utf-8")
+    original_open = record_store.os.open
+    swapped = False
+
+    def swap_marker_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == generation_path and not swapped:
+            swapped = True
+            generation_path.unlink()
+            os.link(forged_path, generation_path)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(record_store.os, "open", swap_marker_before_open)
+
+    with pytest.raises(RecordCorruptionError):
+        store._load_generation_unlocked("sub-001", date(2026, 7, 24))
+
+    assert swapped is True
+
+
+def test_identity_index_swap_before_open_is_rejected(tmp_path, monkeypatch):
+    store = DailyRecordStore(tmp_path)
+    store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    identity_path = store._identity_path("sub-001", date(2026, 7, 24))
+    forged_path = tmp_path / "forged-identity.json"
+    forged = json.loads(identity_path.read_text(encoding="utf-8"))
+    forged["upload"] = {"json": "uploaded", "video": "uploaded"}
+    forged["lifecycle"] = "uploaded"
+    forged_path.write_text(json.dumps(forged), encoding="utf-8")
+    original_open = record_store.os.open
+    swapped = False
+
+    def swap_index_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == identity_path and not swapped:
+            swapped = True
+            identity_path.unlink()
+            os.link(forged_path, identity_path)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(record_store.os, "open", swap_index_before_open)
+
+    with pytest.raises(RecordCorruptionError):
+        store._load_identity_unlocked("sub-001", date(2026, 7, 24))
+
+    assert swapped is True
+
+
 def test_initial_record_has_exact_structural_contract(tmp_path):
     record = DailyRecordStore(tmp_path).get_or_create(
         "sub-001", date(2026, 7, 24), intervention_day=7

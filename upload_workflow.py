@@ -1,4 +1,7 @@
+import os
+import shutil
 import stat
+import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,10 @@ UploadCallbackResult = bool | Mapping[str, object] | None
 
 class UploadResultError(RuntimeError):
     """Raised when an upload callback does not explicitly report success."""
+
+
+class UnsafeUploadSourceError(OSError):
+    """Raised when an upload source cannot be bound to one safe file."""
 
 
 class LocalCleanupError(RuntimeError):
@@ -29,6 +36,108 @@ def _require_upload_success(result: object) -> None:
     if isinstance(result, Mapping) and result.get("ok") is True:
         return
     raise UploadResultError("Upload callback did not report success.")
+
+
+def _open_upload_source(path: Path) -> tuple[int, os.stat_result]:
+    descriptor: int | None = None
+    try:
+        path_stat = os.lstat(path)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or path_stat.st_nlink != 1
+            or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise OSError("upload source path is unsafe")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor_stat = os.fstat(descriptor)
+        current_stat = os.lstat(path)
+        inode_is_meaningful = (
+            path_stat.st_ino != 0
+            and descriptor_stat.st_ino != 0
+            and current_stat.st_ino != 0
+        )
+        same_open_file = (
+            path_stat.st_dev == descriptor_stat.st_dev
+            and path_stat.st_ino == descriptor_stat.st_ino
+            and current_stat.st_dev == descriptor_stat.st_dev
+            and current_stat.st_ino == descriptor_stat.st_ino
+        )
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or descriptor_stat.st_nlink != 1
+            or getattr(descriptor_stat, "st_file_attributes", 0) & reparse_flag
+            or not stat.S_ISREG(current_stat.st_mode)
+            or stat.S_ISLNK(current_stat.st_mode)
+            or current_stat.st_nlink != 1
+            or getattr(current_stat, "st_file_attributes", 0) & reparse_flag
+            or (inode_is_meaningful and not same_open_file)
+        ):
+            raise OSError("upload source changed during secure open")
+        opened_descriptor = descriptor
+        descriptor = None
+        return opened_descriptor, descriptor_stat
+    except OSError as exc:
+        raise UnsafeUploadSourceError("upload source is unsafe") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _upload_private_snapshot(
+    source_path: Path,
+    remote_path: str,
+    upload_fn: Callable[..., UploadCallbackResult],
+    *,
+    progress_cb: Any,
+) -> tuple[UploadCallbackResult, os.stat_result]:
+    source_descriptor, source_stat = _open_upload_source(source_path)
+    try:
+        with tempfile.TemporaryDirectory(prefix="bundle-upload-") as temporary_dir:
+            snapshot = Path(temporary_dir) / source_path.name
+            snapshot_descriptor = os.open(
+                snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            try:
+                with os.fdopen(source_descriptor, "rb") as source:
+                    source_descriptor = -1
+                    with os.fdopen(snapshot_descriptor, "wb") as target:
+                        snapshot_descriptor = -1
+                        shutil.copyfileobj(source, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+            finally:
+                if snapshot_descriptor >= 0:
+                    os.close(snapshot_descriptor)
+            os.chmod(snapshot, 0o600)
+            return (
+                upload_fn(snapshot, remote_path, progress_cb=progress_cb),
+                source_stat,
+            )
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+
+
+def upload_private_snapshot(
+    source_path: Path,
+    remote_path: str,
+    upload_fn: Callable[..., UploadCallbackResult],
+    *,
+    progress_cb: Any = None,
+    delete_after_upload: bool = False,
+) -> UploadCallbackResult:
+    """Upload one descriptor-backed snapshot and optionally delete its source."""
+
+    result, source_stat = _upload_private_snapshot(
+        source_path, remote_path, upload_fn, progress_cb=progress_cb
+    )
+    if delete_after_upload:
+        _cleanup_local_files(
+            (source_path,), expected_stats={source_path: source_stat}
+        )
+    return result
 
 
 def _cleanup_candidates(
@@ -51,20 +160,64 @@ def _cleanup_candidates(
     return tuple(candidates)
 
 
-def _cleanup_local_files(paths: tuple[Path, ...]) -> None:
+def _same_file(before: os.stat_result, current: os.stat_result) -> bool:
+    inode_is_meaningful = before.st_ino != 0 and current.st_ino != 0
+    if inode_is_meaningful:
+        return before.st_dev == current.st_dev and before.st_ino == current.st_ino
+    return (
+        before.st_dev == current.st_dev
+        and before.st_size == current.st_size
+        and before.st_mtime_ns == current.st_mtime_ns
+    )
+
+
+def _validate_cleanup_stat(target_stat: os.stat_result) -> None:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        not stat.S_ISREG(target_stat.st_mode)
+        or stat.S_ISLNK(target_stat.st_mode)
+        or target_stat.st_nlink != 1
+        or getattr(target_stat, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise OSError("Local cleanup target is unsafe.")
+
+
+def _cleanup_local_files(
+    paths: tuple[Path, ...],
+    *,
+    expected_stats: Mapping[Path, os.stat_result] | None = None,
+) -> None:
+    expected_stats = expected_stats or {}
+    preflight_stats: dict[Path, os.stat_result | None] = {}
     for path in paths:
         try:
             target_stat = path.lstat()
         except FileNotFoundError:
+            preflight_stats[path] = None
             continue
         except OSError as exc:
             raise LocalCleanupError(path, paths) from exc
-        if not stat.S_ISREG(target_stat.st_mode):
-            exc = OSError("Local cleanup target is not a regular file.")
+        try:
+            _validate_cleanup_stat(target_stat)
+            expected_stat = expected_stats.get(path)
+            if expected_stat is not None and not _same_file(expected_stat, target_stat):
+                raise OSError("Local cleanup target changed after upload.")
+        except OSError as exc:
             raise LocalCleanupError(path, paths) from exc
+        preflight_stats[path] = target_stat
 
     for index, path in enumerate(paths):
         try:
+            current_stat = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise LocalCleanupError(path, paths[index:]) from exc
+        try:
+            _validate_cleanup_stat(current_stat)
+            preflight_stat = preflight_stats[path]
+            if preflight_stat is None or not _same_file(preflight_stat, current_stat):
+                raise OSError("Local cleanup target changed before deletion.")
             path.unlink(missing_ok=True)
         except OSError as exc:
             raise LocalCleanupError(path, paths[index:]) from exc
@@ -103,7 +256,9 @@ def upload_record_bundle(
     remote_video_path = f"{remote_dir}/{video_path.name}"
 
     try:
-        result = upload_fn(json_path, remote_json_path, progress_cb=json_progress)
+        result, _ = _upload_private_snapshot(
+            json_path, remote_json_path, upload_fn, progress_cb=json_progress
+        )
         _require_upload_success(result)
     except Exception:
         state["json"] = "failed"
@@ -112,7 +267,9 @@ def upload_record_bundle(
     state["json"] = "uploaded"
 
     try:
-        result = upload_fn(video_path, remote_video_path, progress_cb=video_progress)
+        result, video_source_stat = _upload_private_snapshot(
+            video_path, remote_video_path, upload_fn, progress_cb=video_progress
+        )
         _require_upload_success(result)
     except Exception:
         state["video"] = "failed"
@@ -122,7 +279,9 @@ def upload_record_bundle(
 
     persist_state(dict(state))
     try:
-        result = upload_fn(json_path, remote_json_path, progress_cb=json_progress)
+        result, final_json_source_stat = _upload_private_snapshot(
+            json_path, remote_json_path, upload_fn, progress_cb=json_progress
+        )
         _require_upload_success(result)
     except Exception:
         state["json"] = "failed"
@@ -130,8 +289,15 @@ def upload_record_bundle(
         raise
 
     if delete_after_upload:
-        cleanup_uploaded_bundle(
-            json_path, video_path, cleanup_paths=cleanup_paths
+        cleanup_candidates = _cleanup_candidates(
+            json_path, video_path, cleanup_paths
+        )
+        _cleanup_local_files(
+            cleanup_candidates,
+            expected_stats={
+                json_path: final_json_source_stat,
+                video_path: video_source_stat,
+            },
         )
 
     return dict(state)

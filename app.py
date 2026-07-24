@@ -913,6 +913,7 @@ else:
                 remote_path=remote_video2,
                 upload_fn=upload_to_baidu,
                 progress_cb=on_prog2,
+                delete_after_upload=delete_after_upload_hist,
             )
             prog2.progress(1.0, text="[视频] 上传完成 ✔")
             st.success("历史视频上传成功！")
@@ -942,12 +943,15 @@ else:
                     pass
 
             if delete_after_upload_hist:
-                try:
-                    picked.unlink(missing_ok=True)
-                    st.caption("已从服务器删除该本地视频（历史）。")
-                except Exception:
-                    pass
+                st.caption("已从服务器删除该本地视频（历史）。")
 
+        except LocalCleanupError as error:
+            LOGGER.warning(
+                "historical upload cleanup pending filename=%s exception_type=%s",
+                picked.name,
+                type(error).__name__,
+            )
+            st.warning(cleanup_pending_message(error, participant=False))
         except Exception as error:
             LOGGER.warning(
                 "historical upload failed filename=%s exception_type=%s",
