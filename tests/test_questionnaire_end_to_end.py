@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -120,6 +121,12 @@ def test_negative_daily_record_round_trip_preserves_false_zero_and_upload_readin
     assert filtered == _negative_daily_answers()
     assert record["daily_core"] == _negative_daily_answers()
     assert record["conditional_details"] == {}
+    core_ids = {question.id for question in DAILY_CORE}
+    assert all(
+        record["field_status"]["daily"][field_id] == "answered"
+        for field_id in core_ids
+    )
+    assert record["completion"]["answered_field_ids"]["daily"] == sorted(core_ids)
     assert all(
         record["field_status"]["daily"][question.id] == "not_applicable"
         for question in DAILY_CONDITIONAL
@@ -434,7 +441,7 @@ def test_browser_fixture_selects_real_scenarios_and_exposes_sanitized_result(
     assert app.session_state["fixture_day"] == expected_day
     record = app.session_state["fixture_record"]
     assert record["schema_version"] == 4
-    assert record["record_id"] == "sub-001_20260724_faceb00c"
+    assert re.fullmatch(r"sub-001_20260724_[0-9a-f]{8}", record["record_id"])
     assert record["recording"]["video_filename"] == f"{record['record_id']}.mp4"
     participant_result = app.session_state["fixture_participant_result"]
     assert participant_result == {
@@ -454,3 +461,91 @@ def test_browser_fixture_selects_real_scenarios_and_exposes_sanitized_result(
     else:
         assert expected_visit in VISIT_INSTRUMENT_IDS
         assert app.slider
+
+
+def test_browser_fixture_hard_refresh_recovers_two_answers_and_step_from_store(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "browser-fixture-store"
+    monkeypatch.setenv("QUESTIONNAIRE_FIXTURE_STORE", str(store_root))
+    first_session = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    first_session.query_params["scenario"] = "day1"
+    first_session.run()
+
+    first_session.radio[0].set_value(False).run()
+    first_session.button[-1].click().run()
+    first_session.radio[0].set_value(False).run()
+    first_session.button[-1].click().run()
+    original_id = first_session.session_state["fixture_record"]["record_id"]
+    original_namespace = first_session.session_state["fixture_namespace"]
+
+    assert len(list((store_root / "day1").glob("*_state.json"))) == 1
+
+    refreshed_session = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    refreshed_session.query_params["scenario"] = "day1"
+    refreshed_session.run()
+
+    refreshed_record = refreshed_session.session_state["fixture_record"]
+    refreshed_keys = questionnaire_state_keys(
+        refreshed_session.session_state["fixture_namespace"], "daily"
+    )
+    assert refreshed_record["record_id"] == original_id
+    assert refreshed_session.session_state["fixture_namespace"] == original_namespace
+    assert questionnaire_answers(refreshed_record, "daily") == {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+    }
+    assert refreshed_record["completion"]["answered_field_ids"]["daily"] == [
+        "nssi_behavior_present_24h",
+        "nssi_thought_present_24h",
+    ]
+    assert refreshed_record["completion"]["current_step"]["daily"] == 2
+    assert refreshed_session.session_state[refreshed_keys.step] == 2
+
+
+def test_browser_fixture_scenario_switches_use_isolated_records_and_ui_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "QUESTIONNAIRE_FIXTURE_STORE", str(tmp_path / "browser-fixture-store")
+    )
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.query_params["scenario"] = "day1"
+    app.run()
+    app.radio[0].set_value(False).run()
+    app.button[-1].click().run()
+    day1_id = app.session_state["fixture_record"]["record_id"]
+
+    app.query_params["scenario"] = "day7"
+    app.run()
+    day7_record = app.session_state["fixture_record"]
+    day7_keys = questionnaire_state_keys(
+        app.session_state["fixture_namespace"], "daily"
+    )
+    assert day7_record["record_id"] != day1_id
+    assert questionnaire_answers(day7_record, "daily") == {}
+    assert app.session_state[day7_keys.step] == 0
+
+    app.query_params["scenario"] = "V5"
+    app.run()
+    first_formal_id = formal_flow("V5", {})[0].id
+    app.slider[0].set_value(2).run()
+    app.button[-1].click().run()
+    v5_id = app.session_state["fixture_record"]["record_id"]
+    assert app.session_state["fixture_record"]["formal_visits"]["V5"][
+        "raw_answers"
+    ] == {first_formal_id: 2}
+
+    app.query_params["scenario"] = "day1"
+    app.run()
+    day1_record = app.session_state["fixture_record"]
+    day1_keys = questionnaire_state_keys(
+        app.session_state["fixture_namespace"], "daily"
+    )
+    assert len({day1_id, day7_record["record_id"], v5_id}) == 3
+    assert day1_record["record_id"] == day1_id
+    assert questionnaire_answers(day1_record, "daily") == {
+        "nssi_thought_present_24h": False
+    }
+    assert "V5" not in day1_record["formal_visits"]
+    assert app.session_state[day1_keys.step] == 1

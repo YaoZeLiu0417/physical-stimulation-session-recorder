@@ -1,11 +1,19 @@
+import os
+import tempfile
+from datetime import date
+from pathlib import Path
+
 import streamlit as st
 
 from app_workflow import (
     mark_questionnaire_visit_complete,
     persist_daily_questionnaire,
     persist_formal_questionnaire,
+    questionnaire_answers,
+    questionnaire_visit_complete,
 )
 from questionnaire_ui import questionnaire_state_keys, render_questionnaire
+from record_store import DailyRecordStore
 
 
 SCENARIOS = {
@@ -21,55 +29,64 @@ if scenario in SCENARIOS:
     st.session_state["fixture_scenario"] = scenario
     st.session_state["fixture_visit"] = selected_visit
     st.session_state["fixture_day"] = selected_day
-    st.session_state["fixture_namespace"] = f"fixture-record::{scenario}"
 
-answers = st.session_state.setdefault("fixture_answers", {})
-st.session_state.setdefault("fixture_save_calls", 0)
 visit = st.session_state.setdefault("fixture_visit", "daily")
 intervention_day = st.session_state.setdefault("fixture_day", 7)
-state_namespace = st.session_state.setdefault("fixture_namespace", "fixture-record")
-initial_answered = st.session_state.get("fixture_initial_answered", [])
-initial_step = st.session_state.get("fixture_initial_step", 0)
-state_keys = questionnaire_state_keys(state_namespace, visit)
-record = st.session_state.setdefault(
-    "fixture_record",
-    {
-        "schema_version": 4,
-        "record_id": "sub-001_20260724_faceb00c",
-        "subject_id": "sub-001",
-        "record_date": "2026-07-24",
-        "intervention_day": intervention_day,
-        "revision": 1,
-        "instrument_versions": {
-            "daily_nssi_ema": "1.0",
-            "weekly_nssi": "1.0",
-            "formal_nssi_crf": "1.0",
-        },
-        "daily_core": {},
-        "conditional_details": {},
-        "weekly_extension": {},
-        "formal_visits": {},
-        "field_status": {},
-        "derived_metrics": {},
-        "safety_signals": {},
-        "recording": {
-            "video_filename": "sub-001_20260724_faceb00c.mp4",
-            "started_at_iso": "2026-07-24T08:00:00+00:00",
-            "ended_at_iso": "2026-07-24T08:01:00+00:00",
-            "format": "mp4",
-        },
-        "completion": {
-            "status": "draft",
-            "answered_field_ids": {},
-            "current_step": {},
-            "questionnaire_visits": {},
-        },
-        "upload": {"json": "pending", "video": "pending"},
-        "created_at_iso": "2026-07-24T08:00:00+00:00",
-        "updated_at_iso": "2026-07-24T08:00:00+00:00",
-    },
+if scenario in SCENARIOS:
+    configured_root = os.environ.get("QUESTIONNAIRE_FIXTURE_STORE")
+    if not configured_root:
+        configured_root = os.environ.get("_QUESTIONNAIRE_FIXTURE_PROCESS_STORE")
+    if not configured_root:
+        configured_root = tempfile.mkdtemp(prefix="questionnaire-browser-qa-")
+        os.environ["_QUESTIONNAIRE_FIXTURE_PROCESS_STORE"] = configured_root
+    base_root = Path(configured_root)
+    store_root = base_root / scenario
+else:
+    if "fixture_store_root" not in st.session_state:
+        st.session_state["fixture_store_root"] = tempfile.mkdtemp(
+            prefix="questionnaire-fixture-"
+        )
+    store_root = Path(st.session_state["fixture_store_root"])
+
+record_store = DailyRecordStore(store_root)
+record = record_store.get_or_create(
+    "sub-001", date(2026, 7, 24), intervention_day=intervention_day
 )
-record["intervention_day"] = intervention_day
+if not record["recording"]:
+    record["recording"] = {
+        "video_filename": f"{record['record_id']}.mp4",
+        "started_at_iso": "2026-07-24T08:00:00+00:00",
+        "ended_at_iso": "2026-07-24T08:01:00+00:00",
+        "format": "mp4",
+    }
+    record_store.save(record)
+
+persisted_completion = record["completion"]
+if scenario in SCENARIOS:
+    answers = questionnaire_answers(record, visit)
+    initial_answered = persisted_completion["answered_field_ids"].get(visit, [])
+    initial_step = persisted_completion["current_step"].get(visit, 0)
+    state_namespace = f"{record['record_id']}:r{record['revision']}"
+    st.session_state["fixture_answers"] = dict(answers)
+    st.session_state["fixture_initial_answered"] = list(initial_answered)
+    st.session_state["fixture_initial_step"] = initial_step
+    st.session_state["fixture_namespace"] = state_namespace
+else:
+    answers = st.session_state.setdefault(
+        "fixture_answers", questionnaire_answers(record, visit)
+    )
+    initial_answered = st.session_state.get(
+        "fixture_initial_answered",
+        persisted_completion["answered_field_ids"].get(visit, []),
+    )
+    initial_step = st.session_state.get(
+        "fixture_initial_step", persisted_completion["current_step"].get(visit, 0)
+    )
+    state_namespace = st.session_state.setdefault("fixture_namespace", "fixture-record")
+
+st.session_state.setdefault("fixture_save_calls", 0)
+st.session_state["fixture_record"] = record
+state_keys = questionnaire_state_keys(state_namespace, visit)
 
 
 def save_draft(updated, answered):
@@ -99,6 +116,8 @@ def save_draft(updated, answered):
             set(answered),
             current_step=st.session_state[state_keys.step],
         )
+    record_store.save(record)
+    st.session_state["fixture_record"] = record
     st.session_state["fixture_save_calls"] += 1
 
 
@@ -112,8 +131,9 @@ rendered_answers, completed = render_questionnaire(
     initial_answered_field_ids=initial_answered,
     initial_step=initial_step,
 )
-if completed:
+if completed and not questionnaire_visit_complete(record, visit):
     mark_questionnaire_visit_complete(record, visit)
+    record_store.save(record)
 st.session_state["fixture_rendered_answers"] = dict(rendered_answers)
 st.session_state["fixture_completed"] = completed
 st.session_state["fixture_participant_result"] = {
