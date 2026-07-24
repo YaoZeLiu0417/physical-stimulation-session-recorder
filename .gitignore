@@ -17,3 +17,6 @@ recordings/
 .vscode/
 .idea/
 .DS_Store
+
+# Isolated feature worktrees
+.worktrees/
