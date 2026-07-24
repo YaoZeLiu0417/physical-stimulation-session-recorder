@@ -159,6 +159,29 @@ def _record_store_saves(nodes: list[ast.stmt]) -> list[ast.Call]:
     ]
 
 
+def _statement_lists(node: ast.AST):
+    for _, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            statements = [item for item in value if isinstance(item, ast.stmt)]
+            if statements:
+                yield value
+            for item in value:
+                if isinstance(item, ast.AST):
+                    yield from _statement_lists(item)
+        elif isinstance(value, ast.AST):
+            yield from _statement_lists(value)
+
+
+def _enclosing_statement_list(
+    tree: ast.Module, target: ast.stmt
+) -> tuple[list[ast.stmt], int]:
+    for statements in _statement_lists(tree):
+        for index, statement in enumerate(statements):
+            if statement is target:
+                return statements, index
+    raise AssertionError("enclosing statement list not found")
+
+
 def _assert_no_success_path_save_after_bundle(tree: ast.Module) -> None:
     branch = _upload_button_branch(tree)
     try_index = next(
@@ -179,6 +202,8 @@ def _assert_no_success_path_save_after_bundle(tree: ast.Module) -> None:
         *upload_try.finalbody,
         *branch.body[try_index + 1 :],
     ]
+    siblings, branch_index = _enclosing_statement_list(tree, branch)
+    success_reachable.extend(siblings[branch_index + 1 :])
     assert _record_store_saves(success_reachable) == []
 
 
@@ -480,6 +505,24 @@ def test_app_does_not_save_after_successful_bundle_cleanup():
     )
     with pytest.raises(AssertionError):
         _assert_no_success_path_save_after_bundle(mutated)
+
+    sibling_mutation = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    sibling_branch = _upload_button_branch(sibling_mutation)
+    siblings, branch_index = _enclosing_statement_list(sibling_mutation, sibling_branch)
+    siblings.insert(
+        branch_index + 1,
+        ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="record_store"), attr="save"
+                ),
+                args=[ast.Name(id="record")],
+                keywords=[],
+            )
+        ),
+    )
+    with pytest.raises(AssertionError):
+        _assert_no_success_path_save_after_bundle(sibling_mutation)
 
 
 def test_all_formal_visit_specs_are_representable_by_persistence():
