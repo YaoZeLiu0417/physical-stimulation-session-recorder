@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import date, datetime
 import json
+import multiprocessing
+import os
 import re
 import threading
 
@@ -11,10 +13,24 @@ from record_store import (
     DailyRecordStore,
     RecordConflictError,
     RecordCorruptionError,
+    RecordLockError,
     can_cleanup,
     remote_record_dir,
     validate_subject_id,
 )
+
+
+def _cross_process_get_or_create(root, ready, start, results):
+    try:
+        ready.put(True)
+        if not start.wait(timeout=10):
+            raise TimeoutError("start signal was not received")
+        record = DailyRecordStore(root).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+        results.put(("ok", record["record_id"]))
+    except BaseException as exc:
+        results.put(("error", repr(exc)))
 
 
 def test_validate_subject_id_accepts_safe_identifier_and_trims_whitespace():
@@ -363,6 +379,81 @@ def test_get_or_create_and_initial_save_share_one_day_lock(tmp_path, monkeypatch
     saver.join()
 
     assert "conflict" in outcomes
+    assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
+
+
+def test_hardlinked_day_lock_cannot_modify_external_file(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    external = tmp_path.parent / "external-lock-secret.bin"
+    external.write_bytes(b"SECRET")
+    lock_path = tmp_path / ".locks" / "sub-001_20260724.lock"
+    os.link(external, lock_path)
+
+    with pytest.raises((RecordLockError, RecordCorruptionError)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    assert external.read_bytes() == b"SECRET"
+    assert not list(tmp_path.glob("*_state.json"))
+
+
+def test_symlinked_day_lock_cannot_modify_external_file_when_supported(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    external = tmp_path.parent / "external-symlink-secret.bin"
+    external.write_bytes(b"SECRET")
+    lock_path = tmp_path / ".locks" / "sub-001_20260724.lock"
+    try:
+        lock_path.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    with pytest.raises((RecordLockError, RecordCorruptionError)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    assert external.read_bytes() == b"SECRET"
+    assert not list(tmp_path.glob("*_state.json"))
+
+
+def test_legitimate_day_lock_stays_one_byte_across_repeated_operations(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    for _ in range(3):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+        store.save(record)
+
+    lock_path = tmp_path / ".locks" / "sub-001_20260724.lock"
+    assert lock_path.read_bytes() == b"\0"
+
+
+def test_cross_process_get_or_create_returns_one_record_and_file(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_cross_process_get_or_create,
+            args=(str(tmp_path), ready, start, results),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        for _ in processes:
+            assert ready.get(timeout=10) is True
+        start.set()
+        outcomes = [results.get(timeout=15) for _ in processes]
+        for process in processes:
+            process.join(timeout=15)
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert [status for status, _ in outcomes] == ["ok", "ok"]
+    assert outcomes[0][1] == outcomes[1][1]
     assert len(list(tmp_path.glob("*_r1_state.json"))) == 1
 
 

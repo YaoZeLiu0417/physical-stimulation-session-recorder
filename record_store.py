@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -22,6 +23,10 @@ class RecordConflictError(RuntimeError):
 
 class RecordCorruptionError(RuntimeError):
     """Raised when an on-disk state file fails record integrity validation."""
+
+
+class RecordLockError(RuntimeError):
+    """Raised when a lock path is unsafe or cannot be securely acquired."""
 
 
 def validate_subject_id(subject_id: str) -> str:
@@ -65,42 +70,101 @@ class DailyRecordStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._locks_root = self.root / ".locks"
         self._locks_root.mkdir(parents=True, exist_ok=True)
+        self._root_resolved = self.root.resolve()
+        self._validate_locks_root()
+
+    def _validate_locks_root(self) -> None:
+        expected = self._root_resolved / ".locks"
+        try:
+            locks_stat = os.lstat(self._locks_root)
+        except OSError as exc:
+            raise RecordLockError("无法验证记录锁目录。") from exc
+        if (
+            not stat.S_ISDIR(locks_stat.st_mode)
+            or stat.S_ISLNK(locks_stat.st_mode)
+            or self._locks_root.resolve() != expected
+        ):
+            raise RecordLockError("记录锁目录不是受信任的根目录子目录。")
 
     @contextmanager
     def _lock(self, token: str) -> Iterator[None]:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
             raise ValueError("锁名称包含不安全字符。")
+        self._validate_locks_root()
         key = (str(self.root.resolve()), token)
         with _LOCKS_GUARD:
             local_lock = _LOCKS.setdefault(key, threading.RLock())
         lock_path = self._locks_root / f"{token}.lock"
 
-        with local_lock, lock_path.open("a+b") as lock_file:
-            lock_file.seek(0)
-            lock_file.write(b"\0")
-            lock_file.flush()
-            lock_file.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                while True:
-                    try:
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                        break
-                    except OSError:
-                        time.sleep(0.01)
-            else:
-                import fcntl
-
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        with local_lock:
+            lock_fd: int | None = None
+            lock_file = None
+            locked = False
             try:
-                yield
-            finally:
+                flags = os.O_RDWR | os.O_CREAT
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+                lock_fd = os.open(lock_path, flags, 0o600)
+                path_stat = os.lstat(lock_path)
+                fd_stat = os.fstat(lock_fd)
+                same_inode = (
+                    path_stat.st_dev == fd_stat.st_dev
+                    and path_stat.st_ino == fd_stat.st_ino
+                )
+                inode_is_meaningful = path_stat.st_ino != 0 and fd_stat.st_ino != 0
+                if (
+                    stat.S_ISLNK(path_stat.st_mode)
+                    or not stat.S_ISREG(fd_stat.st_mode)
+                    or path_stat.st_nlink != 1
+                    or fd_stat.st_nlink != 1
+                    or (inode_is_meaningful and not same_inode)
+                ):
+                    raise RecordLockError("记录锁文件不是安全的单链接常规文件。")
+
+                lock_file = os.fdopen(lock_fd, "r+b")
+                lock_fd = None
+                if fd_stat.st_size == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                    os.fsync(lock_file.fileno())
+                elif fd_stat.st_size != 1:
+                    raise RecordLockError("记录锁文件大小无效。")
                 lock_file.seek(0)
+
                 if os.name == "nt":
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    import msvcrt
+
+                    while True:
+                        try:
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                            break
+                        except OSError:
+                            time.sleep(0.01)
                 else:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                locked = True
+                yield
+            except OSError as exc:
+                if not locked:
+                    raise RecordLockError(
+                        f"无法安全获取记录锁: {lock_path.name}"
+                    ) from exc
+                raise
+            finally:
+                if locked and lock_file is not None:
+                    try:
+                        lock_file.seek(0)
+                        if os.name == "nt":
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                if lock_file is not None:
+                    lock_file.close()
+                elif lock_fd is not None:
+                    os.close(lock_fd)
 
     def _matching_paths(self, subject_id: str, record_date: date) -> list[Path]:
         safe_subject_id = validate_subject_id(subject_id)
