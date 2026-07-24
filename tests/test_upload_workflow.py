@@ -218,6 +218,50 @@ def test_partial_cleanup_rerun_deletes_only_remaining_files_without_reupload(
     assert not json_path.exists()
 
 
+def test_source_cleanup_failure_rerun_cleans_full_bundle_without_reupload(
+    tmp_path, monkeypatch
+):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    payload["local_cleanup"] = {"requested": True, "status": "pending"}
+    json_path.write_text(json.dumps(payload), encoding="utf-8")
+    uploads = []
+    original_unlink = Path.unlink
+
+    def upload(local_path, remote_path, *, progress_cb):
+        uploads.append((local_path, remote_path))
+
+    def fail_source_cleanup(path, *args, **kwargs):
+        if path == raw_video_path:
+            raise PermissionError("source FLV is busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_source_cleanup)
+    with pytest.raises(LocalCleanupError):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+        )
+
+    assert len(uploads) == 3
+    assert json_path.exists() and video_path.exists() and raw_video_path.exists()
+
+    monkeypatch.undo()
+    upload_workflow.cleanup_uploaded_bundle(
+        json_path, video_path, cleanup_paths=(raw_video_path,)
+    )
+
+    assert len(uploads) == 3
+    assert not json_path.exists()
+    assert not video_path.exists()
+    assert not raw_video_path.exists()
+
+
 def test_cleanup_deduplicates_paths_including_bundle_files(tmp_path, monkeypatch):
     json_path, video_path, raw_video_path = _bundle(tmp_path)
     unlinked = []

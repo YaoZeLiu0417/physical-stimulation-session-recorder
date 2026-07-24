@@ -289,20 +289,31 @@ def uploaded_cleanup_recovery(
     allowed_names = {f"{record_id}.flv", f"{record_id}.mp4"}
     if not isinstance(filename, str) or filename not in allowed_names:
         return None
+    cleanup_intent = record.get("local_cleanup")
+    requested = (
+        cleanup_intent.get("requested")
+        if isinstance(cleanup_intent, Mapping)
+        else None
+    )
+    if requested is False:
+        return None
     video_path = recordings_dir / filename
     try:
         root = recordings_dir.resolve()
         if json_path.parent.resolve() != root:
             return None
         json_stat = os.lstat(json_path)
-        os.lstat(video_path)
-    except FileNotFoundError as exc:
-        if exc.filename is None or Path(exc.filename) != video_path:
-            return None
     except (OSError, TypeError):
         return None
-    else:
-        return None
+    if requested is not True:
+        try:
+            os.lstat(video_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+        else:
+            return None
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     if (
         not stat.S_ISREG(json_stat.st_mode)
@@ -316,6 +327,19 @@ def uploaded_cleanup_recovery(
         for candidate in sorted(allowed_names - {filename})
     )
     return UploadedCleanupRecovery(json_path, video_path, cleanup_paths)
+
+
+def set_local_cleanup_intent(
+    record: dict[str, Any], *, requested: bool
+) -> dict[str, Any]:
+    if type(requested) is not bool:
+        raise ValueError("cleanup intent must be a boolean")
+    intent = {
+        "requested": requested,
+        "status": "pending" if requested else "retained",
+    }
+    record["local_cleanup"] = intent
+    return dict(intent)
 
 
 def resolve_trusted_intervention_day(config: object, subject_id: str) -> int:

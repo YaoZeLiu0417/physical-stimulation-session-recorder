@@ -244,6 +244,7 @@ class DailyRecordStore:
                 "questionnaire_visits": {},
             },
             "upload": {"json": "pending", "video": "pending"},
+            "local_cleanup": {"requested": False, "status": "idle"},
             "created_at_iso": now,
             "updated_at_iso": now,
         }

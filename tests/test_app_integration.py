@@ -697,11 +697,24 @@ def test_uploaded_cleanup_recovery_requires_missing_video_and_preserves_retained
     video_path = tmp_path / record["recording"]["video_filename"]
     video_path.write_bytes(b"retained administrator copy")
 
+    record["local_cleanup"] = {"requested": False, "status": "retained"}
     assert workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     ) is None
 
+    record["local_cleanup"] = {"requested": True, "status": "pending"}
+    requested_recovery = workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    )
+    assert requested_recovery is not None
+    assert requested_recovery.video_path == video_path
+
     video_path.unlink()
+    record["local_cleanup"] = {"requested": False, "status": "retained"}
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+    record["local_cleanup"] = {"requested": True, "status": "pending"}
     recovery = workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     )
@@ -716,6 +729,48 @@ def test_uploaded_cleanup_recovery_requires_missing_video_and_preserves_retained
     assert workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     ) is None
+
+
+def test_local_cleanup_intent_is_separate_from_upload_state():
+    workflow = _workflow()
+    record = _record()
+
+    assert workflow.set_local_cleanup_intent(record, requested=True) == {
+        "requested": True,
+        "status": "pending",
+    }
+    assert record["upload"] == {"json": "pending", "video": "pending"}
+    assert workflow.set_local_cleanup_intent(record, requested=False) == {
+        "requested": False,
+        "status": "retained",
+    }
+
+
+def test_app_persists_cleanup_intent_before_bundle_upload():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call)]
+    intent_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "set_local_cleanup_intent"
+    )
+    bundle_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name) and call.func.id == "upload_record_bundle"
+    )
+    saves_between = [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "record_store"
+        and call.func.attr == "save"
+        and intent_call.lineno < call.lineno < bundle_call.lineno
+    ]
+    assert intent_call.lineno < bundle_call.lineno
+    assert saves_between
 
 
 def test_app_runs_cleanup_only_recovery_before_constructing_recorder():

@@ -52,6 +52,7 @@ from app_workflow import (
     recording_context,
     resolve_completed_recording,
     resolve_trusted_intervention_day,
+    set_local_cleanup_intent,
     support_needed,
     trusted_recording_path,
     upload_ready_for_visit,
@@ -831,6 +832,8 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
 
         cleanup_paths = (out_file,) if out_file is not None and final_play != out_file else ()
         try:
+            set_local_cleanup_intent(record, requested=delete_after_upload)
+            record_store.save(record)
             upload_record_bundle(
                 meta_path,
                 final_play,

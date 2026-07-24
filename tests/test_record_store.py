@@ -499,6 +499,7 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "recording",
         "completion",
         "upload",
+        "local_cleanup",
         "created_at_iso",
         "updated_at_iso",
     }
@@ -531,6 +532,7 @@ def test_initial_record_has_exact_structural_contract(tmp_path):
         "questionnaire_visits": {},
     }
     assert record["upload"] == {"json": "pending", "video": "pending"}
+    assert record["local_cleanup"] == {"requested": False, "status": "idle"}
     for timestamp in (record["created_at_iso"], record["updated_at_iso"]):
         assert "T" in timestamp
         parsed = datetime.fromisoformat(timestamp)
