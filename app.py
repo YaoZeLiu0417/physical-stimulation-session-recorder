@@ -38,9 +38,14 @@ from link_auth import (
 )
 from app_workflow import (
     cleanup_pending_message,
+    confirm_admin_intervention_day,
+    daily_context_state_keys,
+    daily_context_values,
+    ensure_record_intervention_day,
     persist_daily_questionnaire,
     persist_formal_questionnaire,
     questionnaire_answers,
+    resolve_completed_recording,
     resolve_trusted_intervention_day,
     support_needed,
     upload_failure_message,
@@ -407,6 +412,7 @@ if is_participant:
         st.error("无法确认本次干预日期，请联系研究团队。")
         st.stop()
 else:
+    admin_day_confirmation_key = f"admin_intervention_day_confirmed::{safe_subject_id}"
     intervention_day = st.number_input(
         "干预第几天",
         min_value=1,
@@ -415,10 +421,24 @@ else:
         step=1,
         key=f"admin_intervention_day::{safe_subject_id}",
     )
+    if st.button("确认干预日", key=f"{admin_day_confirmation_key}::button"):
+        st.session_state[admin_day_confirmation_key] = int(intervention_day)
+    confirmed_day = st.session_state.get(admin_day_confirmation_key)
+    if confirmed_day != int(intervention_day):
+        st.info("请确认本次干预日后开始录制。")
+        st.stop()
+    intervention_day = confirm_admin_intervention_day(
+        intervention_day, confirmed=True
+    )
 
 record = record_store.get_or_create(
     safe_subject_id, record_date, int(intervention_day)
 )
+try:
+    ensure_record_intervention_day(record, intervention_day)
+except ValueError:
+    st.error("无法确认本次干预日期，请联系研究团队。")
+    st.stop()
 visit = locked_link.visit if locked_link else st.selectbox(
     "问卷访视", ("daily", *VISIT_INSTRUMENT_IDS),
     index=("daily", *VISIT_INSTRUMENT_IDS).index(st.session_state.get("visit", "daily")),
@@ -427,40 +447,54 @@ st.session_state["visit"] = visit
 
 st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
+context_defaults = daily_context_values(record)
+context_state_keys = daily_context_state_keys(record)
+for field_id, widget_key in context_state_keys.items():
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = context_defaults[field_id]
+
 c21, c22, c23 = st.columns(3)
-sleep_hours = c21.number_input("昨夜睡眠（小时）", 0.0, 24.0, 7.0, 0.5)
-mood        = c22.slider("当前心境（1=很差，9=很好）", 1, 9, 5)
-stress      = c23.slider("当前压力（1=很低，9=很高）", 1, 9, 4)
+sleep_hours = c21.number_input(
+    "昨夜睡眠（小时）",
+    min_value=0.0,
+    max_value=24.0,
+    step=0.5,
+    key=context_state_keys["sleep_hours"],
+)
+mood        = c22.slider("当前心境（1=很差，9=很好）", 1, 9, key=context_state_keys["mood_1to9"])
+stress      = c23.slider("当前压力（1=很低，9=很高）", 1, 9, key=context_state_keys["stress_1to9"])
 
 c31, c32, c33 = st.columns(3)
-pain         = c31.slider("身体不适/疼痛（0=无，10=最剧烈）", 0, 10, 1)
-urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, 0)
-coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, 3)
+pain         = c31.slider("身体不适/疼痛（0=无，10=最剧烈）", 0, 10, key=context_state_keys["pain_0to10"])
+urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, key=context_state_keys["nssi_urge_0to10"])
+coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, key=context_state_keys["coping_effect_1to5"])
 
 c41, c42 = st.columns(2)
-caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], index=1)
-exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], index=1)
+caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], key=context_state_keys["caffeine"])
+exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], key=context_state_keys["exercise"])
 
 tags = st.multiselect(
     "今天我想要描述的内容涉及...(请选择)",
     ["情绪波动", "睡眠", "人际", "学业/工作压力", "身体不适", "药物相关", "积极事件", "其他"],
-    default=[],
+    key=context_state_keys["tags"],
 )
 
 narrative = st.text_area(
     "当日状态叙述（自由输入，尽量详细）",
     height=220,
     placeholder="例：今天发生了什么？情绪何时变化？出现冲动时做了什么？哪些方法有效？有哪些支持？",
+    key=context_state_keys["narrative"],
 )
 triggers = st.text_area(
     "今天发生了不如意的事情，这件事的与（触发因素/情境）....有关",
     height=120,
     placeholder="例：人际冲突、学业/工作、躯体不适、环境刺激、回忆/想法等；也可留空。",
+    key=context_state_keys["triggers"],
 )
 coping_used = st.multiselect(
     "面对今天的不如意，我的应对方式是...（可多选）",
     ["转移注意", "呼吸放松/冥想", "运动", "写作/绘画", "联系他人", "专业求助", "其他"],
-    default=[],
+    key=context_state_keys["coping_used"],
 )
 
 st.session_state["state_payload"] = {
@@ -495,6 +529,10 @@ if st.session_state.get("recorder_record_id") != record["record_id"]:
     st.session_state["recorder_out_path"] = str(flv_path)
     st.session_state["recorder_converted_mp4"] = None
     st.session_state.last_saved = None
+    st.session_state["recorder_completed_record_id"] = None
+    st.session_state["recorder_was_playing"] = False
+    st.session_state["record_started_at_iso"] = ""
+    st.session_state["record_ended_at_iso"] = ""
 st.session_state.setdefault("recorder_format", "flv")
 
 st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测到 ffmpeg 将自动转为 MP4）。")
@@ -503,6 +541,8 @@ def out_recorder_factory():
     st.session_state["recorder_out_path"] = str(flv_path)
     st.session_state["recorder_format"] = "flv"
     st.session_state["record_started_at_iso"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["record_ended_at_iso"] = ""
+    st.session_state["recorder_completed_record_id"] = None
     return MediaRecorder(st.session_state["recorder_out_path"], format="flv")
 
 webrtc_ctx = webrtc_streamer(
@@ -515,6 +555,7 @@ webrtc_ctx = webrtc_streamer(
 
 # 前端 JS 计时
 if webrtc_ctx and webrtc_ctx.state.playing:
+    st.session_state["recorder_was_playing"] = True
     html(
         f"""
         <div style="font-size:16px;margin:6px 0;">
@@ -549,11 +590,17 @@ if "last_saved" not in st.session_state:
 out_path_str = st.session_state.get("recorder_out_path")
 out_file = Path(out_path_str) if out_path_str else None
 
-if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists():
-    just_finished = st.session_state.last_saved != str(out_file)
+if webrtc_ctx and not webrtc_ctx.state.playing:
+    just_finished = bool(
+        st.session_state.get("recorder_was_playing")
+        and out_file
+        and out_file.is_file()
+        and st.session_state.get("recorder_completed_record_id") != record["record_id"]
+    )
     if just_finished:
         st.session_state.last_saved = str(out_file)
         st.session_state["record_ended_at_iso"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["recorder_was_playing"] = False
         st.info("正在尝试将 FLV 转码为 MP4…（需要本机已安装 ffmpeg）")
         mp4_path = transcode_to_mp4(out_file)
         if mp4_path and mp4_path.exists():
@@ -562,8 +609,26 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
         else:
             st.warning("未检测到 ffmpeg 或转码失败，将保留 FLV。")
             st.session_state["recorder_converted_mp4"] = None
+        st.session_state["recorder_completed_record_id"] = record["record_id"]
 
-    final_play = Path(st.session_state.get("recorder_converted_mp4") or out_file)
+    selected_path = (
+        Path(st.session_state["recorder_converted_mp4"])
+        if st.session_state.get("recorder_converted_mp4")
+        else out_file
+    )
+    completed_recording = resolve_completed_recording(
+        record["record_id"],
+        st.session_state.get("recorder_completed_record_id"),
+        selected_path,
+        st.session_state.get("record_started_at_iso"),
+        st.session_state.get("record_ended_at_iso"),
+        recordings_dir=REC_DIR,
+        persisted_recording=record.get("recording"),
+    )
+    if completed_recording is None:
+        st.info("请完成一次新的录制后继续。")
+        st.stop()
+    final_play = completed_recording.path
     st.success(f"录制完成，文件：{final_play.name}")
     st.video(str(final_play))
 
@@ -579,9 +644,18 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
         updated_answers: dict[str, Any], answered_field_ids: set[str]
     ) -> None:
         current_step = int(st.session_state.get(state_keys.step, 0))
+        draft_context = {
+            field_id: state_payload[field_id]
+            for field_id in context_state_keys
+        }
+        record["daily_context"] = draft_context
         if visit == "daily":
             persist_daily_questionnaire(
-                record, updated_answers, answered_field_ids, current_step=current_step
+                record,
+                updated_answers,
+                answered_field_ids,
+                current_step=current_step,
+                daily_context=draft_context,
             )
         else:
             persist_formal_questionnaire(
@@ -616,9 +690,9 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
     record["daily_context"] = state_payload
     record["recording"] = {
         "video_filename": final_play.name,
-        "started_at_iso": st.session_state.get("record_started_at_iso", ""),
-        "ended_at_iso": st.session_state.get("record_ended_at_iso", ""),
-        "format": final_play.suffix.lstrip(".").lower(),
+        "started_at_iso": completed_recording.started_at_iso,
+        "ended_at_iso": completed_recording.ended_at_iso,
+        "format": completed_recording.format,
     }
     record.setdefault("completion", {})["status"] = "complete"
     record_store.save(record)
@@ -656,7 +730,7 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
             record["upload"] = upload_state
             record_store.save(record)
 
-        cleanup_paths = (out_file,) if final_play != out_file else ()
+        cleanup_paths = (out_file,) if out_file is not None and final_play != out_file else ()
         try:
             upload_record_bundle(
                 meta_path,
@@ -678,6 +752,9 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
     if c2.button("重新录制"):
         st.session_state.last_saved = None
         st.session_state["recorder_converted_mp4"] = None
+        st.session_state["recorder_completed_record_id"] = None
+        st.session_state["record_started_at_iso"] = ""
+        st.session_state["record_ended_at_iso"] = ""
         st.rerun()
 
 else:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from questionnaire_scoring import daily_derived_metrics, score_formal_instrument, score_sicq
@@ -18,6 +21,138 @@ from questionnaire_specs import (
 from questionnaire_ui import build_field_status, build_formal_field_status
 from record_store import validate_subject_id
 from upload_workflow import LocalCleanupError
+
+
+DAILY_CONTEXT_DEFAULTS: dict[str, Any] = {
+    "sleep_hours": 7.0,
+    "mood_1to9": 5,
+    "stress_1to9": 4,
+    "pain_0to10": 1,
+    "nssi_urge_0to10": 0,
+    "coping_effect_1to5": 3,
+    "caffeine": "少量",
+    "exercise": "少量",
+    "tags": [],
+    "coping_used": [],
+    "narrative": "",
+    "triggers": "",
+}
+
+
+@dataclass(frozen=True)
+class CompletedRecording:
+    path: Path
+    started_at_iso: str
+    ended_at_iso: str
+    format: str
+
+
+def validate_intervention_day(value: object) -> int:
+    if type(value) is not int:
+        raise ValueError("intervention day must be an integer from 1 to 28")
+    day = value
+    if not 1 <= day <= 28:
+        raise ValueError("intervention day must be an integer from 1 to 28")
+    return day
+
+
+def confirm_admin_intervention_day(value: object, *, confirmed: bool) -> int | None:
+    """Return a day only after the subject-scoped admin confirmation."""
+
+    day = validate_intervention_day(value)
+    return day if confirmed else None
+
+
+def ensure_record_intervention_day(record: Mapping[str, Any], expected_day: object) -> int:
+    expected = validate_intervention_day(expected_day)
+    actual = validate_intervention_day(record.get("intervention_day"))
+    if actual != expected:
+        raise ValueError("stored intervention day does not match trusted selection")
+    return actual
+
+
+def daily_context_values(record: Mapping[str, Any]) -> dict[str, Any]:
+    stored = record.get("daily_context", {})
+    if not isinstance(stored, Mapping):
+        stored = {}
+    values: dict[str, Any] = {}
+    for field_id, default in DAILY_CONTEXT_DEFAULTS.items():
+        value = stored.get(field_id, default)
+        values[field_id] = list(value) if isinstance(value, list) else value
+    return values
+
+
+def daily_context_state_keys(record: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        field_id: f"daily_context::{record['record_id']}:r{record['revision']}::{field_id}"
+        for field_id in DAILY_CONTEXT_DEFAULTS
+    }
+
+
+def _parse_recording_times(
+    started_at_iso: object, ended_at_iso: object
+) -> tuple[str, str] | None:
+    if not isinstance(started_at_iso, str) or not isinstance(ended_at_iso, str):
+        return None
+    if not started_at_iso or not ended_at_iso:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at_iso)
+        ended = datetime.fromisoformat(ended_at_iso)
+    except ValueError:
+        return None
+    if started >= ended:
+        return None
+    return started_at_iso, ended_at_iso
+
+
+def _safe_recording_path(
+    record_id: str, candidate: object, recordings_dir: Path
+) -> Path | None:
+    if not isinstance(candidate, Path):
+        return None
+    allowed_names = {f"{record_id}.flv", f"{record_id}.mp4"}
+    if candidate.name not in allowed_names:
+        return None
+    try:
+        if candidate.parent.resolve() != recordings_dir.resolve() or not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def resolve_completed_recording(
+    record_id: str,
+    completion_marker: object,
+    selected_path: object,
+    started_at_iso: object,
+    ended_at_iso: object,
+    *,
+    recordings_dir: Path,
+    persisted_recording: Mapping[str, Any] | None,
+) -> CompletedRecording | None:
+    """Return only a current completed recording or a safe persisted resume file."""
+
+    path = _safe_recording_path(record_id, selected_path, recordings_dir)
+    times = _parse_recording_times(started_at_iso, ended_at_iso)
+    if completion_marker == record_id and path is not None and times is not None:
+        return CompletedRecording(path, *times, path.suffix.lstrip(".").lower())
+
+    if completion_marker is not None or not isinstance(persisted_recording, Mapping):
+        return None
+    filename = persisted_recording.get("video_filename")
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        return None
+    persisted_path = _safe_recording_path(record_id, recordings_dir / filename, recordings_dir)
+    times = _parse_recording_times(
+        persisted_recording.get("started_at_iso"), persisted_recording.get("ended_at_iso")
+    )
+    if persisted_path is None or times is None:
+        return None
+    return CompletedRecording(
+        persisted_path, *times, persisted_path.suffix.lstrip(".").lower()
+    )
 
 
 def resolve_trusted_intervention_day(config: object, subject_id: str) -> int:
@@ -82,7 +217,14 @@ def persist_daily_questionnaire(
     answered_field_ids: set[str],
     *,
     current_step: int,
+    daily_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if daily_context is not None:
+        record["daily_context"] = {
+            field_id: daily_context[field_id]
+            for field_id in DAILY_CONTEXT_DEFAULTS
+            if field_id in daily_context
+        }
     day = int(record["intervention_day"])
     statuses = build_field_status(answers, set(answered_field_ids), day)
     filtered = _answered_values(answers, statuses)

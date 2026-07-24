@@ -1,11 +1,13 @@
 import ast
 import importlib
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
+from record_store import DailyRecordStore
 from upload_workflow import LocalCleanupError
 
 
@@ -299,27 +301,74 @@ def test_upload_error_copy_separates_failure_from_cleanup_pending(tmp_path):
 
 
 def test_app_participant_view_hides_operational_surfaces_and_raw_responses():
-    source = APP_PATH.read_text(encoding="utf-8")
-    assert 'is_participant = st.session_state.get("auth_source") == "signed_link"' in source
-    assert "if not is_participant:" in source
-    assert "upload_record_bundle(" in source
-    assert "remote_record_dir(" in source
-    assert "st.json(record[\"upload\"])" in source
-    assert 'with st.expander("使用 & 运维提示")' in source
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    admin_only_blocks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.UnaryOp)
+        and isinstance(node.test.op, ast.Not)
+        and isinstance(node.test.operand, ast.Name)
+        and node.test.operand.id == "is_participant"
+    ]
+    assert admin_only_blocks
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "json"
+        for block in admin_only_blocks
+        for call in ast.walk(block)
+        if isinstance(call, ast.Call)
+    )
+
+    participant_stops = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "is_participant"
+    ]
+    assert any(
+        any(
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "st"
+            and call.func.attr == "stop"
+            for call in ast.walk(block)
+            if isinstance(call, ast.Call)
+        )
+        for block in participant_stops
+    )
 
 
 def test_app_does_not_save_after_successful_bundle_cleanup():
     source = APP_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    assert any(
-        isinstance(call.func, ast.Name) and call.func.id == "upload_record_bundle"
-        for call in calls
+    upload_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "upload_record_bundle"
     )
-    marker = "upload_record_bundle("
-    success_tail = source[source.index(marker) :]
-    success_block = success_tail.split("except LocalCleanupError", 1)[0]
-    assert "store.save(record)" not in success_block.split(")", 1)[1]
+    containing_try = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Try)
+        and node.lineno <= upload_call.lineno <= node.end_lineno
+    )
+    save_calls_after_upload = [
+        call
+        for call in ast.walk(containing_try)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "record_store"
+        and call.func.attr == "save"
+        and call.lineno > upload_call.lineno
+        and call.lineno < containing_try.handlers[0].lineno
+    ]
+    assert save_calls_after_upload == []
 
 
 def test_all_formal_visit_specs_are_representable_by_persistence():
@@ -328,3 +377,163 @@ def test_all_formal_visit_specs_are_representable_by_persistence():
         record = _record()
         workflow.persist_formal_questionnaire(record, visit, {}, set(), current_step=0)
         assert tuple(record["formal_visits"][visit]["instruments"]) == instrument_ids
+
+
+def test_admin_record_day_requires_subject_confirmed_selection_before_creation(tmp_path):
+    workflow = _workflow()
+    store = DailyRecordStore(tmp_path)
+
+    assert workflow.confirm_admin_intervention_day(7, confirmed=False) is None
+    assert list(tmp_path.glob("*_state.json")) == []
+    assert workflow.confirm_admin_intervention_day(7, confirmed=True) == 7
+    created = store.get_or_create("sub-001", date(2026, 7, 24), 7)
+    assert created["intervention_day"] == 7
+    for value in (0, 29, True, 1.5, "7", "seven"):
+        with pytest.raises(ValueError):
+            workflow.confirm_admin_intervention_day(value, confirmed=True)
+
+
+def test_existing_record_day_must_match_confirmed_or_trusted_day():
+    workflow = _workflow()
+
+    assert workflow.ensure_record_intervention_day({"intervention_day": 7}, 7) == 7
+    with pytest.raises(ValueError):
+        workflow.ensure_record_intervention_day({"intervention_day": 1}, 7)
+
+
+def test_daily_context_seeds_all_scoped_fields_and_draft_persists_them():
+    workflow = _workflow()
+    record = _record()
+    saved_context = {
+        "sleep_hours": 6.5,
+        "mood_1to9": 3,
+        "stress_1to9": 8,
+        "pain_0to10": 4,
+        "nssi_urge_0to10": 6,
+        "coping_effect_1to5": 2,
+        "caffeine": "适度",
+        "exercise": "少量",
+        "tags": ["睡眠"],
+        "coping_used": ["运动"],
+        "narrative": "saved narrative",
+        "triggers": "saved trigger",
+    }
+    record["daily_context"] = saved_context
+
+    assert workflow.daily_context_values(record) == saved_context
+    assert workflow.daily_context_state_keys(record) == {
+        field_id: f"daily_context::{record['record_id']}:r3::{field_id}"
+        for field_id in saved_context
+    }
+
+    workflow.persist_daily_questionnaire(
+        record,
+        {
+            "nssi_thought_present_24h": False,
+            "nssi_behavior_present_24h": False,
+            "suicide_thought_present_24h": False,
+            "nssi_urge_now": 0,
+            "nssi_resistance_confidence_now": 7,
+        },
+        {
+            "nssi_thought_present_24h",
+            "nssi_behavior_present_24h",
+            "suicide_thought_present_24h",
+            "nssi_urge_now",
+            "nssi_resistance_confidence_now",
+        },
+        current_step=0,
+        daily_context=saved_context,
+    )
+    assert record["daily_context"] == saved_context
+
+
+def test_daily_context_defaults_only_fill_missing_persisted_values():
+    workflow = _workflow()
+    record = _record()
+    record["daily_context"] = {"narrative": "keep me", "mood_1to9": 2}
+
+    values = workflow.daily_context_values(record)
+
+    assert values["narrative"] == "keep me"
+    assert values["mood_1to9"] == 2
+    assert values["sleep_hours"] == 7.0
+    assert values["tags"] == []
+
+
+def test_recording_eligibility_requires_current_marker_safe_file_and_ordered_times(tmp_path):
+    workflow = _workflow()
+    record_id = "sub-001_20260724_deadbeef"
+    video = tmp_path / f"{record_id}.flv"
+    video.write_bytes(b"video")
+
+    accepted = workflow.resolve_completed_recording(
+        record_id,
+        record_id,
+        video,
+        "2026-07-24T10:00:00",
+        "2026-07-24T10:01:00",
+        recordings_dir=tmp_path,
+        persisted_recording=None,
+    )
+    assert accepted is not None and accepted.path == video
+
+    for marker, path, started, ended in (
+        (None, video, "2026-07-24T10:00:00", "2026-07-24T10:01:00"),
+        (record_id, tmp_path / f"{record_id}.mp4", "2026-07-24T10:00:00", "2026-07-24T10:01:00"),
+        (record_id, video, "", "2026-07-24T10:01:00"),
+        (record_id, video, "not-an-iso-date", "2026-07-24T10:01:00"),
+        (record_id, video, "2026-07-24T10:02:00", "2026-07-24T10:01:00"),
+    ):
+        assert workflow.resolve_completed_recording(
+            record_id, marker, path, started, ended,
+            recordings_dir=tmp_path, persisted_recording=None,
+        ) is None
+
+
+def test_recording_resume_only_accepts_safe_current_record_basename(tmp_path):
+    workflow = _workflow()
+    record_id = "sub-001_20260724_deadbeef"
+    video = tmp_path / f"{record_id}.mp4"
+    video.write_bytes(b"video")
+    persisted = {
+        "video_filename": video.name,
+        "started_at_iso": "2026-07-24T10:00:00",
+        "ended_at_iso": "2026-07-24T10:01:00",
+        "format": "mp4",
+    }
+
+    accepted = workflow.resolve_completed_recording(
+        record_id, None, None, None, None,
+        recordings_dir=tmp_path, persisted_recording=persisted,
+    )
+    assert accepted is not None and accepted.path == video
+
+    persisted["video_filename"] = "other_20260724_deadbeef.mp4"
+    assert workflow.resolve_completed_recording(
+        record_id, None, None, None, None,
+        recordings_dir=tmp_path, persisted_recording=persisted,
+    ) is None
+
+
+def test_app_uses_scoped_context_keys_and_recorder_gate_helpers():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    called_names = {
+        node.func.id for node in calls if isinstance(node.func, ast.Name)
+    }
+    assert {"daily_context_state_keys", "daily_context_values", "resolve_completed_recording"} <= called_names
+    scoped_fields = {
+        node.slice.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "context_state_keys"
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    }
+    assert scoped_fields == {
+        "sleep_hours", "mood_1to9", "stress_1to9", "pain_0to10",
+        "nssi_urge_0to10", "coping_effect_1to5", "caffeine", "exercise",
+        "tags", "coping_used", "narrative", "triggers",
+    }
