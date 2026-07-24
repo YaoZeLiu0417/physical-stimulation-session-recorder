@@ -223,6 +223,79 @@ def test_initial_state_replace_failure_leaves_no_lifecycle_index(tmp_path, monke
     assert not store._identity_path("sub-001", date(2026, 7, 24)).exists()
 
 
+def test_revision_state_replace_failure_keeps_generation_and_identity_at_previous_revision(
+    tmp_path, monkeypatch
+):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    original_replace = record_store.os.replace
+
+    def fail_revision_state_replace(source, target):
+        if str(target).endswith("_r2_state.json"):
+            raise OSError("revision state replace failed")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(record_store.os, "replace", fail_revision_state_replace)
+    with pytest.raises(OSError, match="revision state replace failed"):
+        store.revise(first)
+    monkeypatch.undo()
+
+    generation = json.loads(
+        store._generation_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+    identity = json.loads(
+        store._identity_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+    resumed = DailyRecordStore(tmp_path).get_or_create(
+        "sub-001", date(2026, 7, 24), intervention_day=7
+    )
+
+    assert generation["highest_revision"] == 1
+    assert identity["latest_revision"] == 1
+    assert resumed["revision"] == 1
+
+
+def test_generation_write_failure_after_revision_state_repairs_from_new_state(
+    tmp_path, monkeypatch
+):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    def fail_generation_write(record):
+        if record["revision"] == 2:
+            raise OSError("generation write failed")
+
+    monkeypatch.setattr(store, "_write_generation_unlocked", fail_generation_write)
+    with pytest.raises(OSError, match="generation write failed"):
+        store.revise(first)
+    monkeypatch.undo()
+
+    revision_two_paths = list(tmp_path.glob("*_r2_state.json"))
+    assert len(revision_two_paths) == 1
+
+    resumed = DailyRecordStore(tmp_path).get_or_create(
+        "sub-001", date(2026, 7, 24), intervention_day=7
+    )
+    generation = json.loads(
+        store._generation_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+    identity = json.loads(
+        store._identity_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert resumed["revision"] == 2
+    assert generation["highest_revision"] == 2
+    assert identity["latest_revision"] == 2
+
+
 def test_index_write_failure_after_state_commit_is_repaired_from_disk(tmp_path, monkeypatch):
     store = DailyRecordStore(tmp_path)
 
@@ -786,6 +859,34 @@ def test_symlink_candidate_is_reported_as_corruption_when_supported(tmp_path):
 
     with pytest.raises(RecordCorruptionError, match=re.escape(candidate.name)):
         store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+
+def test_hardlinked_state_candidate_is_rejected_without_advancing_indexes(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    forged = deepcopy(record)
+    forged["revision"] = 2
+    forged["supersedes_revision"] = 1
+    external = tmp_path.parent / f"{tmp_path.name}-forged-r2.json"
+    external.write_text(json.dumps(forged), encoding="utf-8")
+    candidate = store.path_for(forged)
+    os.link(external, candidate)
+
+    with pytest.raises(RecordCorruptionError, match=re.escape(candidate.name)):
+        store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+
+    generation = json.loads(
+        store._generation_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+    identity = json.loads(
+        store._identity_path("sub-001", date(2026, 7, 24)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert generation["highest_revision"] == 1
+    assert identity["latest_revision"] == 1
 
 
 def test_serialization_failure_leaves_existing_target_and_no_temp_file(tmp_path, monkeypatch):

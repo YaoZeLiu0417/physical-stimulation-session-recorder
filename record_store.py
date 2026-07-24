@@ -310,9 +310,42 @@ class DailyRecordStore:
         self, path: Path, subject_id: str, record_date: date
     ) -> dict[str, Any]:
         try:
-            if path.is_symlink() or path.parent.resolve() != self.root.resolve():
-                raise ValueError("记录候选路径不安全。")
-            with path.open(encoding="utf-8") as handle:
+            path_stat = os.lstat(path)
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or stat.S_ISLNK(path_stat.st_mode)
+                or path_stat.st_nlink != 1
+                or getattr(path_stat, "st_file_attributes", 0) & reparse_flag
+                or path.parent.resolve() != self._root_resolved
+            ):
+                raise ValueError("record candidate path is unsafe")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(path, flags), "r", encoding="utf-8") as handle:
+                fd_stat = os.fstat(handle.fileno())
+                current_stat = os.lstat(path)
+                inode_is_meaningful = (
+                    path_stat.st_ino != 0
+                    and fd_stat.st_ino != 0
+                    and current_stat.st_ino != 0
+                )
+                same_open_file = (
+                    path_stat.st_dev == fd_stat.st_dev
+                    and path_stat.st_ino == fd_stat.st_ino
+                    and current_stat.st_dev == fd_stat.st_dev
+                    and current_stat.st_ino == fd_stat.st_ino
+                )
+                if (
+                    not stat.S_ISREG(fd_stat.st_mode)
+                    or fd_stat.st_nlink != 1
+                    or getattr(fd_stat, "st_file_attributes", 0) & reparse_flag
+                    or not stat.S_ISREG(current_stat.st_mode)
+                    or stat.S_ISLNK(current_stat.st_mode)
+                    or current_stat.st_nlink != 1
+                    or getattr(current_stat, "st_file_attributes", 0) & reparse_flag
+                    or (inode_is_meaningful and not same_open_file)
+                ):
+                    raise ValueError("record candidate changed during open")
                 record = json.load(handle)
             if not isinstance(record, dict):
                 raise ValueError("记录 JSON 顶层必须是对象。")
@@ -683,10 +716,6 @@ class DailyRecordStore:
         payload = deepcopy(record)
         payload["updated_at_iso"] = self._next_updated_at(previous_updated_at)
         serialized = json.dumps(payload, ensure_ascii=False, indent=2)
-        if revision > 1 and (
-            generation is None or generation["highest_revision"] < revision
-        ):
-            self._write_generation_unlocked(payload)
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as handle:
@@ -698,10 +727,9 @@ class DailyRecordStore:
             if temporary.exists():
                 temporary.unlink()
         record["updated_at_iso"] = payload["updated_at_iso"]
-        if revision == 1 and generation is None:
-            self._write_generation_unlocked(record)
-        elif generation is not None and (
-            generation["highest_revision"] < revision
+        if (
+            generation is None
+            or generation["highest_revision"] < revision
             or self._parse_timestamp(payload["updated_at_iso"])
             > self._parse_timestamp(generation["record_updated_at_iso"])
         ):
