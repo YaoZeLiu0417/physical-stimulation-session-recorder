@@ -52,6 +52,136 @@ def _record(day=6):
     }
 
 
+def _is_st_stop(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "st"
+        and node.value.func.attr == "stop"
+    )
+
+
+def _participant_history_guard(tree: ast.Module) -> tuple[int, ast.If]:
+    for index, node in enumerate(tree.body):
+        if not (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "is_participant"
+            and node.body
+            and _is_st_stop(node.body[-1])
+        ):
+            continue
+        surfaces = [
+            call
+            for statement in tree.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "st"
+            and (
+                (
+                    call.func.attr == "subheader"
+                    and call.args
+                    and isinstance(call.args[0], ast.Constant)
+                    and "历史文件上传" in call.args[0].value
+                )
+                or call.func.attr == "expander"
+            )
+        ]
+        has_history = any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "st"
+            and call.func.attr == "subheader"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and "历史文件上传" in call.args[0].value
+            for statement in tree.body[index + 1 :]
+            for call in ast.walk(statement)
+        )
+        has_operations = any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "st"
+            and call.func.attr == "expander"
+            for statement in tree.body[index + 1 :]
+            for call in ast.walk(statement)
+        )
+        if (
+            has_history
+            and has_operations
+            and surfaces
+            and min(call.lineno for call in surfaces) > node.end_lineno
+        ):
+            return index, node
+    raise AssertionError("history and operations need a top-level participant stop guard")
+
+
+def _upload_button_branch(tree: ast.Module) -> ast.If:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Call):
+            continue
+        call = node.test
+        if (
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "c1"
+            and call.func.attr == "button"
+        ):
+            return node
+    raise AssertionError("upload button branch not found")
+
+
+def _contains_bundle_upload(node: ast.AST) -> bool:
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "upload_record_bundle"
+        for call in ast.walk(node)
+    )
+
+
+def _record_store_saves(nodes: list[ast.stmt]) -> list[ast.Call]:
+    return [
+        call
+        for node in nodes
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "record_store"
+        and call.func.attr == "save"
+    ]
+
+
+def _assert_no_success_path_save_after_bundle(tree: ast.Module) -> None:
+    branch = _upload_button_branch(tree)
+    try_index = next(
+        index
+        for index, statement in enumerate(branch.body)
+        if isinstance(statement, ast.Try) and _contains_bundle_upload(statement)
+    )
+    upload_try = branch.body[try_index]
+    assert isinstance(upload_try, ast.Try)
+    upload_index = next(
+        index
+        for index, statement in enumerate(upload_try.body)
+        if _contains_bundle_upload(statement)
+    )
+    success_reachable = [
+        *upload_try.body[upload_index + 1 :],
+        *upload_try.orelse,
+        *upload_try.finalbody,
+        *branch.body[try_index + 1 :],
+    ]
+    assert _record_store_saves(success_reachable) == []
+
+
 def test_app_imports_required_integration_interfaces():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
     imported = {
@@ -302,6 +432,9 @@ def test_upload_error_copy_separates_failure_from_cleanup_pending(tmp_path):
 
 def test_app_participant_view_hides_operational_surfaces_and_raw_responses():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    guard_index, participant_guard = _participant_history_guard(tree)
+    assert guard_index + 1 < len(tree.body)
+    assert _is_st_stop(participant_guard.body[-1])
     admin_only_blocks = [
         node
         for node in ast.walk(tree)
@@ -322,53 +455,31 @@ def test_app_participant_view_hides_operational_surfaces_and_raw_responses():
         if isinstance(call, ast.Call)
     )
 
-    participant_stops = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Name)
-        and node.test.id == "is_participant"
-    ]
-    assert any(
-        any(
-            isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "st"
-            and call.func.attr == "stop"
-            for call in ast.walk(block)
-            if isinstance(call, ast.Call)
-        )
-        for block in participant_stops
-    )
+    mutated = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    del mutated.body[guard_index]
+    with pytest.raises(AssertionError):
+        _participant_history_guard(mutated)
 
 
 def test_app_does_not_save_after_successful_bundle_cleanup():
-    source = APP_PATH.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    upload_call = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "upload_record_bundle"
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    _assert_no_success_path_save_after_bundle(tree)
+
+    mutated = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    branch = _upload_button_branch(mutated)
+    branch.body.append(
+        ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="record_store"), attr="save"
+                ),
+                args=[ast.Name(id="record")],
+                keywords=[],
+            )
+        )
     )
-    containing_try = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Try)
-        and node.lineno <= upload_call.lineno <= node.end_lineno
-    )
-    save_calls_after_upload = [
-        call
-        for call in ast.walk(containing_try)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "record_store"
-        and call.func.attr == "save"
-        and call.lineno > upload_call.lineno
-        and call.lineno < containing_try.handlers[0].lineno
-    ]
-    assert save_calls_after_upload == []
+    with pytest.raises(AssertionError):
+        _assert_no_success_path_save_after_bundle(mutated)
 
 
 def test_all_formal_visit_specs_are_representable_by_persistence():
@@ -729,3 +840,17 @@ def test_app_signed_operational_surfaces_follow_participant_stop_guard():
         and call.func.attr in {"write", "json"}
     ]
     assert {call.func.attr for call in admin_surface_calls} == {"write", "json"}
+    assert any(
+        call.func.attr == "write"
+        and any(isinstance(node, ast.Name) and node.id == "remote_dir" for node in ast.walk(call))
+        for call in admin_surface_calls
+    )
+    assert any(
+        call.func.attr == "json"
+        and isinstance(call.args[0], ast.Subscript)
+        and isinstance(call.args[0].value, ast.Name)
+        and call.args[0].value.id == "record"
+        and isinstance(call.args[0].slice, ast.Constant)
+        and call.args[0].slice.value == "upload"
+        for call in admin_surface_calls
+    )
