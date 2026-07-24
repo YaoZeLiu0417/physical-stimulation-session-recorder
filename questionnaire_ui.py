@@ -504,15 +504,12 @@ def render_question(
     raise ValueError(f"Unsupported question kind: {question.kind}")
 
 
-def _sync_answered_values(
-    answers: dict[str, Any],
-    answered_field_ids: set[str],
-    state_keys: QuestionnaireStateKeys,
+def _restore_scoped_values(
+    answers: dict[str, Any], state_keys: QuestionnaireStateKeys
 ) -> None:
-    values = st.session_state.get(state_keys.values, {})
-    for field_id in answered_field_ids:
-        if field_id in values:
-            answers[field_id] = values[field_id]
+    values = dict(st.session_state.get(state_keys.values, {}))
+    answers.clear()
+    answers.update(values)
 
 
 def _show_pending_errors(state_keys: QuestionnaireStateKeys) -> None:
@@ -577,7 +574,7 @@ def render_questionnaire(
         st.session_state[state_keys.step] = initial_step
 
     answered = _answered_field_ids(state_keys)
-    _sync_answered_values(answers, answered, state_keys)
+    _restore_scoped_values(answers, state_keys)
     flow = (
         build_flow(answers, intervention_day)
         if visit == "daily"

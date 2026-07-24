@@ -438,6 +438,52 @@ def test_record_namespace_switches_restore_only_their_own_state():
     assert "nssi_urge_now" in set(app.session_state[keys_a.answered])
 
 
+def test_unanswered_preloaded_controller_restores_its_conditional_flow():
+    keys_a = _fixture_keys(namespace="record-A")
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.session_state["fixture_namespace"] = "record-A"
+    app.session_state["fixture_day"] = 6
+    app.session_state["fixture_answers"] = {
+        "nssi_thought_present_24h": True,
+    }
+    app.session_state["fixture_initial_answered"] = []
+    app.session_state["fixture_initial_step"] = 1
+    app = app.run()
+
+    assert app.slider[0].label == DAILY_CONDITIONAL[0].prompt
+    assert app.session_state[keys_a.step] == 1
+    assert not app.session_state[keys_a.answered]
+    assert DAILY_CONDITIONAL[0].id not in app.session_state[keys_a.values]
+    markup = "\n".join(item.value for item in app.markdown)
+    assert "2 / 7" in markup
+
+    app.session_state["fixture_namespace"] = "record-B"
+    app.session_state["fixture_answers"] = {}
+    app.session_state["fixture_initial_step"] = 0
+    app = app.run()
+    assert app.radio[0].value is None
+
+    app.session_state["fixture_namespace"] = "record-A"
+    app.session_state["fixture_answers"] = {}
+    app = app.run()
+    assert app.slider[0].label == DAILY_CONDITIONAL[0].prompt
+    assert app.session_state[keys_a.step] == 1
+    assert app.session_state[keys_a.values] == {
+        "nssi_thought_present_24h": True
+    }
+    markup = "\n".join(item.value for item in app.markdown)
+    assert "2 / 7" in markup
+
+    app = _button(app, "←").click().run()
+    assert app.radio[0].value is True
+    app = _button(app, "继续").click().run()
+    assert [error.value for error in app.error] == ["请先确认当前答案。"]
+    assert app.session_state[keys_a.step] == 0
+    assert "nssi_thought_present_24h" not in set(
+        app.session_state[keys_a.answered]
+    )
+
+
 def test_saved_answers_restore_widget_but_only_initial_ids_count_as_answered():
     answers = {**_negative_daily_answers(), "nssi_urge_now": 5}
     app = AppTest.from_file(str(FIXTURE), default_timeout=10)
