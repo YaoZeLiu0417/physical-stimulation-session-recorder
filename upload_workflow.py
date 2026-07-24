@@ -328,6 +328,7 @@ def upload_record_bundle(
     cleanup_paths: Iterable[Path] = (),
     json_progress: Any = None,
     video_progress: Any = None,
+    confirm_final_sync: Callable[[], None] | None = None,
 ) -> UploadState:
     """Upload the initial record, video, and finalized record in order.
 
@@ -379,6 +380,9 @@ def upload_record_bundle(
         state["json"] = "failed"
         persist_state(dict(state))
         raise
+
+    if confirm_final_sync is not None:
+        confirm_final_sync()
 
     if delete_after_upload:
         _cleanup_local_files(

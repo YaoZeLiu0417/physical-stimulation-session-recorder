@@ -337,13 +337,14 @@ def uploaded_cleanup_recovery(
     if not isinstance(filename, str) or filename not in allowed_names:
         return None
     cleanup_intent = record.get("local_cleanup")
-    requested = (
-        cleanup_intent.get("requested")
-        if isinstance(cleanup_intent, Mapping)
-        else None
+    legacy_cleanup = not isinstance(cleanup_intent, Mapping) or (
+        "requested" not in cleanup_intent
     )
-    if requested is False:
-        return None
+    if not legacy_cleanup:
+        requested = cleanup_intent.get("requested")
+        status = cleanup_intent.get("status")
+        if requested is not True or status != "ready":
+            return None
     video_path = recordings_dir / filename
     try:
         root = recordings_dir.resolve()
@@ -352,7 +353,7 @@ def uploaded_cleanup_recovery(
         json_stat = os.lstat(json_path)
     except (OSError, TypeError):
         return None
-    if requested is not True:
+    if legacy_cleanup:
         try:
             os.lstat(video_path)
         except FileNotFoundError:
@@ -387,6 +388,18 @@ def set_local_cleanup_intent(
     }
     record["local_cleanup"] = intent
     return dict(intent)
+
+
+def mark_local_cleanup_ready(record: dict[str, Any]) -> dict[str, Any]:
+    intent = record.get("local_cleanup")
+    if not isinstance(intent, Mapping) or intent.get("requested") is not True:
+        raise ValueError("local cleanup was not requested")
+    status = intent.get("status")
+    if status not in {"pending", "ready"}:
+        raise ValueError("local cleanup is not pending")
+    ready = {"requested": True, "status": "ready"}
+    record["local_cleanup"] = ready
+    return dict(ready)
 
 
 def resolve_trusted_intervention_day(config: object, subject_id: str) -> int:

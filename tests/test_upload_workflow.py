@@ -70,6 +70,75 @@ def test_success_uploads_json_video_json_then_cleans_all_local_files(tmp_path):
     assert not raw_video_path.exists()
 
 
+def test_final_sync_confirmation_failure_keeps_bundle_and_uploaded_state(tmp_path):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    uploads = []
+
+    def upload(local_path, remote_path, *, progress_cb):
+        uploads.append(remote_path)
+
+    def fail_confirmation():
+        raise OSError("ready confirmation failed")
+
+    with pytest.raises(OSError, match="ready confirmation failed"):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=_json_persister(json_path),
+            delete_after_upload=True,
+            cleanup_paths=(raw_video_path,),
+            confirm_final_sync=fail_confirmation,
+        )
+
+    assert uploads == [
+        "/remote/record/record.json",
+        "/remote/record/record.mp4",
+        "/remote/record/record.json",
+    ]
+    assert json.loads(json_path.read_text(encoding="utf-8"))["upload"] == {
+        "json": "uploaded",
+        "video": "uploaded",
+    }
+    assert video_path.exists()
+    assert raw_video_path.exists()
+
+
+def test_cleanup_runs_only_after_final_json_confirmation(tmp_path, monkeypatch):
+    json_path, video_path, raw_video_path = _bundle(tmp_path)
+    events = []
+    original_cleanup = upload_workflow._cleanup_local_files
+
+    def upload(local_path, remote_path, *, progress_cb):
+        events.append(("upload", remote_path))
+
+    def confirm_final_sync():
+        events.append(("confirm", None))
+
+    def tracking_cleanup(*args, **kwargs):
+        events.append(("cleanup", None))
+        return original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(upload_workflow, "_cleanup_local_files", tracking_cleanup)
+    upload_record_bundle(
+        json_path,
+        video_path,
+        "/remote/record",
+        upload,
+        persist_state=_json_persister(json_path),
+        delete_after_upload=True,
+        cleanup_paths=(raw_video_path,),
+        confirm_final_sync=confirm_final_sync,
+    )
+
+    assert events[-3:] == [
+        ("upload", "/remote/record/record.json"),
+        ("confirm", None),
+        ("cleanup", None),
+    ]
+
+
 def test_bundle_uploads_private_snapshots_and_final_json_reflects_persisted_state(
     tmp_path,
 ):

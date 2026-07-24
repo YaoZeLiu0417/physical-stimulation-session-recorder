@@ -48,6 +48,7 @@ from app_workflow import (
     persist_daily_questionnaire,
     persist_formal_questionnaire,
     mark_questionnaire_visit_complete,
+    mark_local_cleanup_ready,
     questionnaire_answers,
     recording_context,
     resolve_completed_recording,
@@ -831,6 +832,10 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
             record["upload"] = upload_state
             record_store.save(record)
 
+        def confirm_local_cleanup_ready() -> None:
+            mark_local_cleanup_ready(record)
+            record_store.save(record)
+
         cleanup_paths = (out_file,) if out_file is not None and final_play != out_file else ()
         try:
             set_local_cleanup_intent(record, requested=delete_after_upload)
@@ -845,6 +850,9 @@ if webrtc_ctx and not webrtc_ctx.state.playing:
                 cleanup_paths=cleanup_paths,
                 json_progress=on_json_progress,
                 video_progress=on_video_progress,
+                confirm_final_sync=(
+                    confirm_local_cleanup_ready if delete_after_upload else None
+                ),
             )
             st.success("上传完成。")
         except LocalCleanupError as error:

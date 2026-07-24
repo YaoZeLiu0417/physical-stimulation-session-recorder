@@ -44,6 +44,9 @@ redirect_uri = "http://localhost:8501/oauth/callback"
 上传顺序固定为：初始 JSON、选定视频、持久化两项上传状态、最终 JSON 同步。两项远端对象成功后才进入本地清理；若有转码前 FLV，也在同一清理批次内处理。
 
 - 初始 JSON、视频或最终 JSON 同步失败时，保留记录 JSON、选定视频和源 FLV，以稳定 `record_id` 重试；不得改名生成新记录。
+- 请求上传后清理时，`local_cleanup.status=pending` 表示最终远端 JSON 尚未获得本地持久确认，刷新后绝不能据此删除任何本地工件。最终 JSON 明确成功后，应用只在本地原子保存 `local_cleanup.status=ready`；只有 `requested=true` 且状态为 `ready` 才允许刷新后执行 cleanup-only 恢复。
+- `ready` 是本地崩溃恢复确认，不是新的远端上传状态。最终远端 JSON 仍包含上传前的 `pending` 是预期行为；不要为了同步 `ready` 增加第五次上传。若本地 ready 确认保存失败，保留整个 bundle 并重试上传流程。
+- 兼容旧记录时，仅在 `local_cleanup` 缺失或属于旧结构、且视频已经缺失的情况下允许保守 cleanup-only；旧结构的视频仍存在时不得自动删除。`requested=false/status=retained` 始终保留本地副本。
 - `LocalCleanupError` 表示远端上传已经完成，但本地清理未完成。它与上传失败不同；按 `remaining_paths` 处理占用或权限问题后继续清理，不要重新解释为远端失败。
 - 成功清理后不得再次保存记录 JSON，否则会重新创建已经归档的状态文件。最小身份索引必须保留。
 - 被试只看到简化的重试或清理中提示和必要的稳定记录编号；管理员可查看上传状态和执行恢复操作。

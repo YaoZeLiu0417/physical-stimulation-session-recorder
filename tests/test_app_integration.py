@@ -14,7 +14,7 @@ from streamlit.testing.v1 import AppTest
 from link_auth import sign_subject_link
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
 from record_store import DailyRecordStore, RecordArchivedError
-from upload_workflow import LocalCleanupError, UploadResultError
+from upload_workflow import LocalCleanupError, UploadResultError, upload_record_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -704,18 +704,36 @@ def test_uploaded_cleanup_recovery_requires_missing_video_and_preserves_retained
     ) is None
 
     record["local_cleanup"] = {"requested": True, "status": "pending"}
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+
+    record["local_cleanup"] = {"requested": True, "status": "ready"}
     requested_recovery = workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     )
     assert requested_recovery is not None
     assert requested_recovery.video_path == video_path
 
+    record.pop("local_cleanup")
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+
     video_path.unlink()
+    legacy_recovery = workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    )
+    assert legacy_recovery is not None
     record["local_cleanup"] = {"requested": False, "status": "retained"}
     assert workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     ) is None
     record["local_cleanup"] = {"requested": True, "status": "pending"}
+    assert workflow.uploaded_cleanup_recovery(
+        record, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+    record["local_cleanup"] = {"requested": True, "status": "ready"}
     recovery = workflow.uploaded_cleanup_recovery(
         record, json_path=json_path, recordings_dir=tmp_path
     )
@@ -732,6 +750,112 @@ def test_uploaded_cleanup_recovery_requires_missing_video_and_preserves_retained
     ) is None
 
 
+def test_failed_final_json_state_persist_never_authorizes_pending_cleanup(tmp_path):
+    workflow = _workflow()
+    record = _record()
+    record["upload"] = {"json": "pending", "video": "pending"}
+    record["local_cleanup"] = {"requested": True, "status": "pending"}
+    video_path = tmp_path / f"{record['record_id']}.mp4"
+    video_path.write_bytes(b"video")
+    record["recording"] = {
+        "video_filename": video_path.name,
+        "started_at_iso": "2026-07-24T10:00:00+00:00",
+        "ended_at_iso": "2026-07-24T10:01:00+00:00",
+        "format": "mp4",
+    }
+    json_path = tmp_path / f"{record['record_id']}_r3_state.json"
+    json_path.write_text(json.dumps(record), encoding="utf-8")
+    uploads = 0
+
+    def upload(local_path, remote_path, *, progress_cb):
+        nonlocal uploads
+        uploads += 1
+        if uploads == 3:
+            raise RuntimeError("final JSON failed")
+
+    def persist(state):
+        if state["json"] == "failed":
+            raise OSError("failed-state persist failed")
+        record["upload"] = dict(state)
+        json_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(OSError, match="failed-state persist failed"):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            upload,
+            persist_state=persist,
+            delete_after_upload=True,
+        )
+
+    persisted = json.loads(json_path.read_text(encoding="utf-8"))
+    assert persisted["upload"] == {"json": "uploaded", "video": "uploaded"}
+    assert persisted["local_cleanup"] == {"requested": True, "status": "pending"}
+    assert workflow.uploaded_cleanup_recovery(
+        persisted, json_path=json_path, recordings_dir=tmp_path
+    ) is None
+    assert json_path.exists()
+    assert video_path.exists()
+
+
+def test_ready_confirmation_survives_cleanup_failure_for_refresh_recovery(
+    tmp_path, monkeypatch
+):
+    workflow = _workflow()
+    record = _record()
+    record["upload"] = {"json": "pending", "video": "pending"}
+    workflow.set_local_cleanup_intent(record, requested=True)
+    video_path = tmp_path / f"{record['record_id']}.mp4"
+    video_path.write_bytes(b"video")
+    raw_path = tmp_path / f"{record['record_id']}.flv"
+    raw_path.write_bytes(b"raw")
+    record["recording"] = {
+        "video_filename": video_path.name,
+        "started_at_iso": "2026-07-24T10:00:00+00:00",
+        "ended_at_iso": "2026-07-24T10:01:00+00:00",
+        "format": "mp4",
+    }
+    json_path = tmp_path / f"{record['record_id']}_r3_state.json"
+    json_path.write_text(json.dumps(record), encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def persist(state):
+        record["upload"] = dict(state)
+        json_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def confirm_ready():
+        workflow.mark_local_cleanup_ready(record)
+        json_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def fail_raw_cleanup(path, *args, **kwargs):
+        if path == raw_path:
+            raise PermissionError("raw is busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_raw_cleanup)
+    with pytest.raises(LocalCleanupError):
+        upload_record_bundle(
+            json_path,
+            video_path,
+            "/remote/record",
+            lambda *args, **kwargs: None,
+            persist_state=persist,
+            delete_after_upload=True,
+            cleanup_paths=(raw_path,),
+            confirm_final_sync=confirm_ready,
+        )
+
+    persisted = json.loads(json_path.read_text(encoding="utf-8"))
+    assert persisted["local_cleanup"] == {"requested": True, "status": "ready"}
+    recovery = workflow.uploaded_cleanup_recovery(
+        persisted, json_path=json_path, recordings_dir=tmp_path
+    )
+    assert recovery is not None
+    assert recovery.json_path == json_path
+    assert recovery.video_path == video_path
+
+
 def test_local_cleanup_intent_is_separate_from_upload_state():
     workflow = _workflow()
     record = _record()
@@ -745,6 +869,26 @@ def test_local_cleanup_intent_is_separate_from_upload_state():
         "requested": False,
         "status": "retained",
     }
+
+
+def test_local_cleanup_ready_requires_requested_pending_and_is_idempotent():
+    workflow = _workflow()
+    record = _record()
+
+    workflow.set_local_cleanup_intent(record, requested=True)
+    assert workflow.mark_local_cleanup_ready(record) == {
+        "requested": True,
+        "status": "ready",
+    }
+    assert workflow.mark_local_cleanup_ready(record) == {
+        "requested": True,
+        "status": "ready",
+    }
+
+    workflow.set_local_cleanup_intent(record, requested=False)
+    with pytest.raises(ValueError, match="not requested"):
+        workflow.mark_local_cleanup_ready(record)
+    assert record["local_cleanup"] == {"requested": False, "status": "retained"}
 
 
 def test_app_persists_cleanup_intent_before_bundle_upload():
@@ -772,6 +916,43 @@ def test_app_persists_cleanup_intent_before_bundle_upload():
     ]
     assert intent_call.lineno < bundle_call.lineno
     assert saves_between
+
+
+def test_app_confirms_local_cleanup_ready_after_final_remote_json():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    confirmation = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "confirm_local_cleanup_ready"
+    )
+    called_names = {
+        call.func.id
+        for call in ast.walk(confirmation)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    bundle_call = next(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "upload_record_bundle"
+    )
+
+    assert "mark_local_cleanup_ready" in called_names
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "record_store"
+        and call.func.attr == "save"
+        for call in ast.walk(confirmation)
+        if isinstance(call, ast.Call)
+    )
+    assert any(
+        keyword.arg == "confirm_final_sync"
+        and isinstance(keyword.value, ast.IfExp)
+        for keyword in bundle_call.keywords
+    )
 
 
 def test_app_runs_cleanup_only_recovery_before_constructing_recorder():
