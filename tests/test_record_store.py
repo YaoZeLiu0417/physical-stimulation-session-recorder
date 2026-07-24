@@ -121,6 +121,29 @@ def test_generation_marker_blocks_same_day_recreation_when_all_states_are_lost(
     assert not list(tmp_path.glob("*_state.json"))
 
 
+def test_legacy_revision_two_backfills_generation_marker_before_resume(tmp_path):
+    store = DailyRecordStore(tmp_path)
+    first = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)
+    revised = store.revise(first)
+    generation_path = store._generation_path("sub-001", date(2026, 7, 24))
+    generation_path.unlink()
+
+    resumed = DailyRecordStore(tmp_path).get_or_create(
+        "sub-001", date(2026, 7, 24), intervention_day=7
+    )
+
+    assert resumed["revision"] == revised["revision"] == 2
+    assert generation_path.is_file()
+
+    store._identity_path("sub-001", date(2026, 7, 24)).unlink()
+    store.path_for(revised).unlink()
+    with pytest.raises((RecordArchivedError, RecordCorruptionError)):
+        DailyRecordStore(tmp_path).get_or_create(
+            "sub-001", date(2026, 7, 24), intervention_day=7
+        )
+    assert store.path_for(first).is_file()
+
+
 def test_identity_index_rejects_a_state_file_for_a_different_record_id(tmp_path):
     store = DailyRecordStore(tmp_path)
     record = store.get_or_create("sub-001", date(2026, 7, 24), intervention_day=7)

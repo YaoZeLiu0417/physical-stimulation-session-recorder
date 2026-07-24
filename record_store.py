@@ -600,6 +600,9 @@ class DailyRecordStore:
         index = self._load_identity_unlocked(subject_id, record_date)
         generation = self._load_generation_unlocked(subject_id, record_date)
         latest = self._latest_unlocked(subject_id, record_date)
+        if generation is None and latest is not None and latest["revision"] > 1:
+            self._write_generation_unlocked(latest)
+            generation = self._load_generation_unlocked(subject_id, record_date)
         if generation is not None:
             if index is not None and index["record_id"] != generation["record_id"]:
                 raise RecordCorruptionError("lifecycle indexes contain conflicting record identities")
