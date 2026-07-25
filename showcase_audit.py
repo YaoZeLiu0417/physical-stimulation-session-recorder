@@ -1,7 +1,9 @@
 """Fail-closed privacy audit for the public README-only showcase tree."""
 
+import html
 import os
 import re
+import stat
 from pathlib import Path
 
 
@@ -28,7 +30,7 @@ FORBIDDEN_TERMS = (
 )
 
 URI_PATTERN = re.compile(
-    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):"
+    r"(?:(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):|(?P<protocol_relative>//))"
     r"(?P<body>[^\s<>\"'`]+)"
 )
 URI_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
@@ -58,10 +60,11 @@ def _is_approved_uri_token(text: str, match: re.Match[str]) -> bool:
 def _audit_text(relative_path: str, text: str) -> list[str]:
     findings: list[str] = []
     folded_text = text.casefold()
+    decoded_text = html.unescape(text)
 
     for term in FORBIDDEN_TERMS:
         if term.casefold() in folded_text:
-            findings.append(f"forbidden-term: {relative_path}: {term}")
+            findings.append(f"forbidden-term: {relative_path}")
 
     for path_kind, pattern in (
         ("Windows", WINDOWS_PATH_PATTERN),
@@ -70,31 +73,42 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
         if pattern.search(text):
             findings.append(f"absolute-path: {relative_path}: {path_kind}")
 
-    for match in CREDENTIAL_PATTERN.finditer(text):
+    for match in CREDENTIAL_PATTERN.finditer(decoded_text):
         findings.append(
             f"credential-param: {relative_path}: {match.group(1).casefold()}"
         )
 
-    for match in URI_PATTERN.finditer(text):
-        uri = match.group()
+    for match in URI_PATTERN.finditer(decoded_text):
+        scheme = match.group("scheme")
         is_windows_path = (
-            len(match.group("scheme")) == 1
+            scheme is not None
+            and len(scheme) == 1
             and match.group("body").startswith("\\")
         )
         if is_windows_path:
             continue
         has_suspicious_prefix = (
             match.start() > 0
-            and text[match.start() - 1] not in URI_START_BOUNDARIES
+            and decoded_text[match.start() - 1] not in URI_START_BOUNDARIES
         )
-        if has_suspicious_prefix or not _is_approved_uri_token(text, match):
-            findings.append(f"unapproved-url: {relative_path}: {uri}")
+        if has_suspicious_prefix or not _is_approved_uri_token(decoded_text, match):
+            findings.append(f"unapproved-url: {relative_path}")
 
     return findings
 
 
 def audit_showcase(root: Path) -> list[str]:
     """Return privacy findings for a proposed public showcase directory."""
+    try:
+        root_mode = os.lstat(root).st_mode
+    except FileNotFoundError:
+        return ["invalid-root: .: showcase root is missing or is not a directory"]
+    except OSError:
+        return ["root-error: .: unable to inspect showcase root"]
+
+    if not stat.S_ISDIR(root_mode):
+        return ["invalid-root: .: showcase root must be a regular directory"]
+
     try:
         root_exists = root.exists()
         root_is_directory = root.is_dir() if root_exists else False
@@ -105,7 +119,8 @@ def audit_showcase(root: Path) -> list[str]:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
 
     findings: list[str] = []
-    public_paths: list[Path] = []
+    entries_by_name: dict[str, tuple[Path, int]] = {}
+    entry_errors: list[str] = []
     walk_errors: list[OSError] = []
     try:
         for current_dir, directory_names, file_names in os.walk(
@@ -114,34 +129,68 @@ def audit_showcase(root: Path) -> list[str]:
             onerror=walk_errors.append,
             followlinks=False,
         ):
-            directory_names[:] = [
-                name for name in directory_names if name != ".git"
-            ]
             current_path = Path(current_dir)
-            for file_name in file_names:
-                path = current_path / file_name
-                relative = path.relative_to(root)
-                if ".git" in relative.parts:
+            traversable_directories: list[str] = []
+            for directory_name in directory_names:
+                if directory_name == ".git":
                     continue
-                public_paths.append(path)
+                path = current_path / directory_name
+                relative_path = _relative_name(path, root)
+                try:
+                    mode = os.lstat(path).st_mode
+                except OSError:
+                    entry_errors.append(relative_path)
+                    continue
+                entries_by_name[relative_path] = (path, mode)
+                if stat.S_ISDIR(mode):
+                    traversable_directories.append(directory_name)
+            directory_names[:] = traversable_directories
+
+            for file_name in file_names:
+                if file_name == ".git":
+                    continue
+                path = current_path / file_name
+                relative_path = _relative_name(path, root)
+                try:
+                    mode = os.lstat(path).st_mode
+                except OSError:
+                    entry_errors.append(relative_path)
+                    continue
+                entries_by_name[relative_path] = (path, mode)
     except OSError as error:
         walk_errors.append(error)
 
     if walk_errors:
         findings.append("scan-error: .: unable to enumerate complete public tree")
+    findings.extend(
+        f"entry-error: {relative_path}: unable to inspect public entry"
+        for relative_path in sorted(set(entry_errors))
+    )
 
-    paths_by_name = {
-        _relative_name(path, root): path
-        for path in sorted(public_paths, key=lambda item: _relative_name(item, root))
-    }
     for required_path in PUBLIC_FILES:
-        if required_path not in paths_by_name:
+        entry = entries_by_name.get(required_path)
+        if entry is None or not stat.S_ISREG(entry[1]):
             findings.append(f"missing-file: {required_path}")
 
-    for relative_path, path in paths_by_name.items():
-        if relative_path not in PUBLIC_FILES:
-            findings.append(f"extra-file: {relative_path}")
+    assets_entry = entries_by_name.get("assets")
+    if assets_entry is None or not stat.S_ISDIR(assets_entry[1]):
+        findings.append("missing-directory: assets")
 
+    regular_files: list[tuple[str, Path]] = []
+    for relative_path, (path, mode) in sorted(entries_by_name.items()):
+        expected_file = relative_path in PUBLIC_FILES
+        expected_directory = relative_path == "assets"
+        if stat.S_ISREG(mode):
+            if not expected_file:
+                findings.append(f"extra-file: {relative_path}")
+            regular_files.append((relative_path, path))
+        elif stat.S_ISDIR(mode):
+            if not expected_directory:
+                findings.append(f"extra-entry: {relative_path}")
+        else:
+            findings.append(f"special-entry: {relative_path}")
+
+    for relative_path, path in regular_files:
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:

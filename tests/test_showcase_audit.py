@@ -1,4 +1,5 @@
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,12 @@ def _joined_findings(root: Path) -> str:
     return "\n".join(audit_showcase(root))
 
 
+def _with_file_type(result: os.stat_result, file_type: int) -> os.stat_result:
+    values = list(result)
+    values[stat.ST_MODE] = file_type | stat.S_IMODE(result.st_mode)
+    return os.stat_result(values)
+
+
 def test_safe_tree_passes_and_git_contents_are_ignored(tmp_path: Path) -> None:
     _write_safe_tree(tmp_path)
     git_leak = tmp_path / ".git" / "objects" / "leak"
@@ -43,6 +50,16 @@ def test_approved_markdown_and_svg_urls_pass(tmp_path: Path) -> None:
     _write_safe_tree(tmp_path)
     (tmp_path / "README.md").write_text(
         f"[demo]({APP_URL})\n", encoding="utf-8"
+    )
+
+    assert audit_showcase(tmp_path) == []
+
+
+def test_html_encoded_approved_url_passes(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    encoded_app_url = APP_URL.replace(":", "&#58;")
+    (tmp_path / "README.md").write_text(
+        f'<a href="{encoded_app_url}">demo</a>\n', encoding="utf-8"
     )
 
     assert audit_showcase(tmp_path) == []
@@ -193,6 +210,42 @@ def test_non_http_uri_schemes_are_rejected(tmp_path: Path, uri: str) -> None:
     assert "unapproved-url: README.md" in findings
 
 
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<a href="//evil.example/private">demo</a>',
+        '<a href="https&#58;//evil.example/private">demo</a>',
+        '<a href="https&#x3A;&#x2F;&#x2F;evil.example/private">demo</a>',
+    ],
+)
+def test_protocol_relative_and_html_encoded_urls_are_rejected(
+    tmp_path: Path, markup: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(markup, encoding="utf-8")
+
+    findings = _joined_findings(tmp_path)
+
+    assert "unapproved-url: README.md" in findings
+
+
+@pytest.mark.parametrize("sentinel", ["DO_NOT_LOG_THIS", "tavns"])
+def test_findings_do_not_echo_url_or_credential_values(
+    tmp_path: Path, sentinel: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(
+        f"https://evil.example/private?token={sentinel}", encoding="utf-8"
+    )
+
+    findings = audit_showcase(tmp_path)
+    joined = "\n".join(findings)
+
+    assert "unapproved-url: README.md" in joined
+    assert "credential-param: README.md" in joined
+    assert sentinel not in joined
+
+
 def test_markdown_label_colons_are_not_treated_as_uris(tmp_path: Path) -> None:
     _write_safe_tree(tmp_path)
     (tmp_path / "README.md").write_text(
@@ -293,3 +346,79 @@ def test_read_text_oserror_is_reported(
     findings = _joined_findings(tmp_path)
 
     assert "read-error: README.md" in findings
+
+
+@pytest.mark.parametrize(
+    "file_type",
+    [stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR, stat.S_IFSOCK],
+    ids=["symlink", "fifo", "device", "socket"],
+)
+def test_allowlisted_file_must_be_regular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_type: int,
+) -> None:
+    _write_safe_tree(tmp_path)
+    target = tmp_path / "README.md"
+    real_lstat = os.lstat
+
+    def lstat_with_special_file(path) -> os.stat_result:
+        result = real_lstat(path)
+        if Path(path) == target:
+            return _with_file_type(result, file_type)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_special_file)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "special-entry: README.md" in findings
+
+
+def test_root_symlink_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    real_lstat = os.lstat
+
+    def lstat_with_symlink_root(path) -> os.stat_result:
+        result = real_lstat(path)
+        if Path(path) == tmp_path:
+            return _with_file_type(result, stat.S_IFLNK)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_symlink_root)
+
+    findings = audit_showcase(tmp_path)
+
+    assert findings
+    assert findings[0].startswith("invalid-root:")
+
+
+def test_directory_symlink_is_not_silently_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    assets = tmp_path / "assets"
+    real_lstat = os.lstat
+
+    def lstat_with_symlink_assets(path) -> os.stat_result:
+        result = real_lstat(path)
+        if Path(path) == assets:
+            return _with_file_type(result, stat.S_IFLNK)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_symlink_assets)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "special-entry: assets" in findings
+
+
+def test_extra_empty_directory_is_reported(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "private-directory").mkdir()
+
+    findings = _joined_findings(tmp_path)
+
+    assert "extra-entry: private-directory" in findings
