@@ -1,10 +1,10 @@
 # Web UI
 streamlit==1.37.1
-streamlit-webrtc==0.47.1
+streamlit-webrtc==0.63.4
 
 # WebRTC / 视频
-aiortc==1.6.0          # 需搭配 av < 12
-av==11.0.0             # 与 aiortc 1.6.0 兼容，Linux 有预编译轮子
+aiortc==1.15.0        # requires av >= 14, < 18
+av==17.0.0            # provides prebuilt Linux wheels
 
 # 基础依赖
 numpy>=1.24,<2.0
