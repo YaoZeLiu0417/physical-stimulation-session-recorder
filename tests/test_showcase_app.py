@@ -137,7 +137,15 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _element_by_key(app.button, "save_reflection").click().run()
 
     assert not app.exception
-    assert [item.value for item in app.success] == ["演示流程已完成。"]
+    assert not app.success
+    completion_panels = [
+        item.value
+        for item in app.markdown
+        if 'class="completion-status"' in item.value
+    ]
+    assert completion_panels == [
+        '<div class="completion-status" role="status">演示流程已完成。</div>'
+    ]
     assert "隐私边界" in _visible_text(app)
     _assert_progress(app, "4 完成确认")
     _element_by_key(app.button, "restart_demo")
@@ -221,6 +229,7 @@ def test_showcase_source_has_no_private_or_io_capabilities():
     assert "http://" not in source.casefold()
     assert "https://" not in source.casefold()
     assert "st.image" not in source
+    assert "st.success" not in source
     assert "st.set_page_config(page_title=PRODUCT_NAME" in source
     assert 'layout="centered"' in source
 

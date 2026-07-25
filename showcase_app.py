@@ -53,7 +53,7 @@ st.markdown(
         font-weight: 700;
         margin: 0 0 0.4rem;
     }
-    .demo-note, .privacy-note {
+    .demo-note, .privacy-note, .completion-status {
         background: var(--gray);
         padding: 0.85rem 1rem;
     }
@@ -62,6 +62,11 @@ st.markdown(
     }
     .privacy-note {
         border-left: 4px solid var(--peach);
+    }
+    .completion-status {
+        border-left: 4px solid var(--pink);
+        color: var(--navy);
+        font-weight: 700;
     }
     div.stButton > button {
         border-radius: 4px;
@@ -175,7 +180,10 @@ with st.container():
         if st.button("保存合成反馈", type="primary", key="save_reflection"):
             _go("save_reflection")
     elif step == "confirmation":
-        st.success("演示流程已完成。")
+        st.markdown(
+            '<div class="completion-status" role="status">演示流程已完成。</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(
             '<div class="privacy-note"><strong>隐私边界</strong><br>本演示不包含研究名称、干预参数、测量内容、评分规则或真实参与者数据。</div>',
             unsafe_allow_html=True,
