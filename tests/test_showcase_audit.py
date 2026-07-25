@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,15 @@ def test_safe_tree_passes_and_git_contents_are_ignored(tmp_path: Path) -> None:
     git_leak.write_text(
         "tavns https://example.test/?token=secret C:\\private\\file.txt",
         encoding="utf-8",
+    )
+
+    assert audit_showcase(tmp_path) == []
+
+
+def test_approved_markdown_and_svg_urls_pass(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(
+        f"[demo]({APP_URL})\n", encoding="utf-8"
     )
 
     assert audit_showcase(tmp_path) == []
@@ -163,6 +173,24 @@ def test_only_exact_approved_urls_are_allowed(tmp_path: Path, url: str) -> None:
     assert "unapproved-url: README.md" in findings
 
 
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        f"[demo]({APP_URL}!)",
+        f"[demo](javascript:{APP_URL})",
+    ],
+)
+def test_markdown_cannot_hide_url_bypasses(
+    tmp_path: Path, markdown: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(markdown, encoding="utf-8")
+
+    findings = _joined_findings(tmp_path)
+
+    assert "unapproved-url: README.md" in findings
+
+
 @pytest.mark.parametrize("root_kind", ["missing", "file"])
 def test_invalid_root_fails_closed(tmp_path: Path, root_kind: str) -> None:
     root = tmp_path / "showcase"
@@ -173,3 +201,64 @@ def test_invalid_root_fails_closed(tmp_path: Path, root_kind: str) -> None:
 
     assert findings
     assert findings[0].startswith("invalid-root:")
+
+
+@pytest.mark.parametrize("method_name", ["exists", "is_dir"])
+def test_root_metadata_oserror_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method_name: str
+) -> None:
+    _write_safe_tree(tmp_path)
+
+    def raise_oserror(_path: Path) -> bool:
+        raise OSError("metadata denied")
+
+    monkeypatch.setattr(Path, method_name, raise_oserror)
+
+    findings = audit_showcase(tmp_path)
+
+    assert findings
+    assert findings[0].startswith("root-error:")
+
+
+def test_walk_onerror_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    real_walk = os.walk
+
+    def walk_with_error(
+        top: Path,
+        topdown: bool = True,
+        onerror=None,
+        followlinks: bool = False,
+    ):
+        assert onerror is not None
+        assert followlinks is False
+        onerror(PermissionError("walk denied"))
+        return real_walk(
+            top, topdown=topdown, onerror=onerror, followlinks=followlinks
+        )
+
+    monkeypatch.setattr(os, "walk", walk_with_error)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "scan-error: ." in findings
+
+
+def test_read_text_oserror_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    real_read_text = Path.read_text
+
+    def read_text_with_error(path: Path, *args, **kwargs) -> str:
+        if path.name == "README.md":
+            raise OSError("read denied")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_error)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "read-error: README.md" in findings

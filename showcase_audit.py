@@ -1,7 +1,8 @@
 """Fail-closed privacy audit for the public README-only showcase tree."""
 
-from pathlib import Path
+import os
 import re
+from pathlib import Path
 
 
 PUBLIC_FILES = (
@@ -26,7 +27,8 @@ FORBIDDEN_TERMS = (
     "\u8bc4\u5206\u89c4\u5219",
 )
 
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'`)\]}]+", re.IGNORECASE)
+URL_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
 WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])[a-z]:\\[^\s<>\"']+")
 UNIX_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])/(?:users|home)/[^\s<>\"']*")
 CREDENTIAL_PATTERN = re.compile(
@@ -36,19 +38,6 @@ CREDENTIAL_PATTERN = re.compile(
 
 def _relative_name(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
-
-
-def _strip_url_punctuation(url: str) -> str:
-    pairs = {")": "(", "]": "[", "}": "{"}
-    while url:
-        final = url[-1]
-        if final in ".,;:!":
-            url = url[:-1]
-        elif final in pairs and url.count(final) > url.count(pairs[final]):
-            url = url[:-1]
-        else:
-            break
-    return url
 
 
 def _audit_text(relative_path: str, text: str) -> list[str]:
@@ -72,13 +61,10 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
         )
 
     for match in URL_PATTERN.finditer(text):
-        url = _strip_url_punctuation(match.group())
+        url = match.group()
         has_suspicious_prefix = (
             match.start() > 0
-            and (
-                text[match.start() - 1].isalnum()
-                or text[match.start() - 1] in "._+-"
-            )
+            and text[match.start() - 1] not in URL_START_BOUNDARIES
         )
         if has_suspicious_prefix or url not in APPROVED_URLS:
             findings.append(f"unapproved-url: {relative_path}: {url}")
@@ -88,20 +74,40 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
 
 def audit_showcase(root: Path) -> list[str]:
     """Return privacy findings for a proposed public showcase directory."""
-    if not root.exists() or not root.is_dir():
+    try:
+        root_exists = root.exists()
+        root_is_directory = root.is_dir() if root_exists else False
+    except OSError:
+        return ["root-error: .: unable to inspect showcase root"]
+
+    if not root_exists or not root_is_directory:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
 
     findings: list[str] = []
     public_paths: list[Path] = []
+    walk_errors: list[OSError] = []
     try:
-        for path in root.rglob("*"):
-            relative = path.relative_to(root)
-            if ".git" in relative.parts:
-                continue
-            if path.is_file():
+        for current_dir, directory_names, file_names in os.walk(
+            root,
+            topdown=True,
+            onerror=walk_errors.append,
+            followlinks=False,
+        ):
+            directory_names[:] = [
+                name for name in directory_names if name != ".git"
+            ]
+            current_path = Path(current_dir)
+            for file_name in file_names:
+                path = current_path / file_name
+                relative = path.relative_to(root)
+                if ".git" in relative.parts:
+                    continue
                 public_paths.append(path)
-    except OSError:
-        return ["scan-error: .: unable to enumerate public tree"]
+    except OSError as error:
+        walk_errors.append(error)
+
+    if walk_errors:
+        findings.append("scan-error: .: unable to enumerate complete public tree")
 
     paths_by_name = {
         _relative_name(path, root): path
