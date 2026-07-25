@@ -252,8 +252,12 @@ def test_app_visible_titles_use_neutral_product_name():
         and isinstance(call.args[0].value, str)
     ]
 
-    assert "🔒 Physical Stimulation Session Recorder 准入界面" in titles
-    assert "📓 Physical Stimulation Session Recorder" in titles
+    assert sorted(titles) == sorted(
+        [
+            "🔒 Physical Stimulation Session Recorder 准入界面",
+            "📓 Physical Stimulation Session Recorder",
+        ]
+    )
     assert all("tavns" not in title.casefold() for title in titles)
 
 
