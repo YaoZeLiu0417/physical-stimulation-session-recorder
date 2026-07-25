@@ -287,6 +287,13 @@ def test_invalid_root_fails_closed(tmp_path: Path, root_kind: str) -> None:
     assert findings[0].startswith("invalid-root:")
 
 
+def test_malformed_root_fails_closed() -> None:
+    findings = audit_showcase(Path("invalid\0root"))
+
+    assert findings
+    assert findings[0].startswith(("root-error:", "invalid-root:"))
+
+
 @pytest.mark.parametrize("method_name", ["exists", "is_dir"])
 def test_root_metadata_oserror_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method_name: str

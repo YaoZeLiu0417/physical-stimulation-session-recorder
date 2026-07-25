@@ -103,7 +103,7 @@ def audit_showcase(root: Path) -> list[str]:
         root_mode = os.lstat(root).st_mode
     except FileNotFoundError:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
-    except OSError:
+    except (OSError, ValueError):
         return ["root-error: .: unable to inspect showcase root"]
 
     if not stat.S_ISDIR(root_mode):
