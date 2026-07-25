@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import time
-import base64
 import hmac
 import hashlib
 import random
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 
@@ -31,6 +31,59 @@ from streamlit.components.v1 import html
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from aiortc.contrib.media import MediaRecorder
 
+from link_auth import (
+    VerifiedLink,
+    mark_admin_authenticated,
+    reconcile_link_auth_state,
+    verify_subject_link,
+)
+from app_workflow import (
+    admin_intervention_state_keys,
+    archived_record_success_message,
+    cleanup_pending_message,
+    confirm_admin_intervention_day,
+    daily_context_state_keys,
+    daily_context_values,
+    ensure_record_intervention_day,
+    persist_daily_questionnaire,
+    persist_formal_questionnaire,
+    mark_questionnaire_visit_complete,
+    mark_local_cleanup_ready,
+    questionnaire_answers,
+    recording_context,
+    resolve_completed_recording,
+    resolve_trusted_intervention_day,
+    set_local_cleanup_intent,
+    support_needed,
+    trusted_recording_files,
+    try_save_record,
+    upload_ready_for_visit,
+    upload_trusted_recording,
+    uploaded_cleanup_recovery,
+    persisted_support_needed,
+    upload_failure_message,
+)
+from questionnaire_specs import VISIT_INSTRUMENT_IDS
+from questionnaire_ui import questionnaire_state_keys, render_questionnaire
+from record_store import (
+    DailyRecordStore,
+    RecordConflictError,
+    RecordArchivedError,
+    RecordCorruptionError,
+    RecordLockError,
+    remote_record_dir,
+    validate_subject_id,
+)
+from upload_workflow import (
+    LocalCleanupError,
+    cleanup_uploaded_bundle,
+    upload_generated_json,
+    upload_record_bundle,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
 # =========================
 # 基础：页面设置 & 工具函数
 # =========================
@@ -40,7 +93,7 @@ st.set_page_config(
     layout="centered",
 )
 
-def _safe_secret(key: str, default: str = "") -> str:
+def _safe_secret(key: str, default: Any = "") -> Any:
     """优先从 st.secrets 读取；无 secrets.toml 时回退到环境变量。"""
     try:
         return st.secrets[key]  # 本地无 secrets.toml 时可能抛异常
@@ -50,7 +103,22 @@ def _safe_secret(key: str, default: str = "") -> str:
 ROOT = Path(__file__).resolve().parent
 REC_DIR = ROOT / "recordings"
 REC_DIR.mkdir(parents=True, exist_ok=True)
+record_store = DailyRecordStore(REC_DIR)
 CONF_PATH = ROOT / "config.toml"
+
+
+def save_record_or_stop(record: dict[str, Any], *, stage: str) -> None:
+    exception_type = try_save_record(record_store, record)
+    if exception_type is None:
+        return
+    LOGGER.warning(
+        "record save failed record_id=%s stage=%s exception_type=%s",
+        record.get("record_id", "unknown"),
+        stage,
+        exception_type,
+    )
+    st.error("记录暂时无法保存，请重试。")
+    st.stop()
 
 # ---- 读取配置：优先 Secrets，其次本地 config.toml（仅本地调试用） ----
 CFG: Dict[str, Any] = {}
@@ -68,20 +136,14 @@ REDIR = CFG.get("redirect_uri", "http://localhost:8501/oauth/callback")
 SAVE_DIR = CFG.get("save_dir", "/apps/collector")
 
 if not AK or not SK:
-    st.error("未找到百度网盘 AK/SK。请在 Cloud 的 Secrets 填写 [baidu] 配置，或在本地提供 config.toml（不提交仓库）。")
+    LOGGER.warning("application configuration unavailable")
+    st.error("应用配置暂不可用，请联系研究团队。")
     st.stop()
 
 # =========================
 # 被试专属链接：签名校验（用于免口令与锁定 subject_id）
 # =========================
 LINK_SIGNING_KEY = _safe_secret("LINK_SIGNING_KEY", "")  # 在 Secrets/环境变量配置
-
-def _b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-
-def _sign_sid(sid: str, exp_ts: int) -> str:
-    mac = hmac.new(LINK_SIGNING_KEY.encode(), f"{sid}|{exp_ts}".encode(), hashlib.sha256).digest()
-    return _b64url(mac)
 
 def _get_query_params() -> Dict[str, str]:
     try:
@@ -90,50 +152,67 @@ def _get_query_params() -> Dict[str, str]:
         qp = st.experimental_get_query_params()
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in qp.items()}
 
-def verify_link_params() -> tuple[Optional[str], str]:
+def verify_link_params() -> tuple[Optional[VerifiedLink], str, bool]:
     q = _get_query_params()
     sid = q.get("sid", "")
     exp_raw = q.get("exp", "")
     sig = q.get("sig", "")
+    signed_link_attempted = bool(sid or exp_raw or sig)
     if not (sid and exp_raw and sig and LINK_SIGNING_KEY):
-        return None, "参数/密钥缺失"
+        return None, "参数/密钥缺失", signed_link_attempted
     try:
         exp = int(exp_raw)
     except Exception:
-        return None, "exp 非法"
-    now = int(datetime.now(timezone.utc).timestamp())
-    if now > exp:
-        return None, "链接已过期"
-    expect = _sign_sid(sid, exp)
-    if not hmac.compare_digest(expect, sig):
-        return None, "签名不匹配"
-    return sid, ""
+        return None, "exp 非法", signed_link_attempted
+    verified = verify_subject_link(
+        LINK_SIGNING_KEY,
+        sid,
+        exp,
+        sig,
+        q.get("visit", "daily"),
+        now=int(datetime.now(timezone.utc).timestamp()),
+    )
+    if verified is None:
+        return None, "签名或访视不匹配", signed_link_attempted
+    return verified, "", signed_link_attempted
+
+
+verified_link, why_not, signed_link_attempted = verify_link_params()
+invalid_signed_link = reconcile_link_auth_state(
+    st.session_state,
+    verified_link,
+    signed_link_attempted=signed_link_attempted,
+)
 
 # =========================
 # 入口门禁：先验签（被试免口令），否则走口令
 # =========================
 def require_app_password():
     # ① 验签成功（被试入口）→ 直接放行并锁定编号
-    sid, why = verify_link_params()
-    if sid:
-        st.session_state["authed"] = True
-        st.session_state["subject_id"] = sid
+    if verified_link:
         return
+
+    if invalid_signed_link:
+        st.error(f"链接未锁定：{why_not}")
+        st.stop()
 
     # ② 否则需要口令（管理员/调试）
     expected_hash = _safe_secret("APP_PASSWORD_SHA256", "")
     if not expected_hash:
         return  # 未配置口令则放行（仅内部/本地）
-    if st.session_state.get("authed", False):
+    if (
+        st.session_state.get("authed", False)
+        and st.session_state.get("auth_source") == "admin"
+    ):
         return
 
-    st.title("🔒 taVNS干预视频日志准入界面")
+    st.title("🔒 Physical Stimulation Session Recorder 准入界面")
     st.warning("请输入访问密码以继续")
     pw = st.text_input("访问密码", type="password")
     if st.button("登录", type="primary"):
         got = hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
         if hmac.compare_digest(got, expected_hash):
-            st.session_state["authed"] = True
+            mark_admin_authenticated(st.session_state)
             st.rerun()
         else:
             st.error("密码错误"); st.stop()
@@ -141,7 +220,7 @@ def require_app_password():
         st.stop()
 
 require_app_password()
-st.title("📓 taVNS 干预日志")
+st.title("📓 Physical Stimulation Session Recorder")
 
 # 公共 STUN
 RTC_CFG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -219,9 +298,11 @@ def ensure_token(max_retries: int = 5) -> str:
             # 记一次缓存（优先用服务端返回的 expires_in；没有就默认 1 小时）
             ttl = int(j.get("expires_in", 3600))
             st.session_state["bd_token_cache"] = {"token": token, "exp_ts": now + ttl}
-            # 如果百度顺带换发了新的 refresh_token，仅提示手动更新 Secrets（不自动写）
+            # 如果百度顺带换发了新的 refresh_token，仅记录固定运维事件（不自动写）
             if j.get("refresh_token") and j["refresh_token"] != refresh_token:
-                st.info("百度返回了新的 refresh_token，请到 Secrets 手动更新。")
+                LOGGER.warning(
+                    "baidu refresh token rotated manual_update_required=true"
+                )
             return token
 
         # 处理常见错误
@@ -351,57 +432,170 @@ def transcode_to_mp4(src: Path) -> Optional[Path]:
 # =========================
 st.subheader("① 当日状态")
 
-locked_sid, why_not = verify_link_params()
-if locked_sid:
-    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_sid, disabled=True)
+locked_link = verified_link
+if locked_link:
+    subject_id = st.text_input("来访者编号（已由链接锁定）", value=locked_link.subject_id, disabled=True)
 else:
     subject_id = st.text_input("来访者编号", value=st.session_state.get("subject_id", "sub-001"))
     if why_not and LINK_SIGNING_KEY:
         st.caption(f"链接未锁定：{why_not}（当前可手动输入被试编号）")
 st.session_state["subject_id"] = subject_id
 
+is_participant = st.session_state.get("auth_source") == "signed_link"
+try:
+    safe_subject_id = validate_subject_id(subject_id)
+except ValueError:
+    st.error("受试者编号无效，请联系研究团队。")
+    st.stop()
+
+record_date = datetime.now().date()
+if is_participant:
+    try:
+        intervention_day = resolve_trusted_intervention_day(
+            _safe_secret("TRUSTED_INTERVENTION_DAYS", {}), safe_subject_id
+        )
+    except ValueError:
+        st.error("无法确认本次干预日期，请联系研究团队。")
+        st.stop()
+else:
+    admin_day_state_keys = admin_intervention_state_keys(safe_subject_id, record_date)
+    intervention_day = st.number_input(
+        "干预第几天",
+        min_value=1,
+        max_value=28,
+        value=int(st.session_state.get(admin_day_state_keys.selection, 1)),
+        step=1,
+        key=admin_day_state_keys.selection,
+    )
+    if st.button("确认干预日", key=f"{admin_day_state_keys.confirmation}::button"):
+        st.session_state[admin_day_state_keys.confirmation] = int(intervention_day)
+    confirmed_day = st.session_state.get(admin_day_state_keys.confirmation)
+    if confirmed_day != int(intervention_day):
+        st.info("请确认本次干预日后开始录制。")
+        st.stop()
+    intervention_day = confirm_admin_intervention_day(
+        intervention_day, confirmed=True
+    )
+
+visit_options = ("daily", *VISIT_INSTRUMENT_IDS)
+if locked_link:
+    visit = locked_link.visit
+    if visit not in visit_options:
+        st.error("无法确认本次问卷访视，请联系研究团队。")
+        st.stop()
+else:
+    selected_visit = st.session_state.get("visit", "daily")
+    if selected_visit not in visit_options:
+        selected_visit = "daily"
+    visit = st.selectbox(
+        "问卷访视", visit_options, index=visit_options.index(selected_visit)
+    )
+st.session_state["visit"] = visit
+
+try:
+    record = record_store.get_or_create(
+        safe_subject_id, record_date, int(intervention_day)
+    )
+except RecordArchivedError as error:
+    archived_message = archived_record_success_message(error, intervention_day, visit)
+    if archived_message is not None:
+        st.success(archived_message)
+    else:
+        LOGGER.warning(
+            "record unavailable record_id=%s outcome=%s",
+            error.record_id,
+            type(error).__name__,
+        )
+        st.error("当日记录无法安全恢复，请联系研究团队。")
+    st.stop()
+except (RecordConflictError, RecordCorruptionError, RecordLockError):
+    LOGGER.warning("record recovery failed outcome=%s", "store_error")
+    st.error("当日记录无法安全恢复，请联系研究团队。")
+    st.stop()
+try:
+    ensure_record_intervention_day(record, intervention_day)
+except ValueError:
+    st.error("无法确认本次干预日期，请联系研究团队。")
+    st.stop()
 st.caption("说明：尽量用你的语言详述当天体验，这将有利于我们对于你基本状况的掌握。")
 
+cleanup_recovery = uploaded_cleanup_recovery(
+    record,
+    json_path=record_store.path_for(record),
+    recordings_dir=REC_DIR,
+)
+if cleanup_recovery is not None:
+    try:
+        cleanup_uploaded_bundle(
+            cleanup_recovery.json_path,
+            cleanup_recovery.video_path,
+            cleanup_paths=cleanup_recovery.cleanup_paths,
+        )
+    except LocalCleanupError as error:
+        LOGGER.warning(
+            "uploaded bundle cleanup pending record_id=%s exception_type=%s",
+            record["record_id"],
+            type(error).__name__,
+        )
+        st.warning(cleanup_pending_message(error, participant=is_participant))
+    else:
+        st.success("Upload completed and local cleanup finished.")
+    st.stop()
+
+context_defaults = daily_context_values(record)
+context_state_keys = daily_context_state_keys(record)
+for field_id, widget_key in context_state_keys.items():
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = context_defaults[field_id]
+
 c21, c22, c23 = st.columns(3)
-sleep_hours = c21.number_input("昨夜睡眠（小时）", 0.0, 24.0, 7.0, 0.5)
-mood        = c22.slider("当前心境（1=很差，9=很好）", 1, 9, 5)
-stress      = c23.slider("当前压力（1=很低，9=很高）", 1, 9, 4)
+sleep_hours = c21.number_input(
+    "昨夜睡眠（小时）",
+    min_value=0.0,
+    max_value=24.0,
+    step=0.5,
+    key=context_state_keys["sleep_hours"],
+)
+mood        = c22.slider("当前心境（1=很差，9=很好）", 1, 9, key=context_state_keys["mood_1to9"])
+stress      = c23.slider("当前压力（1=很低，9=很高）", 1, 9, key=context_state_keys["stress_1to9"])
 
 c31, c32, c33 = st.columns(3)
-pain         = c31.slider("身体不适/疼痛（0=无，10=最剧烈）", 0, 10, 1)
-urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, 0)
-coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, 3)
+pain         = c31.slider("身体不适/疼痛（0=无，10=最剧烈）", 0, 10, key=context_state_keys["pain_0to10"])
+urge         = c32.slider("自伤冲动强度（0=无，10=极强）", 0, 10, key=context_state_keys["nssi_urge_0to10"])
+coping_eff   = c33.slider("本日应对效果（1=很差，5=很好）", 1, 5, key=context_state_keys["coping_effect_1to5"])
 
 c41, c42 = st.columns(2)
-caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], index=1)
-exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], index=1)
+caffeine = c41.selectbox("近6小时咖啡因", ["无", "少量", "适度", "较多"], key=context_state_keys["caffeine"])
+exercise = c42.selectbox("近24小时运动量", ["无", "少量", "适度", "剧烈"], key=context_state_keys["exercise"])
 
 tags = st.multiselect(
     "今天我想要描述的内容涉及...(请选择)",
     ["情绪波动", "睡眠", "人际", "学业/工作压力", "身体不适", "药物相关", "积极事件", "其他"],
-    default=[],
+    key=context_state_keys["tags"],
 )
 
 narrative = st.text_area(
     "当日状态叙述（自由输入，尽量详细）",
     height=220,
     placeholder="例：今天发生了什么？情绪何时变化？出现冲动时做了什么？哪些方法有效？有哪些支持？",
+    key=context_state_keys["narrative"],
 )
 triggers = st.text_area(
     "今天发生了不如意的事情，这件事的与（触发因素/情境）....有关",
     height=120,
     placeholder="例：人际冲突、学业/工作、躯体不适、环境刺激、回忆/想法等；也可留空。",
+    key=context_state_keys["triggers"],
 )
 coping_used = st.multiselect(
     "面对今天的不如意，我的应对方式是...（可多选）",
     ["转移注意", "呼吸放松/冥想", "运动", "写作/绘画", "联系他人", "专业求助", "其他"],
-    default=[],
+    key=context_state_keys["coping_used"],
 )
 
 st.session_state["state_payload"] = {
     "schema_version": 3,
     "subject_id": subject_id,
-    "timestamp_client_open_iso": datetime.now().isoformat(timespec="seconds"),
+    "timestamp_client_open_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "sleep_hours": float(sleep_hours),
     "mood_1to9": int(mood),
     "stress_1to9": int(stress),
@@ -423,10 +617,18 @@ st.subheader("② 录制视频")
 
 MAX_RECORD_MIN = 20  # 超过会在前端提示，可自行调整
 
-ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-base_name = f"{subject_id}_{ts}"
+base_name = record["record_id"]
 flv_path = REC_DIR / f"{base_name}.flv"
-st.session_state.setdefault("recorder_out_path", str(flv_path))
+if st.session_state.get("recorder_record_id") != record["record_id"]:
+    st.session_state["recorder_record_id"] = record["record_id"]
+    st.session_state["recorder_out_path"] = str(flv_path)
+    st.session_state["recorder_converted_mp4"] = None
+    st.session_state.last_saved = None
+    st.session_state["recorder_completed_record_id"] = None
+    st.session_state["recorder_was_playing"] = False
+    st.session_state["rerecord_requested_record_id"] = None
+    st.session_state["record_started_at_iso"] = ""
+    st.session_state["record_ended_at_iso"] = ""
 st.session_state.setdefault("recorder_format", "flv")
 
 st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测到 ffmpeg 将自动转为 MP4）。")
@@ -434,7 +636,9 @@ st.caption("点击 START 开始录制，STOP 停止并写入文件（如检测�
 def out_recorder_factory():
     st.session_state["recorder_out_path"] = str(flv_path)
     st.session_state["recorder_format"] = "flv"
-    st.session_state["record_started_at_iso"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["record_started_at_iso"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    st.session_state["record_ended_at_iso"] = ""
+    st.session_state["recorder_completed_record_id"] = None
     return MediaRecorder(st.session_state["recorder_out_path"], format="flv")
 
 webrtc_ctx = webrtc_streamer(
@@ -447,6 +651,7 @@ webrtc_ctx = webrtc_streamer(
 
 # 前端 JS 计时
 if webrtc_ctx and webrtc_ctx.state.playing:
+    st.session_state["recorder_was_playing"] = True
     html(
         f"""
         <div style="font-size:16px;margin:6px 0;">
@@ -481,11 +686,17 @@ if "last_saved" not in st.session_state:
 out_path_str = st.session_state.get("recorder_out_path")
 out_file = Path(out_path_str) if out_path_str else None
 
-if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists():
-    just_finished = st.session_state.last_saved != str(out_file)
+if webrtc_ctx and not webrtc_ctx.state.playing:
+    just_finished = bool(
+        st.session_state.get("recorder_was_playing")
+        and out_file
+        and out_file.is_file()
+        and st.session_state.get("recorder_completed_record_id") != record["record_id"]
+    )
     if just_finished:
         st.session_state.last_saved = str(out_file)
-        st.session_state["record_ended_at_iso"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["record_ended_at_iso"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        st.session_state["recorder_was_playing"] = False
         st.info("正在尝试将 FLV 转码为 MP4…（需要本机已安装 ffmpeg）")
         mp4_path = transcode_to_mp4(out_file)
         if mp4_path and mp4_path.exists():
@@ -494,79 +705,193 @@ if webrtc_ctx and not webrtc_ctx.state.playing and out_file and out_file.exists(
         else:
             st.warning("未检测到 ffmpeg 或转码失败，将保留 FLV。")
             st.session_state["recorder_converted_mp4"] = None
+        st.session_state["recorder_completed_record_id"] = record["record_id"]
+        st.session_state["rerecord_requested_record_id"] = None
 
-    final_play = Path(st.session_state.get("recorder_converted_mp4") or out_file)
+    selected_path = (
+        Path(st.session_state["recorder_converted_mp4"])
+        if st.session_state.get("recorder_converted_mp4")
+        else out_file
+    )
+    completed_recording = resolve_completed_recording(
+        record["record_id"],
+        st.session_state.get("recorder_completed_record_id"),
+        selected_path,
+        st.session_state.get("record_started_at_iso"),
+        st.session_state.get("record_ended_at_iso"),
+        recordings_dir=REC_DIR,
+        persisted_recording=record.get("recording"),
+        suppress_persisted_resume=(
+            st.session_state.get("rerecord_requested_record_id") == record["record_id"]
+        ),
+    )
+    if completed_recording is None:
+        st.info("请完成一次新的录制后继续。")
+        st.stop()
+    final_play = completed_recording.path
     st.success(f"录制完成，文件：{final_play.name}")
     st.video(str(final_play))
 
     # 状态 JSON
-    state = st.session_state.get("state_payload", {}) or {}
-    meta = {
-        **state,
-        "file_basename": base_name,
+    state_payload = st.session_state.get("state_payload", {}) or {}
+    persisted_context = recording_context(state_payload)
+    recording_metadata = {
         "video_filename": final_play.name,
-        "record_started_at_iso": st.session_state.get("record_started_at_iso", ""),
-        "record_ended_at_iso": st.session_state.get("record_ended_at_iso", ""),
-        "server_time_generated_iso": datetime.now().isoformat(timespec="seconds"),
+        "started_at_iso": completed_recording.started_at_iso,
+        "ended_at_iso": completed_recording.ended_at_iso,
+        "format": completed_recording.format,
     }
-    meta_path = REC_DIR / f"{base_name}_state.json"
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    st.caption(f"已生成状态文件：{meta_path.name}（上传时将与视频一并上传）")
+    if (
+        record.get("recording") != recording_metadata
+        or record.get("daily_context") != persisted_context
+    ):
+        record["recording"] = recording_metadata
+        record["daily_context"] = persisted_context
+        save_record_or_stop(record, stage="recording_metadata")
+    state_namespace = f"{record['record_id']}:r{record['revision']}"
+    state_keys = questionnaire_state_keys(state_namespace, visit)
+    answered_by_visit = record.get("completion", {}).get("answered_field_ids", {})
+    step_by_visit = record.get("completion", {}).get("current_step", {})
+    answers = questionnaire_answers(record, visit)
 
-    delete_after_upload = st.checkbox(
-        "上传成功后删除服务器本地副本（视频与JSON，推荐）",
-        value=True,
-        help="建议开启：上传成功后删除本机/服务器文件，仅保留网盘副本。",
-        key="del_after_upload_recent",
+    def save_questionnaire_draft(
+        updated_answers: dict[str, Any], answered_field_ids: set[str], *, persist: bool = True
+    ) -> None:
+        current_step = int(st.session_state.get(state_keys.step, 0))
+        draft_context = {
+            field_id: state_payload[field_id]
+            for field_id in context_state_keys
+        }
+        record["daily_context"] = draft_context
+        if visit == "daily":
+            persist_daily_questionnaire(
+                record,
+                updated_answers,
+                answered_field_ids,
+                current_step=current_step,
+                daily_context=draft_context,
+            )
+        else:
+            persist_formal_questionnaire(
+                record, visit, updated_answers, answered_field_ids,
+                current_step=current_step,
+            )
+        if persist:
+            save_record_or_stop(record, stage="questionnaire_draft")
+
+    if not upload_ready_for_visit(record, visit):
+        answers, questionnaire_complete = render_questionnaire(
+            subject_id=safe_subject_id,
+            intervention_day=int(record["intervention_day"]),
+            answers=answers,
+            save_draft=save_questionnaire_draft,
+            visit=visit,
+            state_namespace=state_namespace,
+            initial_answered_field_ids=answered_by_visit.get(visit, []),
+            initial_step=step_by_visit.get(visit, 0),
+        )
+        current_answered = set(st.session_state.get(state_keys.answered, []))
+        if (
+            not questionnaire_complete
+            and support_needed(visit, answers, current_answered, int(record["intervention_day"]))
+        ):
+            contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
+            st.warning(
+                "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
+                "如果你正处于紧急危险中，请联系当地急救服务。\n"
+                f"{contact or '请联系研究团队。'}"
+            )
+        if not questionnaire_complete:
+            st.info("请完成问卷后继续上传。")
+            st.stop()
+
+        save_questionnaire_draft(answers, current_answered, persist=False)
+        mark_questionnaire_visit_complete(record, visit)
+        save_record_or_stop(record, stage="questionnaire_completion")
+    if persisted_support_needed(record, visit):
+        contact = _safe_secret("SAFETY_CONTACT", "请联系研究团队。")
+        st.warning(
+            "你的安全很重要。请立即联系研究团队或你信任的监护人；\n"
+            "如果你正处于紧急危险中，请联系当地急救服务。\n"
+            f"{contact or '请联系研究团队。'}"
+        )
+    meta_path = record_store.path_for(record)
+    record_date_key = date.fromisoformat(record["record_date"]).strftime("%Y%m%d")
+    remote_dir = remote_record_dir(
+        SAVE_DIR, safe_subject_id, record_date_key, record["record_id"]
     )
 
-    # 远端保存路径
-    date_str = datetime.now().strftime("%Y%m%d")
-    remote_dir = f"{SAVE_DIR}/{subject_id}/{date_str}"
-    remote_video = f"{remote_dir}/{final_play.name}"
-    remote_json  = f"{remote_dir}/{meta_path.name}"
-    st.write("将要上传到网盘目录：", f"`{remote_dir}`")
+    delete_after_upload = True
+    if not is_participant:
+        delete_after_upload = st.checkbox(
+            "上传成功后删除服务器本地副本（视频与 JSON）",
+            value=True,
+            key="del_after_upload_recent",
+        )
+        st.write("将上传到网盘目录：", f"`{remote_dir}`")
+        st.json(record["upload"])
 
     c1, c2 = st.columns([1, 1])
-    if c1.button("⬆️ 上传视频 + 状态JSON 到百度网盘", type="primary"):
-        prog = st.progress(0, text="上传视频中…")
-        def on_prog_v(p: float, msg: str):
-            prog.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
+    if c1.button("上传视频和问卷记录", type="primary"):
+        json_progress = st.progress(0, text="正在上传问卷记录")
+        video_progress = st.progress(0, text="正在上传视频")
+
+        def on_json_progress(progress: float, message: str) -> None:
+            json_progress.progress(
+                min(max(progress, 0.0), 1.0), text=f"[JSON] {int(progress * 100)}% - {message}"
+            )
+
+        def on_video_progress(progress: float, message: str) -> None:
+            video_progress.progress(
+                min(max(progress, 0.0), 1.0), text=f"[视频] {int(progress * 100)}% - {message}"
+            )
+
+        def persist_upload(upload_state: dict[str, str]) -> None:
+            record["upload"] = upload_state
+            record_store.save(record)
+
+        def confirm_local_cleanup_ready() -> None:
+            mark_local_cleanup_ready(record)
+            record_store.save(record)
+
+        cleanup_paths = (out_file,) if out_file is not None and final_play != out_file else ()
         try:
-            res_v = upload_to_baidu(final_play, remote_video, progress_cb=on_prog_v)
-            prog.progress(1.0, text="[视频] 上传完成 ✔")
-            st.success("视频上传成功")
-            st.json(res_v)
+            set_local_cleanup_intent(record, requested=delete_after_upload)
+            record_store.save(record)
+            upload_record_bundle(
+                meta_path,
+                final_play,
+                remote_dir,
+                upload_to_baidu,
+                persist_state=persist_upload,
+                delete_after_upload=delete_after_upload,
+                cleanup_paths=cleanup_paths,
+                json_progress=on_json_progress,
+                video_progress=on_video_progress,
+                confirm_final_sync=(
+                    confirm_local_cleanup_ready if delete_after_upload else None
+                ),
+            )
+            st.success("上传完成。")
+        except LocalCleanupError as error:
+            st.warning(cleanup_pending_message(error, participant=is_participant))
+        except Exception as error:
+            LOGGER.warning(
+                "record upload failed record_id=%s stage=upload exception_type=%s",
+                record["record_id"],
+                type(error).__name__,
+            )
+            st.error(upload_failure_message(record["record_id"], participant=is_participant))
 
-            prog2 = st.progress(0, text="上传状态JSON中…")
-            def on_prog_j(p: float, msg: str):
-                prog2.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-            res_j = upload_to_baidu(meta_path, remote_json, progress_cb=on_prog_j)
-            prog2.progress(1.0, text="[JSON] 上传完成 ✔")
-            st.success("状态JSON上传成功")
-            st.json(res_j)
-
-            if delete_after_upload:
-                try:
-                    final_play.unlink(missing_ok=True)
-                    if final_play.suffix.lower() == ".mp4" and out_file.exists():
-                        out_file.unlink(missing_ok=True)
-                    elif final_play.suffix.lower() == ".flv":
-                        maybe_mp4 = final_play.with_suffix(".mp4")
-                        maybe_mp4.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
-                    st.caption("已从服务器删除本地副本（视频与JSON）。")
-                except Exception:
-                    pass
-
-        except Exception as e:
-            prog.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
-
-    if c2.button("🔁 重新录制"):
+    if c2.button("重新录制"):
         st.session_state.last_saved = None
         st.session_state["recorder_converted_mp4"] = None
+        st.session_state["recorder_completed_record_id"] = None
+        st.session_state["record_started_at_iso"] = ""
+        st.session_state["record_ended_at_iso"] = ""
+        st.session_state["rerecord_requested_record_id"] = record["record_id"]
         st.rerun()
+
 else:
     if webrtc_ctx and webrtc_ctx.state.playing:
         st.info("录制进行中… 点击 STOP 结束并进入上传。")
@@ -576,14 +901,16 @@ else:
 # =========================
 # ④ 历史文件上传（可复用当前状态JSON）
 # =========================
+if is_participant:
+    st.stop()
+
 st.divider()
 st.subheader("④ 从 recordings 目录选择历史文件上传")
 
-files = sorted(
-    [p for p in REC_DIR.glob("*") if p.suffix.lower() in [".mp4", ".flv"]],
-    key=lambda p: p.stat().st_mtime,
-    reverse=True,
-)
+with st.expander("使用 & 运维提示"):
+    st.caption("管理员可使用历史文件上传工具。")
+
+files = list(trusted_recording_files(REC_DIR))
 if not files:
     st.caption("recordings/ 目录尚无 .mp4/.flv 文件。完成一次录制后这里会列出文件。")
 else:
@@ -606,11 +933,11 @@ else:
         prog2 = st.progress(0, text="上传历史视频中…")
         def on_prog2(p: float, msg: str):
             prog2.progress(min(max(p, 0.0), 1.0), text=f"[视频] {int(p*100)}% - {msg}")
-        try:
-            res2 = upload_to_baidu(picked, remote_video2, progress_cb=on_prog2)
+
+        def after_history_video_upload(video_result: object) -> None:
             prog2.progress(1.0, text="[视频] 上传完成 ✔")
             st.success("历史视频上传成功！")
-            st.json(res2)
+            st.json(video_result)
 
             if upload_state_too:
                 base2 = Path(picked).stem
@@ -619,32 +946,52 @@ else:
                     **meta2,
                     "file_basename": base2,
                     "video_filename": picked.name,
-                    "timestamp_iso_generated": datetime.now().isoformat(timespec="seconds"),
+                    "timestamp_iso_generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 }
-                meta_path2 = REC_DIR / f"{base2}_state.json"
-                meta_path2.write_text(json.dumps(meta2, ensure_ascii=False, indent=2), encoding="utf-8")
+                meta_filename2 = f"{base2}_state.json"
                 prog3 = st.progress(0, text="上传历史状态JSON中…")
                 def on_prog3(p: float, msg: str):
                     prog3.progress(min(max(p, 0.0), 1.0), text=f"[JSON] {int(p*100)}% - {msg}")
-                res3 = upload_to_baidu(meta_path2, f"{remote_dir2}/{meta_path2.name}", progress_cb=on_prog3)
+                res3 = upload_generated_json(
+                    meta2,
+                    filename=meta_filename2,
+                    remote_path=f"{remote_dir2}/{meta_filename2}",
+                    upload_fn=upload_to_baidu,
+                    progress_cb=on_prog3,
+                )
                 prog3.progress(1.0, text="[JSON] 上传完成 ✔")
                 st.success("历史状态JSON上传成功！")
                 st.json(res3)
-                try:
-                    meta_path2.unlink(missing_ok=True)
-                except Exception:
-                    pass
+
+        try:
+            upload_trusted_recording(
+                picked,
+                recordings_dir=REC_DIR,
+                remote_path=remote_video2,
+                upload_fn=upload_to_baidu,
+                progress_cb=on_prog2,
+                delete_after_upload=delete_after_upload_hist,
+                after_upload_success=after_history_video_upload,
+            )
 
             if delete_after_upload_hist:
-                try:
-                    picked.unlink(missing_ok=True)
-                    st.caption("已从服务器删除该本地视频（历史）。")
-                except Exception:
-                    pass
+                st.caption("已从服务器删除该本地视频（历史）。")
 
-        except Exception as e:
+        except LocalCleanupError as error:
+            LOGGER.warning(
+                "historical upload cleanup pending filename=%s exception_type=%s",
+                picked.name,
+                type(error).__name__,
+            )
+            st.warning(cleanup_pending_message(error, participant=False))
+        except Exception as error:
+            LOGGER.warning(
+                "historical upload failed filename=%s exception_type=%s",
+                picked.name,
+                type(error).__name__,
+            )
             prog2.progress(0.0, text="上传失败")
-            st.error(f"上传失败：{e}")
+            st.error("Historical upload could not be completed. Please retry.")
 
 # =========================
 # 页脚提示

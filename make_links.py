@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
-import hmac
-import hashlib
 import os
 import sys
 import time
@@ -13,13 +10,14 @@ from urllib.parse import urlencode
 from datetime import datetime, timezone
 from typing import List, Sequence, cast, BinaryIO
 
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+from link_auth import sign_subject_link
 
-def sign_link(key: bytes, sid: str, exp_ts: int) -> str:
-    msg = f"{sid}|{exp_ts}".encode("utf-8")
-    mac = hmac.new(key, msg, hashlib.sha256).digest()
-    return b64url(mac)
+
+def build_subject_link(app_url: str, key: str, sid: str, exp_ts: int, visit: str) -> str:
+    query = {"sid": sid, "exp": exp_ts, "sig": sign_subject_link(key, sid, exp_ts, visit)}
+    if visit != "daily":
+        query["visit"] = visit
+    return f"{app_url.rstrip('/')}/?{urlencode(query)}"
 
 def load_subjects(csv_path: Path) -> List[str]:
     with csv_path.open("r", encoding="utf-8") as f:
@@ -43,6 +41,7 @@ def main() -> int:
     parser.add_argument("--app-url", type=str, default=os.environ.get("APP_URL", ""), help="或设 APP_URL 环境变量")
     parser.add_argument("--key", type=str, default=os.environ.get("LINK_SIGNING_KEY", ""), help="或设 LINK_SIGNING_KEY")
     parser.add_argument("--qr-dir", type=Path, default=None, help="可选：输出二维码目录（需安装 qrcode）")
+    parser.add_argument("--visit", choices=["daily", "V1", "V3", "V4", "V5", "V6"], default="daily")
     args = parser.parse_args()
 
     if not args.app_url:
@@ -54,7 +53,6 @@ def main() -> int:
     if not sids:
         raise SystemExit(f"{args.subjects} 中没有有效的 sid")
 
-    key_bytes = args.key.encode("utf-8")
     now = int(time.time())
     exp_ts = now + args.days * 24 * 3600
     expire_iso_utc = (
@@ -67,9 +65,7 @@ def main() -> int:
     base = args.app_url.rstrip("/")
 
     for sid in sids:
-        sig = sign_link(key_bytes, sid, exp_ts)
-        qs = urlencode({"sid": sid, "exp": exp_ts, "sig": sig})
-        link = f"{base}/?{qs}"
+        link = build_subject_link(base, args.key, sid, exp_ts, args.visit)
         rows.append(
             {"sid": sid, "exp_unix": exp_ts, "expire_at_utc": expire_iso_utc, "link": link}
         )

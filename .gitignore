@@ -17,3 +17,9 @@ recordings/
 .vscode/
 .idea/
 .DS_Store
+
+# Isolated feature worktrees
+.worktrees/
+
+# Local visual-design companion
+.superpowers/
