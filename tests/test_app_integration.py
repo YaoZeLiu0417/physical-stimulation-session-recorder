@@ -237,6 +237,26 @@ def _assert_no_success_path_save_after_bundle(tree: ast.Module) -> None:
     assert _record_store_saves(success_reachable) == []
 
 
+def test_app_visible_titles_use_neutral_product_name():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    titles = [
+        call.args[0].value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "title"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and isinstance(call.args[0].value, str)
+    ]
+
+    assert "🔒 Physical Stimulation Session Recorder 准入界面" in titles
+    assert "📓 Physical Stimulation Session Recorder" in titles
+    assert all("tavns" not in title.casefold() for title in titles)
+
+
 def test_app_imports_required_integration_interfaces():
     tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
     imported = {

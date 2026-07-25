@@ -206,7 +206,7 @@ def require_app_password():
     ):
         return
 
-    st.title("🔒 taVNS干预视频日志准入界面")
+    st.title("🔒 Physical Stimulation Session Recorder 准入界面")
     st.warning("请输入访问密码以继续")
     pw = st.text_input("访问密码", type="password")
     if st.button("登录", type="primary"):
@@ -220,7 +220,7 @@ def require_app_password():
         st.stop()
 
 require_app_password()
-st.title("📓 taVNS 干预日志")
+st.title("📓 Physical Stimulation Session Recorder")
 
 # 公共 STUN
 RTC_CFG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
