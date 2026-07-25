@@ -29,7 +29,7 @@ FORBIDDEN_TERMS = (
 
 URI_PATTERN = re.compile(
     r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):"
-    r"(?P<body>[^\s<>\"'`)\]}]+)"
+    r"(?P<body>[^\s<>\"'`]+)"
 )
 URI_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
 WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])[a-z]:\\[^\s<>\"']+")
@@ -41,6 +41,18 @@ CREDENTIAL_PATTERN = re.compile(
 
 def _relative_name(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _is_approved_uri_token(text: str, match: re.Match[str]) -> bool:
+    uri = match.group()
+    if uri in APPROVED_URLS:
+        return True
+    if match.start() == 0 or text[match.start() - 1] != "(":
+        return False
+    return any(
+        uri in (f"{approved_url})", f"{approved_url}).")
+        for approved_url in APPROVED_URLS
+    )
 
 
 def _audit_text(relative_path: str, text: str) -> list[str]:
@@ -75,7 +87,7 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
             match.start() > 0
             and text[match.start() - 1] not in URI_START_BOUNDARIES
         )
-        if has_suspicious_prefix or uri not in APPROVED_URLS:
+        if has_suspicious_prefix or not _is_approved_uri_token(text, match):
             findings.append(f"unapproved-url: {relative_path}: {uri}")
 
     return findings
