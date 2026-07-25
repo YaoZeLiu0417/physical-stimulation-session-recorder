@@ -1,6 +1,7 @@
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from showcase_audit import audit_showcase
 
 APP_URL = "https://physical-stimulation-session-recorder.streamlit.app"
 SVG_URL = "http://www.w3.org/2000/svg"
+REPARSE_POINT = 0x400
 
 
 def _write_safe_tree(root: Path) -> None:
@@ -32,6 +34,13 @@ def _with_file_type(result: os.stat_result, file_type: int) -> os.stat_result:
     values = list(result)
     values[stat.ST_MODE] = file_type | stat.S_IMODE(result.st_mode)
     return os.stat_result(values)
+
+
+def _with_reparse_point(result: os.stat_result) -> SimpleNamespace:
+    return SimpleNamespace(
+        st_mode=result.st_mode,
+        st_file_attributes=REPARSE_POINT,
+    )
 
 
 def test_safe_tree_passes_and_git_contents_are_ignored(tmp_path: Path) -> None:
@@ -227,6 +236,26 @@ def test_protocol_relative_and_html_encoded_urls_are_rejected(
     findings = _joined_findings(tmp_path)
 
     assert "unapproved-url: README.md" in findings
+
+
+@pytest.mark.parametrize(
+    ("rendered_source", "category"),
+    [
+        ("tav&#110;s", "forbidden-term"),
+        (r"C&#58;:\Users\Alice\private.txt", "absolute-path"),
+        ("&#47;Users/alice/private.txt", "absolute-path"),
+    ],
+)
+def test_html_decoded_terms_and_paths_are_rejected_without_echoing_content(
+    tmp_path: Path, rendered_source: str, category: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(rendered_source, encoding="utf-8")
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"{category}: README.md" in findings
+    assert rendered_source not in findings
 
 
 @pytest.mark.parametrize("sentinel", ["DO_NOT_LOG_THIS", "tavns"])
@@ -429,3 +458,82 @@ def test_extra_empty_directory_is_reported(tmp_path: Path) -> None:
     findings = _joined_findings(tmp_path)
 
     assert "extra-entry: private-directory" in findings
+
+
+def test_root_reparse_point_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    real_lstat = os.lstat
+    monkeypatch.setattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        REPARSE_POINT,
+        raising=False,
+    )
+
+    def lstat_with_reparse_root(path):
+        result = real_lstat(path)
+        if Path(path) == tmp_path:
+            return _with_reparse_point(result)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_reparse_root)
+
+    findings = audit_showcase(tmp_path)
+
+    assert findings
+    assert findings[0].startswith("invalid-root:")
+
+
+def test_assets_reparse_point_is_reported_and_not_traversed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    assets = tmp_path / "assets"
+    real_lstat = os.lstat
+    monkeypatch.setattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        REPARSE_POINT,
+        raising=False,
+    )
+
+    def lstat_with_reparse_assets(path):
+        result = real_lstat(path)
+        if Path(path) == assets:
+            return _with_reparse_point(result)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_reparse_assets)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "special-entry: assets" in findings
+    assert "missing-file: assets/session-recorder-preview.svg" in findings
+
+
+def test_allowlisted_file_reparse_point_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_safe_tree(tmp_path)
+    readme = tmp_path / "README.md"
+    real_lstat = os.lstat
+    monkeypatch.setattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        REPARSE_POINT,
+        raising=False,
+    )
+
+    def lstat_with_reparse_readme(path):
+        result = real_lstat(path)
+        if Path(path) == readme:
+            return _with_reparse_point(result)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_with_reparse_readme)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "special-entry: README.md" in findings

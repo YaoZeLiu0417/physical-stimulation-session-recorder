@@ -34,7 +34,7 @@ URI_PATTERN = re.compile(
     r"(?P<body>[^\s<>\"'`]+)"
 )
 URI_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
-WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])[a-z]:\\[^\s<>\"']+")
+WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])[a-z]:+\\[^\s<>\"']+")
 UNIX_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])/(?:users|home)/[^\s<>\"']*")
 CREDENTIAL_PATTERN = re.compile(
     r"[?&](sid|sig|exp|token|secret|password)\s*=", re.IGNORECASE
@@ -43,6 +43,12 @@ CREDENTIAL_PATTERN = re.compile(
 
 def _relative_name(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _is_reparse_point(file_info: object) -> bool:
+    attributes = getattr(file_info, "st_file_attributes", 0) or 0
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0
+    return bool(attributes & reparse_flag)
 
 
 def _is_approved_uri_token(text: str, match: re.Match[str]) -> bool:
@@ -59,8 +65,8 @@ def _is_approved_uri_token(text: str, match: re.Match[str]) -> bool:
 
 def _audit_text(relative_path: str, text: str) -> list[str]:
     findings: list[str] = []
-    folded_text = text.casefold()
     decoded_text = html.unescape(text)
+    folded_text = decoded_text.casefold()
 
     for term in FORBIDDEN_TERMS:
         if term.casefold() in folded_text:
@@ -70,7 +76,7 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
         ("Windows", WINDOWS_PATH_PATTERN),
         ("Unix", UNIX_PATH_PATTERN),
     ):
-        if pattern.search(text):
+        if pattern.search(decoded_text):
             findings.append(f"absolute-path: {relative_path}: {path_kind}")
 
     for match in CREDENTIAL_PATTERN.finditer(decoded_text):
@@ -100,13 +106,13 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
 def audit_showcase(root: Path) -> list[str]:
     """Return privacy findings for a proposed public showcase directory."""
     try:
-        root_mode = os.lstat(root).st_mode
+        root_info = os.lstat(root)
     except FileNotFoundError:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
     except (OSError, ValueError):
         return ["root-error: .: unable to inspect showcase root"]
 
-    if not stat.S_ISDIR(root_mode):
+    if not stat.S_ISDIR(root_info.st_mode) or _is_reparse_point(root_info):
         return ["invalid-root: .: showcase root must be a regular directory"]
 
     try:
@@ -119,7 +125,7 @@ def audit_showcase(root: Path) -> list[str]:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
 
     findings: list[str] = []
-    entries_by_name: dict[str, tuple[Path, int]] = {}
+    entries_by_name: dict[str, tuple[Path, int, bool]] = {}
     entry_errors: list[str] = []
     walk_errors: list[OSError] = []
     try:
@@ -137,12 +143,14 @@ def audit_showcase(root: Path) -> list[str]:
                 path = current_path / directory_name
                 relative_path = _relative_name(path, root)
                 try:
-                    mode = os.lstat(path).st_mode
+                    file_info = os.lstat(path)
                 except OSError:
                     entry_errors.append(relative_path)
                     continue
-                entries_by_name[relative_path] = (path, mode)
-                if stat.S_ISDIR(mode):
+                mode = file_info.st_mode
+                is_reparse = _is_reparse_point(file_info)
+                entries_by_name[relative_path] = (path, mode, is_reparse)
+                if stat.S_ISDIR(mode) and not is_reparse:
                     traversable_directories.append(directory_name)
             directory_names[:] = traversable_directories
 
@@ -152,11 +160,15 @@ def audit_showcase(root: Path) -> list[str]:
                 path = current_path / file_name
                 relative_path = _relative_name(path, root)
                 try:
-                    mode = os.lstat(path).st_mode
+                    file_info = os.lstat(path)
                 except OSError:
                     entry_errors.append(relative_path)
                     continue
-                entries_by_name[relative_path] = (path, mode)
+                entries_by_name[relative_path] = (
+                    path,
+                    file_info.st_mode,
+                    _is_reparse_point(file_info),
+                )
     except OSError as error:
         walk_errors.append(error)
 
@@ -169,18 +181,24 @@ def audit_showcase(root: Path) -> list[str]:
 
     for required_path in PUBLIC_FILES:
         entry = entries_by_name.get(required_path)
-        if entry is None or not stat.S_ISREG(entry[1]):
+        if entry is None or not stat.S_ISREG(entry[1]) or entry[2]:
             findings.append(f"missing-file: {required_path}")
 
     assets_entry = entries_by_name.get("assets")
-    if assets_entry is None or not stat.S_ISDIR(assets_entry[1]):
+    if (
+        assets_entry is None
+        or not stat.S_ISDIR(assets_entry[1])
+        or assets_entry[2]
+    ):
         findings.append("missing-directory: assets")
 
     regular_files: list[tuple[str, Path]] = []
-    for relative_path, (path, mode) in sorted(entries_by_name.items()):
+    for relative_path, (path, mode, is_reparse) in sorted(entries_by_name.items()):
         expected_file = relative_path in PUBLIC_FILES
         expected_directory = relative_path == "assets"
-        if stat.S_ISREG(mode):
+        if is_reparse:
+            findings.append(f"special-entry: {relative_path}")
+        elif stat.S_ISREG(mode):
             if not expected_file:
                 findings.append(f"extra-file: {relative_path}")
             regular_files.append((relative_path, path))
