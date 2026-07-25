@@ -35,16 +35,20 @@ alter recorder behavior, or expose repository content.
 
 1. Add a focused requirements contract test that fails on the old pins and
    requires the approved compatible versions.
-2. Resolve/download the complete requirements set using binary distributions in
-   an isolated Python 3.13 environment. The WebRTC set must not fall back to a
-   source build.
+2. Resolve/download the complete requirements set using Linux binary
+   distributions for Python 3.10, which is the project's intended Community
+   Cloud runtime. Separately confirm that the approved WebRTC releases provide
+   binary distributions compatible with Python 3.13. The retained `numpy<2.0`
+   constraint does not publish Python 3.13 wheels, so the deployed app must use
+   Python 3.10 rather than broadening unrelated dependency constraints.
 3. Run the focused showcase tests and the complete private test suite.
 4. Compile Python sources and run Git patch checks.
 5. Push only to the private repository, merge through a private PR, and confirm
    anonymous source access still returns `404`.
-6. Wait for Streamlit to rebuild, then require a healthy backend response and
-   verify fail-closed access, wrong-password rejection, correct-password entry,
-   all four synthetic steps, and restart.
+6. Confirm the Streamlit app uses Python 3.10, wait for it to rebuild, then
+   require a healthy backend response and verify fail-closed access,
+   wrong-password rejection, correct-password entry, all four synthetic steps,
+   and restart.
 
 ## Failure And Rollback
 
