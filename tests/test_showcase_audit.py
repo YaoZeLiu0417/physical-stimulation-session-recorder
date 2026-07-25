@@ -174,6 +174,34 @@ def test_only_exact_approved_urls_are_allowed(tmp_path: Path, url: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "uri",
+    [
+        "ftp://evil.example/private",
+        "mailto:private@example.com",
+        "data:text/plain,secret",
+    ],
+)
+def test_non_http_uri_schemes_are_rejected(tmp_path: Path, uri: str) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(uri, encoding="utf-8")
+
+    findings = _joined_findings(tmp_path)
+
+    assert "unapproved-url: README.md" in findings
+
+
+def test_markdown_label_colons_are_not_treated_as_uris(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / "README.md").write_text(
+        "# Access:\n\nAccess: public showcase\n"
+        "\u8bbf\u95ee\uff1a\u516c\u5f00\u6f14\u793a\n",
+        encoding="utf-8",
+    )
+
+    assert audit_showcase(tmp_path) == []
+
+
+@pytest.mark.parametrize(
     "markdown",
     [
         f"[demo]({APP_URL}!)",

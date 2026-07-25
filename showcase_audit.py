@@ -27,8 +27,11 @@ FORBIDDEN_TERMS = (
     "\u8bc4\u5206\u89c4\u5219",
 )
 
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'`)\]}]+", re.IGNORECASE)
-URL_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
+URI_PATTERN = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):"
+    r"(?P<body>[^\s<>\"'`)\]}]+)"
+)
+URI_START_BOUNDARIES = frozenset(" \t\r\n([{<>\"'`=")
 WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])[a-z]:\\[^\s<>\"']+")
 UNIX_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])/(?:users|home)/[^\s<>\"']*")
 CREDENTIAL_PATTERN = re.compile(
@@ -60,14 +63,20 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
             f"credential-param: {relative_path}: {match.group(1).casefold()}"
         )
 
-    for match in URL_PATTERN.finditer(text):
-        url = match.group()
+    for match in URI_PATTERN.finditer(text):
+        uri = match.group()
+        is_windows_path = (
+            len(match.group("scheme")) == 1
+            and match.group("body").startswith("\\")
+        )
+        if is_windows_path:
+            continue
         has_suspicious_prefix = (
             match.start() > 0
-            and text[match.start() - 1] not in URL_START_BOUNDARIES
+            and text[match.start() - 1] not in URI_START_BOUNDARIES
         )
-        if has_suspicious_prefix or url not in APPROVED_URLS:
-            findings.append(f"unapproved-url: {relative_path}: {url}")
+        if has_suspicious_prefix or uri not in APPROVED_URLS:
+            findings.append(f"unapproved-url: {relative_path}: {uri}")
 
     return findings
 
