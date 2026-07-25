@@ -621,7 +621,9 @@ def test_audit_rejects_extra_files_sensitive_terms_and_paths(tmp_path):
     _safe_tree(tmp_path)
     (tmp_path / "app.py").write_text("secret source", encoding="utf-8")
     (tmp_path / "README.md").write_text(
-        SAFE_README + "\nNSSI\nD:\\private\\recordings\n?sid=sub-001&sig=abc",
+        SAFE_README
+        + "\nNSSI\nD:\\private\\recordings\n?sid=sub-001&sig=abc"
+        + "\nhttps://example.com/production",
         encoding="utf-8",
     )
     findings = audit_showcase(tmp_path)
@@ -629,6 +631,7 @@ def test_audit_rejects_extra_files_sensitive_terms_and_paths(tmp_path):
     assert any("forbidden term" in item for item in findings)
     assert any("absolute path" in item for item in findings)
     assert any("credential-like URL parameter" in item for item in findings)
+    assert any("unapproved URL" in item for item in findings)
 ```
 
 - [ ] **Step 2: Run the tests and verify import failure**
@@ -657,6 +660,10 @@ ALLOWED_FILES = {
     "README.md",
     "assets/session-recorder-preview.svg",
 }
+ALLOWED_URLS = {
+    "https://physical-stimulation-session-recorder.streamlit.app",
+    "http://www.w3.org/2000/svg",
+}
 TEXT_SUFFIXES = {"", ".md", ".svg"}
 FORBIDDEN_TERMS = (
     "tavns",
@@ -672,6 +679,7 @@ FORBIDDEN_TERMS = (
 )
 ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:\\|/users/|/home/)")
 CREDENTIAL_QUERY = re.compile(r"(?i)[?&](?:sid|sig|exp|token|secret|password)=")
+HTTP_URL = re.compile(r"https?://[^\s<>'\"`]+", re.IGNORECASE)
 
 
 def audit_showcase(root: Path) -> list[str]:
@@ -693,6 +701,10 @@ def audit_showcase(root: Path) -> list[str]:
             findings.append(f"absolute path in {relative}")
         if CREDENTIAL_QUERY.search(text):
             findings.append(f"credential-like URL parameter in {relative}")
+        for match in HTTP_URL.finditer(text):
+            url = match.group(0).rstrip(".,;:!?)]}")
+            if url not in ALLOWED_URLS:
+                findings.append(f"unapproved URL in {relative}: {url}")
     missing = ALLOWED_FILES - {path.relative_to(root).as_posix() for path in files}
     findings.extend(f"missing public file: {path}" for path in sorted(missing))
     return findings
