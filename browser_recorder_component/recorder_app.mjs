@@ -44,7 +44,10 @@ let audioContext = null;
 let analyser = null;
 let meterFrameId = null;
 let timerFrameId = null;
+let warningTimeoutId = null;
+let deadlineTimeoutId = null;
 let recordingStartedAt = 0;
+let recordingGeneration = null;
 let lastTimerSecond = -1;
 let longWarningShown = false;
 let demoChunks = [];
@@ -128,6 +131,8 @@ function renderControls(message = null) {
   const canStart =
     componentHasRendered &&
     !startPending &&
+    !cleaningUp &&
+    cleanupPromise === null &&
     (status.state === "idle" || status.state === "ready");
   const canChangeSetup = canStart && !isRecording;
   const canRecordAgain = ["stopped", "saved", "skipped", "failed"].includes(
@@ -141,11 +146,12 @@ function renderControls(message = null) {
   elements.cameraSelect.disabled = !mediaStream || !canChangeSetup;
   elements.microphoneSelect.disabled = !mediaStream || !canChangeSetup;
   elements.recordButton.disabled = !canStart;
-  elements.stopButton.disabled = !isRecording;
+  elements.stopButton.disabled = !isRecording || cleaningUp;
   elements.rerecordButton.hidden = !canRecordAgain;
+  elements.rerecordButton.disabled = cleaningUp;
   elements.skipButton.disabled = !canStart;
   elements.saveConfirmation.disabled =
-    !localCompletionReady || status.state === "saved";
+    cleaningUp || !localCompletionReady || status.state === "saved";
   elements.saveConfirmation.checked = status.saved_confirmed;
   elements.downloadLink.hidden = localObjectUrl === null;
   elements.timer.textContent = formatDuration(status.duration_seconds);
@@ -194,6 +200,14 @@ function cancelRecordingTimer() {
   if (timerFrameId !== null) {
     cancelAnimationFrame(timerFrameId);
     timerFrameId = null;
+  }
+  if (warningTimeoutId !== null) {
+    clearTimeout(warningTimeoutId);
+    warningTimeoutId = null;
+  }
+  if (deadlineTimeoutId !== null) {
+    clearTimeout(deadlineTimeoutId);
+    deadlineTimeoutId = null;
   }
 }
 
@@ -250,8 +264,10 @@ async function cleanupLocalResources({ revokePlayback = true } = {}) {
   }
 
   cleaningUp = true;
+  renderControls("Finishing local cleanup.");
   cleanupPromise = (async () => {
     cancelRecordingTimer();
+    recordingGeneration = null;
     stopRecorderWithoutFinalizing();
     const activeWriter = writer;
     writer = null;
@@ -272,6 +288,7 @@ async function cleanupLocalResources({ revokePlayback = true } = {}) {
   })().finally(() => {
     cleaningUp = false;
     cleanupPromise = null;
+    renderControls();
   });
   return cleanupPromise;
 }
@@ -522,6 +539,7 @@ function handleRecordedData(event, mode, generation) {
 }
 
 function requestRecorderStop() {
+  recordingGeneration = null;
   cancelRecordingTimer();
   if (mediaRecorder !== null && mediaRecorder.state === "recording") {
     try {
@@ -532,31 +550,105 @@ function requestRecorderStop() {
   }
 }
 
-function updateRecordingTimer() {
+function recordingDurationSeconds() {
+  const maximum = status.mode === "long" ? LIMITS.longMax : LIMITS.demoMax;
+  const elapsed = Math.floor((performance.now() - recordingStartedAt) / 1000);
+  return Math.min(maximum, Math.max(0, elapsed));
+}
+
+function syncRecordingClock(message = null) {
   if (status.state !== "recording") {
     return;
   }
-  const elapsed = Math.floor((performance.now() - recordingStartedAt) / 1000);
-  const maximum = status.mode === "long" ? LIMITS.longMax : LIMITS.demoMax;
-  const duration = Math.min(maximum, Math.max(0, elapsed));
-  if (duration !== lastTimerSecond) {
+  const duration = recordingDurationSeconds();
+  const persistentMessage = longWarningShown
+    ? "Recording is still in progress."
+    : message;
+  if (duration !== lastTimerSecond || persistentMessage !== null) {
     lastTimerSecond = duration;
-    const warning =
-      status.mode === "long" &&
-      duration >= LIMITS.longWarning &&
-      !longWarningShown;
-    if (warning) {
-      longWarningShown = true;
-    }
-    updateStatus(
-      { duration_seconds: duration },
-      warning ? "Recording is still in progress." : null,
-    );
+    updateStatus({ duration_seconds: duration }, persistentMessage);
   }
-  if (duration >= maximum) {
+}
+
+function clearRecordingDeadlineTimeouts() {
+  if (warningTimeoutId !== null) {
+    clearTimeout(warningTimeoutId);
+    warningTimeoutId = null;
+  }
+  if (deadlineTimeoutId !== null) {
+    clearTimeout(deadlineTimeoutId);
+    deadlineTimeoutId = null;
+  }
+}
+
+function armRecordingDeadlines(generation) {
+  clearRecordingDeadlineTimeouts();
+  if (
+    cleaningUp ||
+    recordingGeneration !== generation ||
+    !isCurrentLifecycle(generation) ||
+    status.state !== "recording"
+  ) {
+    return;
+  }
+
+  const now = performance.now();
+  if (status.mode === "long" && !longWarningShown) {
+    const warningDelay = Math.max(
+      0,
+      recordingStartedAt + LIMITS.longWarning * 1000 - now,
+    );
+    warningTimeoutId = setTimeout(() => {
+      warningTimeoutId = null;
+      reconcileRecordingDeadlines(generation);
+    }, warningDelay);
+  }
+  const maximum = status.mode === "long" ? LIMITS.longMax : LIMITS.demoMax;
+  const deadlineDelay = Math.max(
+    0,
+    recordingStartedAt + maximum * 1000 - now,
+  );
+  deadlineTimeoutId = setTimeout(() => {
+    deadlineTimeoutId = null;
+    reconcileRecordingDeadlines(generation);
+  }, deadlineDelay);
+}
+
+function reconcileRecordingDeadlines(generation) {
+  if (
+    cleaningUp ||
+    recordingGeneration !== generation ||
+    !isCurrentLifecycle(generation) ||
+    status.state !== "recording"
+  ) {
+    return;
+  }
+
+  const elapsedMilliseconds = Math.max(0, performance.now() - recordingStartedAt);
+  if (
+    status.mode === "long" &&
+    elapsedMilliseconds >= LIMITS.longWarning * 1000
+  ) {
+    longWarningShown = true;
+  }
+  syncRecordingClock();
+  const maximum = status.mode === "long" ? LIMITS.longMax : LIMITS.demoMax;
+  if (elapsedMilliseconds >= maximum * 1000) {
     requestRecorderStop();
     return;
   }
+  armRecordingDeadlines(generation);
+}
+
+function updateRecordingTimer() {
+  if (
+    recordingGeneration === null ||
+    !isCurrentLifecycle(recordingGeneration) ||
+    status.state !== "recording"
+  ) {
+    return;
+  }
+  syncRecordingClock();
   timerFrameId = requestAnimationFrame(updateRecordingTimer);
 }
 
@@ -633,6 +725,7 @@ async function finalizeRecording(mode, recorder, generation) {
     return;
   }
   cancelRecordingTimer();
+  recordingGeneration = null;
   mediaRecorder = null;
   recorder.ondataavailable = null;
   recorder.onerror = null;
@@ -735,6 +828,7 @@ function beginRecording(
     return false;
   }
   recordingStartedAt = performance.now();
+  recordingGeneration = generation;
   lastTimerSecond = -1;
   longWarningShown = false;
   updateStatus({
@@ -746,6 +840,7 @@ function beginRecording(
     saved_confirmed: false,
     error_code: null,
   });
+  armRecordingDeadlines(generation);
   timerFrameId = requestAnimationFrame(updateRecordingTimer);
   return true;
 }
@@ -895,7 +990,12 @@ async function applyStreamlitRender(args) {
 }
 
 elements.recordButton.addEventListener("click", () => {
-  if (!componentHasRendered || startPending) {
+  if (
+    !componentHasRendered ||
+    startPending ||
+    cleaningUp ||
+    cleanupPromise !== null
+  ) {
     return;
   }
   const generation = lifecycleGeneration;
@@ -918,12 +1018,18 @@ elements.recordButton.addEventListener("click", () => {
 elements.stopButton.addEventListener("click", requestRecorderStop);
 
 elements.rerecordButton.addEventListener("click", () => {
+  if (cleaningUp || cleanupPromise !== null) {
+    return;
+  }
   const operation = resetRecorder();
   const generation = lifecycleGeneration;
   void operation.catch(() => failWithCode("device_lost", generation));
 });
 
 elements.skipButton.addEventListener("click", () => {
+  if (cleaningUp || cleanupPromise !== null) {
+    return;
+  }
   const generation = invalidateLifecycle();
   void cleanupLocalResources()
     .then(() => {
@@ -950,7 +1056,11 @@ elements.saveConfirmation.addEventListener("change", () => {
 
 for (const input of elements.modeInputs) {
   input.addEventListener("change", () => {
-    if (status.state !== "idle" && status.state !== "ready") {
+    if (
+      cleaningUp ||
+      cleanupPromise !== null ||
+      (status.state !== "idle" && status.state !== "ready")
+    ) {
       renderControls();
       return;
     }
@@ -959,6 +1069,9 @@ for (const input of elements.modeInputs) {
 }
 
 elements.cameraSelect.addEventListener("change", () => {
+  if (cleaningUp || cleanupPromise !== null) {
+    return;
+  }
   const generation = lifecycleGeneration;
   void replaceMediaStream("camera_unavailable", generation).catch(() =>
     failWithCode("camera_unavailable", generation),
@@ -966,6 +1079,9 @@ elements.cameraSelect.addEventListener("change", () => {
 });
 
 elements.microphoneSelect.addEventListener("change", () => {
+  if (cleaningUp || cleanupPromise !== null) {
+    return;
+  }
   const generation = lifecycleGeneration;
   void replaceMediaStream("microphone_unavailable", generation).catch(() =>
     failWithCode("microphone_unavailable", generation),
@@ -982,6 +1098,15 @@ window.addEventListener("message", (event) => {
     failWithCode("device_lost", generation),
   );
 });
+
+function reconcileActiveRecording() {
+  if (recordingGeneration !== null) {
+    reconcileRecordingDeadlines(recordingGeneration);
+  }
+}
+
+document.addEventListener("visibilitychange", reconcileActiveRecording);
+window.addEventListener("focus", reconcileActiveRecording);
 
 function cleanupForPageExit() {
   invalidateLifecycle();
