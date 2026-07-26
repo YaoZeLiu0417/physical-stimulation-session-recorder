@@ -495,6 +495,35 @@ def test_resolve_turn_rtc_configuration_rejects_malformed_helper_results(
     assert showcase_ice.resolve_turn_rtc_configuration("account", "token") is None
 
 
+@pytest.mark.parametrize("scheme", ("stun", "turn", "turns"))
+@pytest.mark.parametrize("port", (0, -1, 65536))
+def test_resolve_turn_rtc_configuration_rejects_invalid_explicit_ports(
+    monkeypatch, scheme, port
+) -> None:
+    tested_server = {"urls": f"{scheme}:synthetic.invalid:{port}"}
+    if scheme in {"turn", "turns"}:
+        tested_server.update(
+            username="ephemeral-user",
+            credential="ephemeral-credential",
+        )
+    ice_servers = [tested_server]
+    if scheme == "stun":
+        ice_servers.append(
+            {
+                "urls": "turn:synthetic.invalid:3478",
+                "username": "ephemeral-user",
+                "credential": "ephemeral-credential",
+            }
+        )
+    monkeypatch.setattr(
+        showcase_ice,
+        "get_twilio_ice_servers",
+        lambda *_args: ice_servers,
+    )
+
+    assert showcase_ice.resolve_turn_rtc_configuration("account", "token") is None
+
+
 @pytest.mark.parametrize(
     ("account_sid", "auth_token"),
     (
@@ -503,6 +532,12 @@ def test_resolve_turn_rtc_configuration_rejects_malformed_helper_results(
         ("", "token"),
         ("   ", "token"),
         ("account", "   "),
+        pytest.param(None, "token", id="none-sid"),
+        pytest.param("account", None, id="none-token"),
+        pytest.param(7, "token", id="integer-sid"),
+        pytest.param("account", 7, id="integer-token"),
+        pytest.param(object(), "token", id="object-sid"),
+        pytest.param("account", object(), id="object-token"),
     ),
 )
 def test_resolve_turn_rtc_configuration_rejects_missing_credentials(

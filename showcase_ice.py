@@ -48,6 +48,8 @@ def _canonical_ice_url(url: str) -> tuple[str, str] | None:
         if not host or ":" in host or endpoint.netloc.endswith(":"):
             return None
         port = endpoint.port
+        if port is not None and not 1 <= port <= 65535:
+            return None
     except ValueError:
         return None
 
@@ -125,6 +127,8 @@ def resolve_turn_rtc_configuration(
     account_sid: str,
     auth_token: str,
 ) -> RTCConfiguration | None:
+    if not isinstance(account_sid, str) or not isinstance(auth_token, str):
+        return None
     account_sid = account_sid.strip()
     auth_token = auth_token.strip()
     if not account_sid or not auth_token:
