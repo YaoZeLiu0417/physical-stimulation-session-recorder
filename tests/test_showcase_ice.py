@@ -13,7 +13,7 @@ ICE_SOURCE = Path(__file__).resolve().parents[1] / "showcase_ice.py"
     "turn_urls",
     (
         "TURN:synthetic.invalid:3478",
-        ["TURNS:synthetic.invalid:5349?transport=tcp"],
+        ["TURNS:synthetic.invalid:5349?TRANSPORT=TCP"],
         "turn:[2001:db8::1]:3478",
     ),
     ids=("uppercase-string", "uppercase-list", "bracket-ipv6"),
@@ -47,6 +47,168 @@ def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_creden
     assert calls == [("test-account", "test-token")]
 
 
+def test_resolve_turn_rtc_configuration_sanitizes_servers_and_unknown_fields(
+    monkeypatch,
+) -> None:
+    unknown_value = object()
+    ice_servers = [
+        {
+            "urls": "stun:synthetic.invalid:3478",
+            "unknown": unknown_value,
+        },
+        {
+            "urls": ["turn:synthetic.invalid:3478?transport=UDP"],
+            "username": "ephemeral-user",
+            "credential": "ephemeral-credential",
+            "unknown": unknown_value,
+        },
+    ]
+    monkeypatch.setattr(
+        showcase_ice,
+        "get_twilio_ice_servers",
+        lambda *_args: ice_servers,
+    )
+
+    result = showcase_ice.resolve_turn_rtc_configuration("account", "token")
+
+    assert result == {
+        "iceServers": [
+            {"urls": "stun:synthetic.invalid:3478"},
+            {
+                "urls": ["turn:synthetic.invalid:3478?transport=UDP"],
+                "username": "ephemeral-user",
+                "credential": "ephemeral-credential",
+            },
+        ]
+    }
+    assert result["iceServers"] is not ice_servers
+    assert all(
+        sanitized is not original
+        for sanitized, original in zip(result["iceServers"], ice_servers)
+    )
+
+
+@pytest.mark.parametrize(
+    "ice_servers",
+    (
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478"},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="turn-missing-username",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478"},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                },
+            ],
+            id="turn-missing-credential",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "   ",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="turn-blank-username",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "\t",
+                }
+            ],
+            id="turn-blank-credential",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": 7,
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="turn-non-string-username",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": object(),
+                }
+            ],
+            id="turn-non-string-credential",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478", "username": 7},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stun-non-string-username",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478", "credential": None},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stun-non-string-credential",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478", "username": ""},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stun-empty-username",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478", "credential": "  "},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stun-blank-credential",
+        ),
+    ),
+)
+def test_resolve_turn_rtc_configuration_rejects_invalid_ice_credentials(
+    monkeypatch, ice_servers
+) -> None:
+    monkeypatch.setattr(
+        showcase_ice,
+        "get_twilio_ice_servers",
+        lambda *_args: ice_servers,
+    )
+
+    assert showcase_ice.resolve_turn_rtc_configuration("account", "token") is None
+
+
 @pytest.mark.parametrize(
     "ice_servers",
     (
@@ -69,33 +231,160 @@ def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_creden
             [{"urls": ["turn:synthetic.invalid:3478", 7]}],
             id="non-string-url-item",
         ),
-        pytest.param([{"urls": "turn:"}], id="turn-empty-host"),
-        pytest.param([{"urls": "turns:"}], id="turns-empty-host"),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="turn-empty-host",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turns:",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="turns-empty-host",
+        ),
         pytest.param([{"urls": "turnish:host"}], id="pseudo-scheme"),
         pytest.param([{"urls": "synthetic.invalid:3478"}], id="missing-scheme"),
         pytest.param(
-            [{"urls": "turn:user@synthetic.invalid:3478"}],
+            [
+                {
+                    "urls": "turn:user@synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
             id="userinfo",
         ),
         pytest.param(
-            [{"urls": "turn:synthetic invalid:3478"}],
+            [
+                {
+                    "urls": "turn:synthetic invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
             id="whitespace",
         ),
         pytest.param(
-            [{"urls": "turn:synthetic.invalid:not-a-port"}],
+            [
+                {
+                    "urls": "turn:synthetic.invalid:not-a-port",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
             id="non-numeric-port",
         ),
         pytest.param(
-            [{"urls": "turn:synthetic.invalid:70000"}],
+            [
+                {
+                    "urls": "turn:synthetic.invalid:70000",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
             id="out-of-range-port",
         ),
         pytest.param(
-            [{"urls": "turn:synthetic.invalid:3478/path"}],
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478/path",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
             id="path-component",
         ),
         pytest.param(
             [
-                {"urls": "turn:synthetic.invalid:3478"},
+                {
+                    "urls": "turn://synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="authority-form",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478?unknown=value",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="unknown-query",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478?transport=sctp",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="unsupported-transport",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": (
+                        "turn:synthetic.invalid:3478"
+                        "?transport=udp&unknown=value"
+                    ),
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="multiple-query-parameters",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478?",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="empty-query",
+        ),
+        pytest.param(
+            [
+                {"urls": "stun:synthetic.invalid:3478?transport=udp"},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stun-query",
+        ),
+        pytest.param(
+            [
+                {"urls": "stuns:synthetic.invalid:5349?transport=tcp"},
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
+            ],
+            id="stuns-query",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:synthetic.invalid:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                },
                 {"urls": None},
             ],
             id="valid-turn-before-invalid-server",
@@ -106,7 +395,9 @@ def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_creden
                     "urls": [
                         "turn:synthetic.invalid:3478",
                         "stun:",
-                    ]
+                    ],
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
                 }
             ],
             id="valid-turn-with-invalid-companion-url",
