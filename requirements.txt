@@ -5,6 +5,7 @@ streamlit-webrtc==0.63.4
 # WebRTC / 视频
 aiortc==1.15.0        # requires av >= 14, < 18
 av==17.0.0            # provides prebuilt Linux wheels
+twilio>=9.0,<10       # short-lived TURN credentials
 
 # 基础依赖
 numpy>=1.24,<2.0
