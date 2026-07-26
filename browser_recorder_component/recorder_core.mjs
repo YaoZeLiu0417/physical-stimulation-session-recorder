@@ -72,10 +72,14 @@ export function chooseMimeType(isSupported) {
   if (typeof isSupported !== "function") {
     return null;
   }
-  for (const mimeType of MIME_TYPES) {
-    if (isSupported(mimeType)) {
-      return mimeType;
+  try {
+    for (const mimeType of MIME_TYPES) {
+      if (isSupported(mimeType) === true) {
+        return mimeType;
+      }
     }
+  } catch {
+    return null;
   }
   return null;
 }
@@ -131,6 +135,8 @@ function sanitizedError(code) {
 
 export class SerialChunkWriter {
   #writable;
+  #write;
+  #close;
   #tail = Promise.resolve();
   #closePromise = null;
   #abortPromise = null;
@@ -138,15 +144,23 @@ export class SerialChunkWriter {
   #aborted = false;
 
   constructor(writable) {
-    if (
-      writable === null ||
-      typeof writable !== "object" ||
-      typeof writable.write !== "function" ||
-      typeof writable.close !== "function"
-    ) {
+    if (writable === null || typeof writable !== "object") {
+      throw sanitizedError("write_failed");
+    }
+    let write;
+    let close;
+    try {
+      write = writable.write;
+      close = writable.close;
+    } catch {
+      throw sanitizedError("write_failed");
+    }
+    if (typeof write !== "function" || typeof close !== "function") {
       throw sanitizedError("write_failed");
     }
     this.#writable = writable;
+    this.#write = write;
+    this.#close = close;
   }
 
   enqueue(chunk) {
@@ -159,7 +173,7 @@ export class SerialChunkWriter {
         return;
       }
       try {
-        await this.#writable.write(chunk);
+        await this.#write.call(this.#writable, chunk);
       } catch {
         throw sanitizedError("write_failed");
       }
@@ -178,11 +192,12 @@ export class SerialChunkWriter {
 
     this.#closing = true;
     const writable = this.#writable;
+    const close = this.#close;
     this.#closePromise = this.#tail
       .then(
         async () => {
           try {
-            await writable.close();
+            await close.call(writable);
           } catch {
             throw sanitizedError("close_failed");
           }
@@ -194,6 +209,8 @@ export class SerialChunkWriter {
       .finally(() => {
         this.#tail = Promise.resolve();
         this.#writable = null;
+        this.#write = null;
+        this.#close = null;
       });
     return this.#closePromise;
   }
@@ -210,6 +227,8 @@ export class SerialChunkWriter {
     this.#closing = true;
     const writable = this.#writable;
     this.#writable = null;
+    this.#write = null;
+    this.#close = null;
     this.#tail = Promise.resolve();
     this.#abortPromise = Promise.resolve()
       .then(() => {

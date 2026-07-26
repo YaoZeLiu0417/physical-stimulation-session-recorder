@@ -88,6 +88,22 @@ test("returns null when no approved MIME type is supported", () => {
   ]);
 });
 
+test("requires exact true from the MIME support predicate", () => {
+  const truthyNonBooleans = ["false", {}, Promise.resolve(true)];
+
+  for (const result of truthyNonBooleans) {
+    assert.equal(chooseMimeType(() => result), null);
+  }
+});
+
+test("fails closed when the MIME support predicate throws", () => {
+  const result = chooseMimeType(() => {
+    throw new Error("private MIME probe detail");
+  });
+
+  assert.equal(result, null);
+});
+
 test("moves through the recording lifecycle", () => {
   assert.equal(nextState("idle", "permission-granted"), "ready");
   assert.equal(nextState("ready", "record"), "recording");
@@ -230,6 +246,59 @@ test("accepts only approved modes, states, booleans, and error categories", () =
   assert.equal(createStatus({ camera_ready: true }).camera_ready, true);
   assert.equal(createStatus({ microphone_ready: true }).microphone_ready, true);
   assert.equal(createStatus({ saved_confirmed: true }).saved_confirmed, true);
+});
+
+test("sanitizes writable method getter failures during construction", () => {
+  for (const failingMethod of ["write", "close"]) {
+    const writable = {
+      get write() {
+        if (failingMethod === "write") {
+          throw new Error("private write getter detail");
+        }
+        return async function write() {};
+      },
+      get close() {
+        if (failingMethod === "close") {
+          throw new Error("private close getter detail");
+        }
+        return async function close() {};
+      },
+    };
+
+    assert.throws(
+      () => new SerialChunkWriter(writable),
+      (error) => assertSanitizedError(error, "write_failed"),
+    );
+  }
+});
+
+test("reads writable methods once and preserves their receiver", async () => {
+  let writeReads = 0;
+  let closeReads = 0;
+  const written = [];
+  const writable = {
+    get write() {
+      writeReads += 1;
+      return function write(blob) {
+        assert.equal(this, writable);
+        written.push(blob.number);
+      };
+    },
+    get close() {
+      closeReads += 1;
+      return function close() {
+        assert.equal(this, writable);
+      };
+    },
+  };
+  const writer = new SerialChunkWriter(writable);
+
+  await writer.enqueue(numberedBlob(1));
+  await writer.close();
+
+  assert.deepEqual(written, [1]);
+  assert.equal(writeReads, 1);
+  assert.equal(closeReads, 1);
 });
 
 test("serializes chunk writes and closes only after the queue drains", async () => {
