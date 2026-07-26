@@ -185,6 +185,23 @@ def test_render_fails_closed_for_invalid_component_value(monkeypatch) -> None:
     assert browser_recorder.render_browser_recorder(key="recorder") == DEFAULT_STATUS
 
 
+def test_render_fails_closed_when_component_raises_exception(monkeypatch) -> None:
+    calls = []
+
+    def fail_component(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("component failure must not escape")
+
+    monkeypatch.setattr(browser_recorder, "_COMPONENT", fail_component)
+
+    assert browser_recorder.render_browser_recorder(
+        key="failed-recorder", initial_mode="long"
+    ) == DEFAULT_STATUS
+    assert calls == [
+        {"key": "failed-recorder", "initial_mode": "long", "default": None}
+    ]
+
+
 def test_module_uses_only_the_status_component_boundary() -> None:
     source = RECORDER_SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)

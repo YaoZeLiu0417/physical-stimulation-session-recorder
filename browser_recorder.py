@@ -121,5 +121,8 @@ _COMPONENT = declare_component("browser_local_recorder", path=str(_COMPONENT_PAT
 def render_browser_recorder(
     *, key: str, initial_mode: RecorderMode = "demo"
 ) -> RecorderStatus:
-    value = _COMPONENT(key=key, initial_mode=initial_mode, default=None)
+    try:
+        value = _COMPONENT(key=key, initial_mode=initial_mode, default=None)
+    except Exception:
+        return RecorderStatus()
     return parse_recorder_status(value)
