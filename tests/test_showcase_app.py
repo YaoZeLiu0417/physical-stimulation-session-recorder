@@ -3,8 +3,12 @@ import hashlib
 import re
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from streamlit.testing.v1 import AppTest
+
+import showcase_media
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +23,15 @@ PROGRESS_LABELS = (
     "3 引导反馈",
     "4 完成确认",
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_camera(monkeypatch):
+    monkeypatch.setattr(
+        showcase_media,
+        "render_live_camera",
+        lambda: SimpleNamespace(state=SimpleNamespace(playing=True)),
+    )
 
 
 def _app_with_password() -> AppTest:
@@ -43,6 +56,7 @@ def _visible_text(app: AppTest) -> str:
         "caption",
         "markdown",
         "info",
+        "warning",
         "error",
         "success",
         "button",
@@ -124,7 +138,11 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _element_by_key(app.button, "begin_demo").click().run()
 
     capture_text = _visible_text(app)
-    assert all(word in capture_text for word in ("模拟", "摄像头", "文件", "网络"))
+    assert "实时摄像预览" in capture_text
+    assert "摄像头" in capture_text
+    assert "不写入文件" in capture_text
+    assert "项目存储" in capture_text
+    assert app.session_state["showcase_camera_started"] is True
     _assert_progress(app, "2 会话记录")
     _element_by_key(app.button, "finish_capture").click().run()
 
@@ -159,6 +177,22 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     assert restart_app.session_state["showcase_step"] == "overview"
     _assert_progress(restart_app, "1 安全进入")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_camera_initialization_failure_keeps_the_flow_available(monkeypatch):
+    def unavailable_camera():
+        raise RuntimeError("synthetic camera failure")
+
+    monkeypatch.setattr(showcase_media, "render_live_camera", unavailable_camera)
+    app = _authenticate(_app_with_password())
+    _element_by_key(app.button, "begin_demo").click().run()
+
+    assert not app.exception
+    assert [item.value for item in app.warning] == [
+        "摄像头暂时不可用，可继续体验后续流程。"
+    ]
+    _element_by_key(app.button, "finish_capture").click().run()
+    assert app.session_state["showcase_step"] == "reflection"
 
 
 def test_visible_copy_is_neutral_on_every_authenticated_step():

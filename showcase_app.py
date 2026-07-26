@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
 
 import streamlit as st
 
+from showcase_media import camera_is_playing, render_live_camera
 from showcase_workflow import advance_step, password_matches
 
 
+LOGGER = logging.getLogger(__name__)
 PRODUCT_NAME = "Physical Stimulation Session Recorder"
 PRODUCT_CAPTION = "物理刺激干预记录工具 · 本页面只使用合成内容"
 
@@ -153,12 +156,25 @@ with st.container():
         if st.button("开始演示", type="primary", key="begin_demo"):
             _go("begin")
     elif step == "capture":
-        st.subheader("会话记录")
-        st.info(
-            "模拟记录正在进行。本步骤不调用摄像头，不读取或写入文件，也不连接网络。"
+        st.subheader("实时摄像预览")
+        st.caption(
+            "点击 START 后，浏览器会请求摄像头权限。视频不写入文件，"
+            "也不会保存到项目存储。"
         )
-        st.progress(72)
-        if st.button("完成模拟记录", type="primary", key="finish_capture"):
+        try:
+            camera_context = render_live_camera()
+        except Exception:
+            LOGGER.warning("showcase camera preview unavailable", exc_info=True)
+            camera_context = None
+            st.warning("摄像头暂时不可用，可继续体验后续流程。")
+
+        if camera_is_playing(camera_context):
+            st.session_state["showcase_camera_started"] = True
+            st.info("摄像头已连接。完成预览后可继续。")
+        else:
+            st.info("等待摄像头连接。也可直接继续体验后续流程。")
+
+        if st.button("完成摄像演示", type="primary", key="finish_capture"):
             _go("finish_capture")
     elif step == "reflection":
         st.subheader("会话反馈")
