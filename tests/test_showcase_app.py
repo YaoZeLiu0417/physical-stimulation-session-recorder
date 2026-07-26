@@ -17,6 +17,18 @@ THEME = ROOT / ".streamlit" / "config.toml"
 PASSWORD = "demonstration-passphrase"
 PRODUCT_NAME = "Physical Stimulation Session Recorder"
 PRODUCT_CAPTION = "物理刺激干预记录工具 · 本页面只使用合成内容"
+SYNTHETIC_RESPONSES = {
+    "process_clarity": 3,
+    "camera_smoothness": 4,
+    "information_load": 1,
+    "workflow_willingness": 4,
+}
+SYNTHETIC_LABELS = (
+    "本次演示流程有多清晰？",
+    "摄像头交互有多顺畅？",
+    "界面的信息量有多合适？",
+    "你愿意继续使用这一流程吗？",
+)
 PROGRESS_LABELS = (
     "1 安全进入",
     "2 会话记录",
@@ -146,11 +158,13 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _assert_progress(app, "2 会话记录")
     _element_by_key(app.button, "finish_capture").click().run()
 
-    assert _element_by_key(app.slider, "session_clarity").value == 2
-    assert _element_by_key(app.slider, "interaction_comfort").value == 2
+    for key in SYNTHETIC_RESPONSES:
+        assert _element_by_key(app.slider, key).value == 2
+    assert tuple(element.label for element in app.slider) == SYNTHETIC_LABELS
     _assert_progress(app, "3 引导反馈")
-    _element_by_key(app.slider, "session_clarity").set_value(3)
-    _element_by_key(app.slider, "interaction_comfort").set_value(4)
+
+    for key, value in SYNTHETIC_RESPONSES.items():
+        _element_by_key(app.slider, key).set_value(value)
     app.run()
     _element_by_key(app.button, "save_reflection").click().run()
 
@@ -166,17 +180,28 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     ]
     assert "隐私边界" in _visible_text(app)
     _assert_progress(app, "4 完成确认")
-    _element_by_key(app.button, "restart_demo")
     assert list(tmp_path.iterdir()) == []
 
-    restart_app = _app_with_password()
-    restart_app.session_state["showcase_authenticated"] = True
-    restart_app.session_state["showcase_step"] = "confirmation"
-    restart_app.run()
-    _element_by_key(restart_app.button, "restart_demo").click().run()
-    assert restart_app.session_state["showcase_step"] == "overview"
-    _assert_progress(restart_app, "1 安全进入")
-    assert list(tmp_path.iterdir()) == []
+    confirmation_app = _app_with_password()
+    confirmation_app.session_state["showcase_authenticated"] = True
+    confirmation_app.session_state["showcase_step"] = "confirmation"
+    confirmation_app.session_state["showcase_camera_started"] = True
+    for key, value in SYNTHETIC_RESPONSES.items():
+        confirmation_app.session_state[key] = value
+    confirmation_app.run()
+
+    confirmation_text = _visible_text(confirmation_app)
+    assert not confirmation_app.slider
+    assert not confirmation_app.metric
+    assert "总分" not in confirmation_text
+    assert "得分" not in confirmation_text
+    for label in SYNTHETIC_LABELS:
+        assert label not in confirmation_text
+
+    _element_by_key(confirmation_app.button, "restart_demo").click().run()
+    assert confirmation_app.session_state["showcase_step"] == "overview"
+    for key in (*SYNTHETIC_RESPONSES, "showcase_camera_started"):
+        assert key not in confirmation_app.session_state
 
 
 def test_camera_initialization_failure_keeps_the_flow_available(
