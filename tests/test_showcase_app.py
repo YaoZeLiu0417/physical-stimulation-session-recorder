@@ -35,6 +35,29 @@ PROGRESS_LABELS = (
     "3 引导反馈",
     "4 完成确认",
 )
+EXPECTED_CONFIRMATION_INVENTORY = (
+    ("title", "value", PRODUCT_NAME),
+    ("caption", "value", PRODUCT_CAPTION),
+    (
+        "markdown",
+        "value",
+        '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
+    ),
+    (
+        "markdown",
+        "value",
+        '<div class="completion-status" role="status">'
+        "演示流程已完成。</div>",
+    ),
+    (
+        "markdown",
+        "value",
+        '<div class="privacy-note"><strong>隐私边界</strong><br>'
+        "本演示不包含研究名称、干预参数、测量内容、评分规则或真实参与者数据。"
+        "</div>",
+    ),
+    ("button", "label", "重新体验"),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -46,8 +69,8 @@ def _stub_live_camera(monkeypatch):
     )
 
 
-def _app_with_password() -> AppTest:
-    app = AppTest.from_file(str(APP), default_timeout=10)
+def _app_with_password(app_path: Path = APP) -> AppTest:
+    app = AppTest.from_file(str(app_path), default_timeout=10)
     app.secrets["SHOWCASE_PASSWORD_SHA256"] = hashlib.sha256(
         PASSWORD.encode("utf-8")
     ).hexdigest()
@@ -90,47 +113,55 @@ def _visible_text(app: AppTest) -> str:
 
 def _main_content_inventory(app: AppTest):
     inventory = []
-    for collection_name in (
-        "title",
-        "header",
-        "subheader",
-        "caption",
-        "markdown",
-        "text",
-        "info",
-        "warning",
-        "error",
-        "success",
-        "metric",
-        "json",
-        "code",
-        "button",
-        "slider",
-        "number_input",
-        "text_input",
-        "text_area",
-        "radio",
-        "selectbox",
-        "multiselect",
-        "dataframe",
-        "table",
-    ):
-        attributes = ("label",) if collection_name == "button" else (
-            "value",
-            "label",
+
+    def visit(node):
+        node_type = getattr(node, "type", type(node).__name__)
+        visible_fields = []
+        for attribute in ("value", "label", "help", "placeholder"):
+            if node_type == "button" and attribute == "value":
+                continue
+            try:
+                value = getattr(node, attribute)
+            except AttributeError:
+                continue
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
+            if not isinstance(value, (str, int, float, bool)):
+                value = repr(value)
+            visible_fields.append((attribute, value))
+
+        markdown_values = [
+            value
+            for attribute, value in visible_fields
+            if attribute == "value" and isinstance(value, str)
+        ]
+        is_standalone_stylesheet = (
+            node_type == "markdown"
+            and len(markdown_values) == 1
+            and markdown_values[0].strip().startswith("<style>")
+            and markdown_values[0].strip().endswith("</style>")
+            and markdown_values[0].strip().count("<style>") == 1
+            and markdown_values[0].strip().count("</style>") == 1
         )
-        for element in getattr(app.main, collection_name):
-            for attribute in attributes:
-                value = getattr(element, attribute, None)
-                if value is None:
-                    continue
-                if (
-                    collection_name == "markdown"
-                    and attribute == "value"
-                    and str(value).strip().startswith("<style>")
-                ):
-                    continue
-                inventory.append((collection_name, attribute, value))
+
+        structural_types = {"main", "vertical"}
+        if not is_standalone_stylesheet and (
+            node_type not in structural_types or visible_fields
+        ):
+            if visible_fields:
+                inventory.extend(
+                    (node_type, attribute, value)
+                    for attribute, value in visible_fields
+                )
+            else:
+                inventory.append((node_type, "node", None))
+
+        children = getattr(node, "children", None)
+        if children is not None:
+            for child in children.values():
+                visit(child)
+
+    visit(app.main)
     return tuple(inventory)
 
 
@@ -241,34 +272,57 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
         confirmation_app.session_state[key] = value
     confirmation_app.run()
 
-    assert _main_content_inventory(confirmation_app) == (
-        ("title", "value", PRODUCT_NAME),
-        ("caption", "value", PRODUCT_CAPTION),
-        (
-            "markdown",
-            "value",
-            '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
-        ),
-        (
-            "markdown",
-            "value",
-            '<div class="completion-status" role="status">'
-            "演示流程已完成。</div>",
-        ),
-        (
-            "markdown",
-            "value",
-            '<div class="privacy-note"><strong>隐私边界</strong><br>'
-            "本演示不包含研究名称、干预参数、测量内容、评分规则或真实参与者数据。"
-            "</div>",
-        ),
-        ("button", "label", "重新体验"),
+    assert (
+        _main_content_inventory(confirmation_app)
+        == EXPECTED_CONFIRMATION_INVENTORY
     )
 
     _element_by_key(confirmation_app.button, "restart_demo").click().run()
     assert confirmation_app.session_state["showcase_step"] == "overview"
     for key in (*SYNTHETIC_RESPONSES, "showcase_camera_started"):
         assert key not in confirmation_app.session_state
+
+
+def test_confirmation_inventory_rejects_unknown_and_style_smuggled_output(
+    tmp_path,
+):
+    source = APP.read_text(encoding="utf-8")
+    restart_anchor = '        if st.button("重新体验", key="restart_demo"):\n'
+    mutations = (
+        ("status", '        st.status("综合评分：4")\n'),
+        ("latex", '        st.latex(r"综合评分 = 4")\n'),
+        ("checkbox", '        st.checkbox("综合评分：4")\n'),
+        (
+            "style-smuggling",
+            '        st.markdown(\n'
+            '            "<style>.x { color: red; }</style><p>评分：4</p>",\n'
+            "            unsafe_allow_html=True,\n"
+            "        )\n",
+        ),
+    )
+    unexpectedly_allowed = []
+
+    for name, mutation in mutations:
+        mutated_source = source.replace(
+            restart_anchor,
+            mutation + restart_anchor,
+            1,
+        )
+        mutated_path = tmp_path / f"mutated_showcase_{name}.py"
+        mutated_path.write_text(mutated_source, encoding="utf-8")
+        mutated_app = _app_with_password(mutated_path)
+        mutated_app.session_state["showcase_authenticated"] = True
+        mutated_app.session_state["showcase_step"] = "confirmation"
+        mutated_app.run()
+
+        assert not mutated_app.exception
+        if (
+            _main_content_inventory(mutated_app)
+            == EXPECTED_CONFIRMATION_INVENTORY
+        ):
+            unexpectedly_allowed.append(name)
+
+    assert unexpectedly_allowed == []
 
 
 def test_camera_initialization_failure_keeps_the_flow_available(
