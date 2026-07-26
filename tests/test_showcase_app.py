@@ -3,8 +3,12 @@ import hashlib
 import re
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from streamlit.testing.v1 import AppTest
+
+import showcase_media
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,16 +17,60 @@ THEME = ROOT / ".streamlit" / "config.toml"
 PASSWORD = "demonstration-passphrase"
 PRODUCT_NAME = "Physical Stimulation Session Recorder"
 PRODUCT_CAPTION = "物理刺激干预记录工具 · 本页面只使用合成内容"
+SYNTHETIC_RESPONSES = {
+    "process_clarity": 3,
+    "camera_smoothness": 4,
+    "information_load": 1,
+    "workflow_willingness": 4,
+}
+SYNTHETIC_LABELS = (
+    "本次演示流程有多清晰？",
+    "摄像头交互有多顺畅？",
+    "界面的信息量有多合适？",
+    "你愿意继续使用这一流程吗？",
+)
 PROGRESS_LABELS = (
     "1 安全进入",
     "2 会话记录",
     "3 引导反馈",
     "4 完成确认",
 )
+EXPECTED_CONFIRMATION_INVENTORY = (
+    ("title", "value", PRODUCT_NAME),
+    ("caption", "value", PRODUCT_CAPTION),
+    (
+        "markdown",
+        "value",
+        '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
+    ),
+    (
+        "markdown",
+        "value",
+        '<div class="completion-status" role="status">'
+        "演示流程已完成。</div>",
+    ),
+    (
+        "markdown",
+        "value",
+        '<div class="privacy-note"><strong>隐私边界</strong><br>'
+        "本演示不包含研究名称、干预参数、测量内容、评分规则或真实参与者数据。"
+        "</div>",
+    ),
+    ("button", "label", "重新体验"),
+)
 
 
-def _app_with_password() -> AppTest:
-    app = AppTest.from_file(str(APP), default_timeout=10)
+@pytest.fixture(autouse=True)
+def _stub_live_camera(monkeypatch):
+    monkeypatch.setattr(
+        showcase_media,
+        "render_live_camera",
+        lambda: SimpleNamespace(state=SimpleNamespace(playing=True)),
+    )
+
+
+def _app_with_password(app_path: Path = APP) -> AppTest:
+    app = AppTest.from_file(str(app_path), default_timeout=10)
     app.secrets["SHOWCASE_PASSWORD_SHA256"] = hashlib.sha256(
         PASSWORD.encode("utf-8")
     ).hexdigest()
@@ -43,6 +91,7 @@ def _visible_text(app: AppTest) -> str:
         "caption",
         "markdown",
         "info",
+        "warning",
         "error",
         "success",
         "button",
@@ -60,6 +109,60 @@ def _visible_text(app: AppTest) -> str:
                 if value is not None:
                     values.append(str(value))
     return "\n".join(values)
+
+
+def _main_content_inventory(app: AppTest):
+    inventory = []
+
+    def visit(node):
+        node_type = getattr(node, "type", type(node).__name__)
+        visible_fields = []
+        for attribute in ("value", "label", "help", "placeholder"):
+            if node_type == "button" and attribute == "value":
+                continue
+            try:
+                value = getattr(node, attribute)
+            except AttributeError:
+                continue
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
+            if not isinstance(value, (str, int, float, bool)):
+                value = repr(value)
+            visible_fields.append((attribute, value))
+
+        markdown_values = [
+            value
+            for attribute, value in visible_fields
+            if attribute == "value" and isinstance(value, str)
+        ]
+        is_standalone_stylesheet = (
+            node_type == "markdown"
+            and len(markdown_values) == 1
+            and markdown_values[0].strip().startswith("<style>")
+            and markdown_values[0].strip().endswith("</style>")
+            and markdown_values[0].strip().count("<style>") == 1
+            and markdown_values[0].strip().count("</style>") == 1
+        )
+
+        structural_types = {"main", "vertical"}
+        if not is_standalone_stylesheet and (
+            node_type not in structural_types or visible_fields
+        ):
+            if visible_fields:
+                inventory.extend(
+                    (node_type, attribute, value)
+                    for attribute, value in visible_fields
+                )
+            else:
+                inventory.append((node_type, "node", None))
+
+        children = getattr(node, "children", None)
+        if children is not None:
+            for child in children.values():
+                visit(child)
+
+    visit(app.main)
+    return tuple(inventory)
 
 
 def _authenticate(app: AppTest) -> AppTest:
@@ -124,15 +227,24 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _element_by_key(app.button, "begin_demo").click().run()
 
     capture_text = _visible_text(app)
-    assert all(word in capture_text for word in ("模拟", "摄像头", "文件", "网络"))
+    assert "实时摄像预览" in capture_text
+    assert "摄像头" in capture_text
+    assert "不写入文件" in capture_text
+    assert "项目存储" in capture_text
+    assert app.session_state["showcase_camera_started"] is True
     _assert_progress(app, "2 会话记录")
     _element_by_key(app.button, "finish_capture").click().run()
 
-    assert _element_by_key(app.slider, "session_clarity").value == 2
-    assert _element_by_key(app.slider, "interaction_comfort").value == 2
+    for key in SYNTHETIC_RESPONSES:
+        slider = _element_by_key(app.slider, key)
+        assert slider.value == 2
+        assert slider.proto.min == 0
+        assert slider.proto.max == 4
+    assert tuple(element.label for element in app.slider) == SYNTHETIC_LABELS
     _assert_progress(app, "3 引导反馈")
-    _element_by_key(app.slider, "session_clarity").set_value(3)
-    _element_by_key(app.slider, "interaction_comfort").set_value(4)
+
+    for key, value in SYNTHETIC_RESPONSES.items():
+        _element_by_key(app.slider, key).set_value(value)
     app.run()
     _element_by_key(app.button, "save_reflection").click().run()
 
@@ -148,17 +260,99 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     ]
     assert "隐私边界" in _visible_text(app)
     _assert_progress(app, "4 完成确认")
-    _element_by_key(app.button, "restart_demo")
     assert list(tmp_path.iterdir()) == []
 
-    restart_app = _app_with_password()
-    restart_app.session_state["showcase_authenticated"] = True
-    restart_app.session_state["showcase_step"] = "confirmation"
-    restart_app.run()
-    _element_by_key(restart_app.button, "restart_demo").click().run()
-    assert restart_app.session_state["showcase_step"] == "overview"
-    _assert_progress(restart_app, "1 安全进入")
-    assert list(tmp_path.iterdir()) == []
+    # AppTest 1.37.1 and 1.45.1 retain stale pre-rerun slider deltas, so this
+    # fresh populated session verifies current confirmation rendering and cleanup.
+    confirmation_app = _app_with_password()
+    confirmation_app.session_state["showcase_authenticated"] = True
+    confirmation_app.session_state["showcase_step"] = "confirmation"
+    confirmation_app.session_state["showcase_camera_started"] = True
+    for key, value in SYNTHETIC_RESPONSES.items():
+        confirmation_app.session_state[key] = value
+    confirmation_app.run()
+
+    assert (
+        _main_content_inventory(confirmation_app)
+        == EXPECTED_CONFIRMATION_INVENTORY
+    )
+
+    _element_by_key(confirmation_app.button, "restart_demo").click().run()
+    assert confirmation_app.session_state["showcase_step"] == "overview"
+    for key in (*SYNTHETIC_RESPONSES, "showcase_camera_started"):
+        assert key not in confirmation_app.session_state
+
+
+def test_confirmation_inventory_rejects_unknown_and_style_smuggled_output(
+    tmp_path,
+):
+    source = APP.read_text(encoding="utf-8")
+    restart_anchor = '        if st.button("重新体验", key="restart_demo"):\n'
+    mutations = (
+        ("status", '        st.status("综合评分：4")\n'),
+        ("latex", '        st.latex(r"综合评分 = 4")\n'),
+        ("checkbox", '        st.checkbox("综合评分：4")\n'),
+        (
+            "style-smuggling",
+            '        st.markdown(\n'
+            '            "<style>.x { color: red; }</style><p>评分：4</p>",\n'
+            "            unsafe_allow_html=True,\n"
+            "        )\n",
+        ),
+    )
+    unexpectedly_allowed = []
+
+    for name, mutation in mutations:
+        mutated_source = source.replace(
+            restart_anchor,
+            mutation + restart_anchor,
+            1,
+        )
+        mutated_path = tmp_path / f"mutated_showcase_{name}.py"
+        mutated_path.write_text(mutated_source, encoding="utf-8")
+        mutated_app = _app_with_password(mutated_path)
+        mutated_app.session_state["showcase_authenticated"] = True
+        mutated_app.session_state["showcase_step"] = "confirmation"
+        mutated_app.run()
+
+        assert not mutated_app.exception
+        if (
+            _main_content_inventory(mutated_app)
+            == EXPECTED_CONFIRMATION_INVENTORY
+        ):
+            unexpectedly_allowed.append(name)
+
+    assert unexpectedly_allowed == []
+
+
+def test_camera_initialization_failure_keeps_the_flow_available(
+    monkeypatch, caplog
+):
+    def unavailable_camera():
+        raise RuntimeError("synthetic camera failure")
+
+    monkeypatch.setattr(showcase_media, "render_live_camera", unavailable_camera)
+    app = _authenticate(_app_with_password())
+    _element_by_key(app.button, "begin_demo").click().run()
+
+    camera_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "showcase camera preview unavailable"
+    ]
+    assert camera_logs
+    assert all(record.exc_info is None for record in camera_logs)
+    assert "synthetic camera failure" not in caplog.text
+    assert str(APP.resolve()) not in caplog.text
+    assert "等待摄像头连接。也可直接继续体验后续流程。" not in [
+        item.value for item in app.info
+    ]
+    assert not app.exception
+    assert [item.value for item in app.warning] == [
+        "摄像头暂时不可用，可继续体验后续流程。"
+    ]
+    _element_by_key(app.button, "finish_capture").click().run()
+    assert app.session_state["showcase_step"] == "reflection"
 
 
 def test_visible_copy_is_neutral_on_every_authenticated_step():
