@@ -236,10 +236,16 @@ st.markdown(
 with st.container():
     if step == "overview":
         st.subheader("准备开始本次演示")
-        st.markdown(
-            '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈和完成确认。不会保存文件，也不会连接外部存储。</div>',
-            unsafe_allow_html=True,
-        )
+        if recorder_probe_enabled:
+            st.markdown(
+                '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈和完成确认。录像仅由用户保存在本机，不会上传，也不会连接外部存储。</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈和完成确认。不会保存文件，也不会连接外部存储。</div>',
+                unsafe_allow_html=True,
+            )
         if st.button("开始演示", type="primary", key="begin_demo"):
             _go("begin")
     elif step == "capture":

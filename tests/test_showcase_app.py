@@ -386,6 +386,23 @@ def test_recorder_probe_is_not_read_or_rendered_before_authentication(
     assert "视频和声音仅保存在本机" not in _visible_text(app)
 
 
+def test_recorder_probe_overview_describes_user_controlled_local_saving():
+    probe_app = _app_with_password()
+    probe_app.query_params["recorder_probe"] = "1"
+    _authenticate(probe_app)
+
+    probe_text = _visible_text(probe_app)
+    assert "录像" in probe_text
+    assert "保存在本机" in probe_text
+    assert "不会上传" in probe_text
+    assert "外部存储" in probe_text
+    assert "不会保存文件" not in probe_text
+
+    default_text = _visible_text(_authenticate(_app_with_password()))
+    assert "不会保存文件" in default_text
+    assert "录像仅由用户保存在本机" not in default_text
+
+
 def test_idle_recorder_probe_is_neutral_and_cannot_continue(monkeypatch):
     app, _ = _probe_app(monkeypatch, RecorderStatus())
 
@@ -398,7 +415,70 @@ def test_idle_recorder_probe_is_neutral_and_cannot_continue(monkeypatch):
     ]
 
 
-def test_recorder_probe_discards_registered_raw_component_state():
+def test_registered_recorder_component_discards_raw_and_preserves_identity():
+    recording_raw = {
+        "mode": "demo",
+        "state": "recording",
+        "duration_seconds": 2,
+        "camera_ready": True,
+        "microphone_ready": True,
+        "saved_confirmed": False,
+        "error_code": None,
+    }
+    recording_status = RecorderStatus(
+        state="recording",
+        duration_seconds=2,
+        camera_ready=True,
+        microphone_ready=True,
+    )
+    saved_raw = {
+        **recording_raw,
+        "state": "saved",
+        "saved_confirmed": True,
+    }
+    saved_status = RecorderStatus(
+        state="saved",
+        duration_seconds=2,
+        camera_ready=True,
+        microphone_ready=True,
+        saved_confirmed=True,
+    )
+    app = _app_with_password()
+    app.query_params["recorder_probe"] = "1"
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = "capture"
+    app.session_state["showcase_session_recorder"] = recording_raw
+
+    app.run()
+
+    assert not app.exception
+    assert "showcase_session_recorder" not in app.session_state
+    assert app.session_state["showcase_recorder_status"] == recording_status
+    first_components = app.get("component_instance")
+    assert len(first_components) == 1
+    component_id = first_components[0].proto.id
+
+    app.run()
+
+    assert not app.exception
+    assert "showcase_session_recorder" not in app.session_state
+    assert app.session_state["showcase_recorder_status"] == recording_status
+    second_components = app.get("component_instance")
+    assert len(second_components) == 1
+    assert second_components[0].proto.id == component_id
+
+    app.session_state["showcase_session_recorder"] = saved_raw
+    app.run()
+
+    assert not app.exception
+    assert "showcase_session_recorder" not in app.session_state
+    assert app.session_state["showcase_recorder_status"] == saved_status
+    third_components = app.get("component_instance")
+    assert len(third_components) == 1
+    assert third_components[0].proto.id == component_id
+
+
+def test_registered_recorder_component_discards_private_raw_fields():
     app = _app_with_password()
     app.query_params["recorder_probe"] = "1"
     app.session_state["showcase_authenticated"] = True
