@@ -542,3 +542,499 @@ test("production core has no network, storage, media-link, or identity capabilit
   }
   assert.doesNotMatch(source, /^\s*import\s/m);
 });
+
+class FakeElement {
+  constructor(id, properties = {}) {
+    this.id = id;
+    this.listeners = new Map();
+    this.value = "";
+    this.checked = false;
+    this.disabled = false;
+    this.hidden = false;
+    this.srcObject = null;
+    this.state = "";
+    Object.assign(this, properties);
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  emit(type, fields = {}) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ type, target: this, ...fields });
+    }
+  }
+
+  replaceChildren(...children) {
+    this.children = children;
+  }
+
+  removeAttribute(name) {
+    delete this[name];
+  }
+
+  pause() {}
+
+  load() {}
+
+  play() {
+    return Promise.resolve();
+  }
+}
+
+class FakeWindow {
+  constructor(parent) {
+    this.parent = parent;
+    this.listeners = new Map();
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  emit(type, fields = {}) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ type, ...fields });
+    }
+  }
+}
+
+function fakeStream() {
+  const tracks = ["video", "audio"].map((kind) => ({
+    kind,
+    onended: null,
+    stopCalls: 0,
+    stop() {
+      this.stopCalls += 1;
+    },
+  }));
+  return {
+    active: true,
+    tracks,
+    getTracks: () => tracks,
+    getVideoTracks: () => tracks.filter((track) => track.kind === "video"),
+    getAudioTracks: () => tracks.filter((track) => track.kind === "audio"),
+  };
+}
+
+function fakeWritable({ writeGate = null, closeGate = null } = {}) {
+  const calls = { writes: [], close: 0, abort: 0 };
+  return {
+    calls,
+    write(blob) {
+      calls.writes.push(blob.size);
+      return writeGate?.promise ?? Promise.resolve();
+    },
+    close() {
+      calls.close += 1;
+      return closeGate?.promise ?? Promise.resolve();
+    },
+    abort() {
+      calls.abort += 1;
+      return Promise.resolve();
+    },
+  };
+}
+
+async function settleRecorderApp() {
+  for (let turn = 0; turn < 16; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
+let recorderAppImport = 0;
+
+async function recorderAppHarness({
+  getUserMediaGate = null,
+  pickerGate = null,
+  writable = fakeWritable(),
+} = {}) {
+  const savedDescriptors = new Map();
+  const globalNames = [
+    "window",
+    "document",
+    "navigator",
+    "MediaRecorder",
+    "Option",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
+  ];
+  for (const name of globalNames) {
+    savedDescriptors.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+  }
+
+  const modeDemo = new FakeElement("mode-demo", {
+    name: "mode",
+    value: "demo",
+    checked: true,
+  });
+  const modeLong = new FakeElement("mode-long", {
+    name: "mode",
+    value: "long",
+  });
+  const ids = [
+    "preview",
+    "preview-placeholder",
+    "camera-select",
+    "microphone-select",
+    "audio-meter",
+    "timer",
+    "record-button",
+    "stop-button",
+    "rerecord-button",
+    "download-link",
+    "skip-button",
+    "status",
+    "save-confirmation",
+  ];
+  const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement(id)]));
+  elements.preview.srcObject = null;
+  elements["audio-meter"].value = 0;
+  const body = new FakeElement("body");
+  const document = {
+    body,
+    documentElement: { scrollHeight: 640 },
+    getElementById(id) {
+      return elements[id] ?? null;
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, 'input[name="mode"]');
+      return [modeDemo, modeLong];
+    },
+  };
+
+  const messages = [];
+  const parent = {
+    postMessage(message) {
+      messages.push(message);
+    },
+  };
+  const window = new FakeWindow(parent);
+  const stream = fakeStream();
+  let getUserMediaCalls = 0;
+  const mediaDevices = {
+    getUserMedia() {
+      getUserMediaCalls += 1;
+      return getUserMediaGate?.promise ?? Promise.resolve(stream);
+    },
+    enumerateDevices() {
+      return Promise.resolve([]);
+    },
+  };
+  const handleCalls = { picker: 0, createWritable: 0 };
+  const handle = {
+    createWritable() {
+      handleCalls.createWritable += 1;
+      return Promise.resolve(writable);
+    },
+  };
+  window.showSaveFilePicker = () => {
+    handleCalls.picker += 1;
+    return pickerGate?.promise ?? Promise.resolve(handle);
+  };
+  window.AudioContext = class {
+    constructor() {
+      this.state = "running";
+    }
+
+    createAnalyser() {
+      return {
+        fftSize: 256,
+        getByteTimeDomainData() {},
+      };
+    }
+
+    createMediaStreamSource() {
+      return { connect() {} };
+    }
+
+    resume() {
+      return Promise.resolve();
+    }
+
+    close() {
+      this.state = "closed";
+      return Promise.resolve();
+    }
+  };
+
+  const recorderInstances = [];
+  class FakeMediaRecorder {
+    static isTypeSupported() {
+      return true;
+    }
+
+    constructor(recorderStream, options) {
+      this.stream = recorderStream;
+      this.mimeType = options.mimeType;
+      this.state = "inactive";
+      this.ondataavailable = null;
+      this.onerror = null;
+      this.onstop = null;
+      recorderInstances.push(this);
+    }
+
+    start(timeslice) {
+      assert.equal(timeslice, 1000);
+      this.state = "recording";
+    }
+
+    stop() {
+      this.state = "inactive";
+    }
+
+    emitData(blob) {
+      this.ondataavailable?.({ data: blob });
+    }
+
+    emitStop() {
+      this.onstop?.();
+    }
+  }
+
+  class FakeOption {
+    constructor(text, value) {
+      this.text = text;
+      this.value = value;
+    }
+  }
+
+  Object.defineProperties(globalThis, {
+    window: { configurable: true, writable: true, value: window },
+    document: { configurable: true, writable: true, value: document },
+    navigator: {
+      configurable: true,
+      writable: true,
+      value: { mediaDevices },
+    },
+    MediaRecorder: {
+      configurable: true,
+      writable: true,
+      value: FakeMediaRecorder,
+    },
+    Option: { configurable: true, writable: true, value: FakeOption },
+    requestAnimationFrame: {
+      configurable: true,
+      writable: true,
+      value: () => 1,
+    },
+    cancelAnimationFrame: {
+      configurable: true,
+      writable: true,
+      value: () => undefined,
+    },
+  });
+
+  const moduleUrl = new URL(
+    "../../browser_recorder_component/recorder_app.mjs",
+    import.meta.url,
+  );
+  moduleUrl.searchParams.set("test", String((recorderAppImport += 1)));
+  await import(moduleUrl.href);
+
+  function latestStatus() {
+    const values = messages.filter(
+      (message) => message.type === "streamlit:setComponentValue",
+    );
+    return values.at(-1)?.value ?? null;
+  }
+
+  async function render(mode, lifecycle = "test-lifecycle") {
+    window.emit("message", {
+      source: parent,
+      data: {
+        type: "streamlit:render",
+        args: { initial_mode: mode, lifecycle_key: lifecycle },
+      },
+    });
+    await settleRecorderApp();
+  }
+
+  async function dispose() {
+    window.emit("pagehide");
+    await settleRecorderApp();
+    for (const [name, descriptor] of savedDescriptors) {
+      if (descriptor === undefined) {
+        delete globalThis[name];
+      } else {
+        Object.defineProperty(globalThis, name, descriptor);
+      }
+    }
+  }
+
+  return {
+    elements,
+    getUserMediaCalls: () => getUserMediaCalls,
+    handleCalls,
+    latestStatus,
+    messages,
+    recorderInstances,
+    render,
+    stream,
+    window,
+    writable,
+    dispose,
+  };
+}
+
+test("a configuration reset cancels a pending picker continuation", async () => {
+  const pickerGate = deferred();
+  const harness = await recorderAppHarness({ pickerGate });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    assert.equal(harness.handleCalls.picker, 1);
+
+    await harness.render("demo");
+    pickerGate.resolve({
+      createWritable: async () => harness.writable,
+    });
+    await settleRecorderApp();
+
+    assert.equal(harness.getUserMediaCalls(), 0);
+    assert.equal(harness.handleCalls.createWritable, 0);
+    assert.equal(harness.recorderInstances.length, 0);
+    assert.equal(harness.latestStatus().mode, "demo");
+    assert.equal(harness.latestStatus().state, "idle");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("pagehide disposes media that resolves after cleanup", async () => {
+  const getUserMediaGate = deferred();
+  const harness = await recorderAppHarness({ getUserMediaGate });
+  try {
+    await harness.render("demo");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    assert.equal(harness.getUserMediaCalls(), 1);
+
+    harness.window.emit("pagehide");
+    getUserMediaGate.resolve(harness.stream);
+    await settleRecorderApp();
+
+    assert.equal(harness.recorderInstances.length, 0);
+    assert.equal(
+      harness.stream.tracks.every((track) => track.stopCalls === 1),
+      true,
+    );
+    assert.equal(harness.latestStatus().state, "idle");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("a stale close finalizer cannot overwrite reset state", async () => {
+  const closeGate = deferred();
+  const writable = fakeWritable({ closeGate });
+  const harness = await recorderAppHarness({ writable });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    const recorder = harness.recorderInstances[0];
+    assert.ok(recorder);
+
+    harness.elements["stop-button"].emit("click");
+    recorder.emitData(new Blob(["final"]));
+    recorder.emitStop();
+    await settleRecorderApp();
+    assert.equal(writable.calls.close, 1);
+
+    await harness.render("demo");
+    assert.equal(harness.latestStatus().state, "idle");
+    closeGate.resolve();
+    await settleRecorderApp();
+
+    assert.equal(harness.latestStatus().mode, "demo");
+    assert.equal(harness.latestStatus().state, "idle");
+  } finally {
+    closeGate.resolve();
+    await harness.dispose();
+  }
+});
+
+test("long recording rejects a successful close with zero nonempty output", async () => {
+  const writable = fakeWritable();
+  const harness = await recorderAppHarness({ writable });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    const recorder = harness.recorderInstances[0];
+
+    harness.elements["stop-button"].emit("click");
+    recorder.emitData(new Blob([]));
+    recorder.emitStop();
+    await settleRecorderApp();
+
+    assert.equal(writable.calls.writes.length, 0);
+    assert.equal(writable.calls.close, 0);
+    assert.equal(writable.calls.abort, 1);
+    assert.equal(harness.latestStatus().state, "failed");
+    assert.equal(harness.latestStatus().error_code, "write_failed");
+    assert.equal(harness.latestStatus().saved_confirmed, false);
+    assert.equal(harness.elements["save-confirmation"].disabled, true);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("final nonempty data drains before close and explicit confirmation", async () => {
+  const writeGate = deferred();
+  const writable = fakeWritable({ writeGate });
+  const harness = await recorderAppHarness({ writable });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    const recorder = harness.recorderInstances[0];
+
+    harness.elements["stop-button"].emit("click");
+    recorder.emitData(new Blob(["final"]));
+    recorder.emitStop();
+    await settleRecorderApp();
+    assert.deepEqual(writable.calls.writes, [5]);
+    assert.equal(writable.calls.close, 0);
+
+    writeGate.resolve();
+    await settleRecorderApp();
+    assert.equal(writable.calls.close, 1);
+    assert.equal(harness.latestStatus().state, "stopped");
+    assert.equal(harness.latestStatus().saved_confirmed, false);
+
+    harness.elements["save-confirmation"].checked = true;
+    harness.elements["save-confirmation"].emit("change");
+    assert.equal(harness.latestStatus().state, "saved");
+    assert.equal(harness.latestStatus().saved_confirmed, true);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("picker cancellation returns ready without creating a recorder or file", async () => {
+  const pickerGate = deferred();
+  const harness = await recorderAppHarness({ pickerGate });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    const cancelled = new Error("cancelled");
+    cancelled.name = "AbortError";
+    pickerGate.reject(cancelled);
+    await settleRecorderApp();
+
+    assert.equal(harness.getUserMediaCalls(), 1);
+    assert.equal(harness.handleCalls.createWritable, 0);
+    assert.equal(harness.recorderInstances.length, 0);
+    assert.equal(harness.latestStatus().state, "ready");
+  } finally {
+    await harness.dispose();
+  }
+});

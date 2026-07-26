@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local session recorder</title>
+    <link rel="stylesheet" href="recorder.css" />
+  </head>
+  <body>
+    <main class="recorder-shell">
+      <header class="surface-header">
+        <div>
+          <p class="eyebrow">Local recording</p>
+          <h1>Session recorder</h1>
+        </div>
+        <output id="timer" aria-label="Recording time">00:00</output>
+      </header>
+
+      <section class="preview-region" aria-label="Recording preview">
+        <video
+          id="preview"
+          muted
+          playsinline
+          aria-label="Camera preview"
+        ></video>
+        <div class="preview-placeholder" id="preview-placeholder">
+          Camera preview
+        </div>
+      </section>
+
+      <section class="settings-band" aria-label="Recording settings">
+        <fieldset id="mode-control" class="mode-control">
+          <legend>Recording mode</legend>
+          <div class="segmented-control">
+            <input id="mode-demo" type="radio" name="mode" value="demo" checked />
+            <label for="mode-demo">Demo</label>
+            <input id="mode-long" type="radio" name="mode" value="long" />
+            <label for="mode-long">Long session</label>
+          </div>
+        </fieldset>
+
+        <div class="device-control">
+          <label for="camera-select">Camera</label>
+          <select id="camera-select" disabled>
+            <option value="">Default camera</option>
+          </select>
+        </div>
+
+        <div class="device-control">
+          <label for="microphone-select">Microphone</label>
+          <select id="microphone-select" disabled>
+            <option value="">Default microphone</option>
+          </select>
+        </div>
+
+        <div class="meter-control">
+          <label for="audio-meter">Microphone level</label>
+          <meter id="audio-meter" min="0" max="1" low="0.08" high="0.7" optimum="0.45" value="0">
+            0
+          </meter>
+        </div>
+      </section>
+
+      <section class="command-band" aria-label="Recorder commands">
+        <div class="primary-commands">
+          <button id="record-button" class="primary" type="button" title="Start recording" disabled>
+            <span class="command-icon record-icon" aria-hidden="true">&#9679;</span>
+            <span>Record</span>
+          </button>
+          <button id="stop-button" type="button" title="Stop recording" disabled>
+            <span class="command-icon" aria-hidden="true">&#9632;</span>
+            <span>Stop</span>
+          </button>
+          <button id="rerecord-button" type="button" title="Start a new recording" hidden>
+            <span class="command-icon" aria-hidden="true">&#8634;</span>
+            <span>Record again</span>
+          </button>
+          <a
+            id="download-link"
+            class="command-link"
+            href=""
+            download=""
+            title="Download recording"
+            hidden
+          >
+            <span class="command-icon" aria-hidden="true">&#8595;</span>
+            <span>Download</span>
+          </a>
+        </div>
+        <button id="skip-button" class="quiet" type="button" title="Skip recording">
+          <span>Skip</span>
+          <span class="command-icon" aria-hidden="true">&#8594;</span>
+        </button>
+      </section>
+
+      <section class="status-band">
+        <p id="status" role="status" aria-live="polite">Ready to record locally.</p>
+        <label class="save-confirmation" for="save-confirmation">
+          <input id="save-confirmation" type="checkbox" disabled />
+          <span>I confirm the recording is saved locally.</span>
+        </label>
+      </section>
+    </main>
+
+    <script type="module" src="recorder_app.mjs"></script>
+  </body>
+</html>

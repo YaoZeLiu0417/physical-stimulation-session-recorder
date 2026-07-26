@@ -1,6 +1,8 @@
 import ast
 from dataclasses import FrozenInstanceError
+from html.parser import HTMLParser
 from pathlib import Path
+import re
 
 import pytest
 
@@ -9,6 +11,29 @@ from browser_recorder import RecorderStatus, parse_recorder_status
 
 
 RECORDER_SOURCE = Path(__file__).resolve().parents[1] / "browser_recorder.py"
+COMPONENT_DIR = RECORDER_SOURCE.with_name("browser_recorder_component")
+APP_SOURCE = COMPONENT_DIR / "recorder_app.mjs"
+COMPONENT_ASSETS = (
+    "index.html",
+    "recorder.css",
+    "recorder_app.mjs",
+    "recorder_core.mjs",
+)
+RECORDER_ELEMENT_IDS = {
+    "preview",
+    "mode-control",
+    "camera-select",
+    "microphone-select",
+    "audio-meter",
+    "timer",
+    "record-button",
+    "stop-button",
+    "rerecord-button",
+    "download-link",
+    "skip-button",
+    "status",
+    "save-confirmation",
+}
 VALID_STATUS = {
     "mode": "long",
     "state": "saved",
@@ -33,8 +58,177 @@ class _HostileSchemaKey:
         raise RuntimeError("hostile schema equality")
 
 
+class _ComponentHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids = []
+        self.elements_by_id = {}
+        self.inputs = []
+        self.scripts = []
+        self.remote_urls = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"])
+            self.elements_by_id[attributes["id"]] = (tag, attributes)
+        if tag == "input":
+            self.inputs.append(attributes)
+        if tag == "script":
+            self.scripts.append(attributes)
+        for name in ("action", "href", "poster", "src"):
+            value = attributes.get(name, "")
+            if "://" in value or value.startswith("//"):
+                self.remote_urls.append(value)
+
+
 def _with(field, value):
     return {**VALID_STATUS, field: value}
+
+
+def test_component_static_assets_exist() -> None:
+    missing = [name for name in COMPONENT_ASSETS if not (COMPONENT_DIR / name).is_file()]
+
+    assert missing == []
+
+
+def test_component_html_has_stable_controls_and_one_local_module() -> None:
+    parser = _ComponentHTMLParser()
+    parser.feed((COMPONENT_DIR / "index.html").read_text(encoding="utf-8"))
+
+    assert RECORDER_ELEMENT_IDS.issubset(parser.ids)
+    assert len(parser.ids) == len(set(parser.ids))
+    assert parser.scripts == [{"type": "module", "src": "recorder_app.mjs"}]
+    assert parser.remote_urls == []
+
+
+def test_component_html_is_semantic_and_accessible() -> None:
+    parser = _ComponentHTMLParser()
+    parser.feed((COMPONENT_DIR / "index.html").read_text(encoding="utf-8"))
+
+    _, preview = parser.elements_by_id["preview"]
+    assert parser.elements_by_id["preview"][0] == "video"
+    assert "muted" in preview
+    assert "playsinline" in preview
+    assert parser.elements_by_id["mode-control"][0] == "fieldset"
+    assert parser.elements_by_id["camera-select"][0] == "select"
+    assert parser.elements_by_id["microphone-select"][0] == "select"
+    assert parser.elements_by_id["audio-meter"][0] == "meter"
+    assert parser.elements_by_id["status"][1]["aria-live"] == "polite"
+    assert parser.elements_by_id["save-confirmation"][1]["type"] == "checkbox"
+
+    modes = {
+        item.get("value")
+        for item in parser.inputs
+        if item.get("type") == "radio" and item.get("name") == "mode"
+    }
+    assert modes == {"demo", "long"}
+    for element_id in ("record-button", "stop-button", "rerecord-button", "skip-button"):
+        tag, attributes = parser.elements_by_id[element_id]
+        assert tag == "button"
+        assert attributes.get("type") == "button"
+        assert attributes.get("title")
+
+
+def test_component_css_has_the_approved_responsive_visual_contract() -> None:
+    source = (COMPONENT_DIR / "recorder.css").read_text(encoding="utf-8")
+
+    for color in ("#000035", "#2D2674", "#DD1D86", "#33B0E4", "#FFBC7D"):
+        assert color.lower() in source.lower()
+    assert "aspect-ratio: 16 / 9" in source
+    assert "border-radius: 4px" in source
+    assert ":focus-visible" in source
+    assert "@media (max-width: 640px)" in source
+    assert "gradient" not in source.lower()
+    assert "green" not in source.lower()
+
+
+def test_recorder_app_uses_required_local_browser_apis() -> None:
+    source = APP_SOURCE.read_text(encoding="utf-8")
+
+    required = (
+        "navigator.mediaDevices.getUserMedia",
+        "navigator.mediaDevices.enumerateDevices",
+        "MediaRecorder",
+        "showSaveFilePicker",
+        "createWritable",
+        "AudioContext",
+        "track.stop()",
+    )
+    for capability in required:
+        assert capability in source
+
+    for behavior in (
+        "start(1000)",
+        "LIMITS.demoMax",
+        "LIMITS.longWarning",
+        "LIMITS.longMax",
+        "URL.createObjectURL",
+        "URL.revokeObjectURL",
+        "writer.enqueue",
+        ".close()",
+        "AbortError",
+        'addEventListener("pagehide"',
+        'addEventListener("beforeunload"',
+    ):
+        assert behavior in source
+
+    for constraint in (
+        "width: { ideal: 1280 }",
+        "height: { ideal: 720 }",
+        "frameRate: { ideal: 30 }",
+        "echoCancellation: true",
+        "noiseSuppression: true",
+        "autoGainControl: true",
+    ):
+        assert constraint in source
+
+
+def test_recorder_app_has_a_status_only_streamlit_boundary() -> None:
+    source = APP_SOURCE.read_text(encoding="utf-8")
+
+    assert '"streamlit:componentReady"' in source
+    assert '"streamlit:render"' in source
+    assert '"streamlit:setComponentValue"' in source
+    assert "createStatus(status)" in source
+    assert "configurationKey" in source
+    assert source.count("postMessage(") == 1
+
+
+def test_recorder_app_gates_startup_and_preserves_critical_async_ordering() -> None:
+    source = APP_SOURCE.read_text(encoding="utf-8")
+
+    assert "componentHasRendered &&" in source
+    assert "startPending" in source
+
+    picker_start = source.index("async function startLongRecording(")
+    picker_end = source.index("async function replaceMediaStream", picker_start)
+    picker_body = source[picker_start:picker_end]
+    assert picker_body.index("showSaveFilePicker") < picker_body.index("await ")
+
+    close_start = source.index("async function finishLongRecording(")
+    close_end = source.index("async function finishDemoRecording", close_start)
+    close_body = source[close_start:close_end]
+    assert close_body.index("Promise.all") < close_body.index(".close()")
+
+
+def test_recorder_app_has_no_network_or_persistent_storage_capability() -> None:
+    source = APP_SOURCE.read_text(encoding="utf-8")
+    forbidden = (
+        r"\bfetch\s*\(",
+        r"\bXMLHttpRequest\b",
+        r"\bWebSocket\b",
+        r"\bsendBeacon\b",
+        r"\bRTCPeerConnection\b",
+        r"\blocalStorage\b",
+        r"\bindexedDB\b",
+        r"\bupload\b",
+        r"\bpath\b",
+        r"\bfilename\b",
+    )
+
+    for capability in forbidden:
+        assert re.search(capability, source, re.IGNORECASE) is None
 
 
 def test_parse_accepts_saved_status_and_returns_frozen_value_object() -> None:
