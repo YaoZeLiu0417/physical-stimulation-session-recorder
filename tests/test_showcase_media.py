@@ -7,6 +7,15 @@ from streamlit_webrtc import WebRtcMode
 
 
 MEDIA_SOURCE = Path(__file__).resolve().parents[1] / "showcase_media.py"
+TURN_RTC_CONFIGURATION = {
+    "iceServers": [
+        {
+            "urls": ["turn:global.turn.twilio.com:3478?transport=udp"],
+            "username": "ephemeral-user",
+            "credential": "ephemeral-credential",
+        }
+    ]
+}
 
 
 def test_render_live_camera_uses_video_only_ephemeral_configuration(
@@ -21,22 +30,21 @@ def test_render_live_camera_uses_video_only_ephemeral_configuration(
 
     monkeypatch.setattr(showcase_media, "webrtc_streamer", fake_webrtc_streamer)
 
-    assert showcase_media.render_live_camera() is sentinel
+    assert showcase_media.render_live_camera(TURN_RTC_CONFIGURATION) is sentinel
     assert calls == [
         {
             "key": "showcase_camera_preview",
             "mode": WebRtcMode.SENDRECV,
-            "rtc_configuration": {
-                "iceServers": [
-                    {"urls": ["stun:stun.l.google.com:19302"]}
-                ]
-            },
+            "rtc_configuration": TURN_RTC_CONFIGURATION,
             "media_stream_constraints": {"video": True, "audio": False},
+            "sendback_video": True,
             "sendback_audio": False,
             "video_html_attrs": {
                 "autoPlay": True,
                 "controls": False,
                 "muted": True,
+                "playsInline": True,
+                "style": {"width": "100%"},
             },
         }
     ]

@@ -5,23 +5,23 @@ from typing import Any
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 
-RTC_CONFIGURATION = {
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-}
 MEDIA_STREAM_CONSTRAINTS = {"video": True, "audio": False}
 
 
-def render_live_camera() -> Any:
+def render_live_camera(rtc_configuration: dict[str, Any]) -> Any:
     return webrtc_streamer(
         key="showcase_camera_preview",
         mode=WebRtcMode.SENDRECV,
-        rtc_configuration=RTC_CONFIGURATION,
+        rtc_configuration=rtc_configuration,
         media_stream_constraints=MEDIA_STREAM_CONSTRAINTS,
+        sendback_video=True,
         sendback_audio=False,
         video_html_attrs={
             "autoPlay": True,
             "controls": False,
             "muted": True,
+            "playsInline": True,
+            "style": {"width": "100%"},
         },
     )
 
