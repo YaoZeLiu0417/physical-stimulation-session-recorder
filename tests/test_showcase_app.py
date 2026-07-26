@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import browser_recorder
@@ -50,6 +51,18 @@ RECORDER_SESSION_KEYS = (
     "showcase_recorder_status",
     "showcase_session_recorder",
 )
+RAW_WIDGET_WITH_PRIVATE_FIELDS = {
+    "mode": "demo",
+    "state": "saved",
+    "duration_seconds": 2,
+    "camera_ready": True,
+    "microphone_ready": True,
+    "saved_confirmed": True,
+    "error_code": None,
+    "blob": "private-blob-marker",
+    "media": "private-media-marker",
+    "path": "private-path-marker",
+}
 SYNTHETIC_LABELS = (
     "本次演示流程有多清晰？",
     "摄像头交互有多顺畅？",
@@ -373,6 +386,129 @@ def test_recorder_probe_is_not_read_or_rendered_before_authentication(
     assert "视频和声音仅保存在本机" not in _visible_text(app)
 
 
+def test_idle_recorder_probe_is_neutral_and_cannot_continue(monkeypatch):
+    app, _ = _probe_app(monkeypatch, RecorderStatus())
+
+    assert [item.value for item in app.info] == ["本机录制工具正在准备。"]
+    assert not [button for button in app.button if button.key == "finish_capture"]
+    assert not [
+        button
+        for button in app.button
+        if button.key == "continue_without_recording"
+    ]
+
+
+def test_recorder_probe_discards_registered_raw_component_state():
+    app = _app_with_password()
+    app.query_params["recorder_probe"] = "1"
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = "capture"
+    app.session_state["showcase_session_recorder"] = dict(
+        RAW_WIDGET_WITH_PRIVATE_FIELDS
+    )
+
+    app.run()
+
+    assert not app.exception
+    assert "showcase_session_recorder" not in app.session_state
+    assert app.session_state["showcase_recorder_status"] == RecorderStatus()
+    for marker in (
+        "private-blob-marker",
+        "private-media-marker",
+        "private-path-marker",
+    ):
+        assert marker not in _visible_text(app)
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected_status", "continue_available"),
+    (
+        (
+            {
+                "mode": "demo",
+                "state": "recording",
+                "duration_seconds": 3,
+                "camera_ready": True,
+                "microphone_ready": True,
+                "saved_confirmed": False,
+                "error_code": None,
+            },
+            RecorderStatus(
+                state="recording",
+                duration_seconds=3,
+                camera_ready=True,
+                microphone_ready=True,
+            ),
+            False,
+        ),
+        (
+            {
+                "mode": "demo",
+                "state": "saved",
+                "duration_seconds": 3,
+                "camera_ready": True,
+                "microphone_ready": True,
+                "saved_confirmed": True,
+                "error_code": None,
+            },
+            RecorderStatus(
+                state="saved",
+                duration_seconds=3,
+                camera_ready=True,
+                microphone_ready=True,
+                saved_confirmed=True,
+            ),
+            True,
+        ),
+    ),
+    ids=("recording", "saved"),
+)
+def test_recorder_probe_consumes_raw_events_and_preserves_status_on_plain_rerun(
+    monkeypatch, raw_status, expected_status, continue_available
+):
+    component_values = [raw_status, None]
+    component_calls = []
+
+    def fake_component(**kwargs):
+        component_calls.append(kwargs)
+        value = component_values.pop(0)
+        st.session_state[kwargs["key"]] = value
+        return value
+
+    monkeypatch.setattr(browser_recorder, "_COMPONENT", fake_component)
+    app = _app_with_password()
+    app.query_params["recorder_probe"] = "1"
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = "capture"
+
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["showcase_recorder_status"] == expected_status
+    assert "showcase_session_recorder" not in app.session_state
+
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["showcase_recorder_status"] == expected_status
+    assert "showcase_session_recorder" not in app.session_state
+    assert bool(
+        [button for button in app.button if button.key == "finish_capture"]
+    ) is continue_available
+    assert component_calls == [
+        {
+            "key": "showcase_session_recorder",
+            "initial_mode": "demo",
+            "default": None,
+        },
+        {
+            "key": "showcase_session_recorder",
+            "initial_mode": "demo",
+            "default": None,
+        },
+    ]
+
+
 @pytest.mark.parametrize(
     "status",
     (
@@ -497,7 +633,9 @@ def test_recorder_probe_can_return_to_overview_and_clears_probe_state(
             microphone_ready=True,
         ),
     )
-    app.session_state["showcase_session_recorder"] = "stale-widget-state"
+    app.session_state["showcase_session_recorder"] = dict(
+        RAW_WIDGET_WITH_PRIVATE_FIELDS
+    )
 
     _element_by_key(app.button, "return_to_overview").click().run()
 
@@ -515,10 +653,13 @@ def test_restart_clears_probe_state_without_exposing_it_in_confirmation():
         state="failed",
         error_code="write_failed",
     )
-    app.session_state["showcase_session_recorder"] = "stale-widget-state"
+    app.session_state["showcase_session_recorder"] = dict(
+        RAW_WIDGET_WITH_PRIVATE_FIELDS
+    )
     app.run()
 
     assert not app.exception
+    assert "showcase_session_recorder" not in app.session_state
     assert _main_content_inventory(app) == EXPECTED_CONFIRMATION_INVENTORY
     assert "write_failed" not in _visible_text(app)
 

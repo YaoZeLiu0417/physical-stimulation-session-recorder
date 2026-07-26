@@ -20,10 +20,9 @@ SYNTHETIC_RESPONSE_KEYS = (
     "information_load",
     "workflow_willingness",
 )
-RECORDER_SESSION_KEYS = (
-    "showcase_recorder_status",
-    "showcase_session_recorder",
-)
+RECORDER_STATUS_KEY = "showcase_recorder_status"
+RECORDER_COMPONENT_KEY = "showcase_session_recorder"
+RECORDER_SESSION_KEYS = (RECORDER_STATUS_KEY, RECORDER_COMPONENT_KEY)
 
 st.set_page_config(page_title=PRODUCT_NAME, layout="centered")
 st.markdown(
@@ -149,6 +148,21 @@ def _return_to_overview() -> None:
     st.rerun()
 
 
+def _consume_recorder_status(rendered_status: object) -> RecorderStatus:
+    raw_component_value = st.session_state.pop(RECORDER_COMPONENT_KEY, None)
+    stored_status = st.session_state.get(RECORDER_STATUS_KEY)
+    if raw_component_value is not None or not isinstance(
+        stored_status, RecorderStatus
+    ):
+        stored_status = (
+            rendered_status
+            if isinstance(rendered_status, RecorderStatus)
+            else RecorderStatus()
+        )
+        st.session_state[RECORDER_STATUS_KEY] = stored_status
+    return stored_status
+
+
 def _render_recorder_probe() -> None:
     st.subheader("本机录制")
     st.caption(
@@ -157,13 +171,11 @@ def _render_recorder_probe() -> None:
     if st.button("返回流程概览", key="return_to_overview"):
         _return_to_overview()
 
-    status = render_browser_recorder(
-        key="showcase_session_recorder",
+    rendered_status = render_browser_recorder(
+        key=RECORDER_COMPONENT_KEY,
         initial_mode="demo",
     )
-    if not isinstance(status, RecorderStatus):
-        status = RecorderStatus()
-    st.session_state["showcase_recorder_status"] = status
+    status = _consume_recorder_status(rendered_status)
 
     if status.state == "recording":
         st.info("正在本机录制。停止并确认保存后才能继续。")
@@ -204,6 +216,8 @@ recorder_probe_enabled = (
     and st.query_params.get_all("recorder_probe") == ["1"]
 )
 step = st.session_state.setdefault("showcase_step", "overview")
+if step != "capture" or not recorder_probe_enabled:
+    st.session_state.pop(RECORDER_COMPONENT_KEY, None)
 
 st.sidebar.caption("SESSION PROGRESS")
 for label, state in (
