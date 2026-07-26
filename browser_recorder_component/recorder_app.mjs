@@ -60,6 +60,11 @@ let pendingFailureCode = null;
 let localCompletionReady = false;
 let cleanupPromise = null;
 let cleaningUp = false;
+let mediaSetupPending = false;
+let mediaSetupPromise = null;
+let mediaSetupOwner = 0;
+let hasRequestedMedia = false;
+let deviceChangeListening = false;
 let resizeObserver = null;
 
 function isCurrentLifecycle(generation) {
@@ -133,6 +138,8 @@ function renderControls(message = null) {
     !startPending &&
     !cleaningUp &&
     cleanupPromise === null &&
+    !mediaSetupPending &&
+    mediaSetupPromise === null &&
     (status.state === "idle" || status.state === "ready");
   const canChangeSetup = canStart && !isRecording;
   const canRecordAgain = ["stopped", "saved", "skipped", "failed"].includes(
@@ -265,27 +272,28 @@ async function cleanupLocalResources({ revokePlayback = true } = {}) {
 
   cleaningUp = true;
   renderControls("Finishing local cleanup.");
-  cleanupPromise = (async () => {
-    cancelRecordingTimer();
-    recordingGeneration = null;
-    stopRecorderWithoutFinalizing();
-    const activeWriter = writer;
-    writer = null;
-    observedWrites = new Set();
-    if (activeWriter !== null) {
-      await activeWriter.abort().catch(() => undefined);
-    }
-    await releaseMediaStream();
-    if (revokePlayback) {
-      clearLocalPlayback();
-    }
-    demoChunks = [];
-    pendingFailureCode = null;
-    writeFailure = false;
-    successfulLongBytes = 0;
-    longWarningShown = false;
-    localCompletionReady = false;
-  })().finally(() => {
+  cancelRecordingTimer();
+  recordingGeneration = null;
+  stopRecorderWithoutFinalizing();
+  const activeWriter = writer;
+  writer = null;
+  observedWrites = new Set();
+  const releasingMedia = releaseMediaStream();
+  void releasingMedia.catch(() => undefined);
+  if (activeWriter !== null) {
+    void activeWriter.abort().catch(() => undefined);
+  }
+  if (revokePlayback) {
+    clearLocalPlayback();
+  }
+  demoChunks = [];
+  pendingFailureCode = null;
+  writeFailure = false;
+  successfulLongBytes = 0;
+  longWarningShown = false;
+  localCompletionReady = false;
+
+  cleanupPromise = Promise.resolve().finally(() => {
     cleaningUp = false;
     cleanupPromise = null;
     renderControls();
@@ -352,6 +360,7 @@ function replaceSelectOptions(select, devices, defaultText, selectedValue) {
   select.value = devices.some((device) => device.deviceId === selectedValue)
     ? selectedValue
     : "";
+  return selectedValue !== "" && select.value === "";
 }
 
 async function populateDeviceSelectors(generation) {
@@ -366,18 +375,19 @@ async function populateDeviceSelectors(generation) {
   if (!isCurrentLifecycle(generation)) {
     return;
   }
-  replaceSelectOptions(
+  const cameraMissing = replaceSelectOptions(
     elements.cameraSelect,
     devices.filter((device) => device.kind === "videoinput"),
     "Default camera",
     selectedCamera,
   );
-  replaceSelectOptions(
+  const microphoneMissing = replaceSelectOptions(
     elements.microphoneSelect,
     devices.filter((device) => device.kind === "audioinput"),
     "Default microphone",
     selectedMicrophone,
   );
+  return { cameraMissing, microphoneMissing };
 }
 
 function startAudioMeter(stream) {
@@ -415,9 +425,15 @@ function startAudioMeter(stream) {
   meterFrameId = requestAnimationFrame(updateMeter);
 }
 
-function handleUnexpectedTrackEnd(generation) {
+function handleUnexpectedTrackEnd(generation, kind) {
   if (cleaningUp || !isCurrentLifecycle(generation)) {
     return;
+  }
+  if (kind === "video") {
+    elements.cameraSelect.value = "";
+  }
+  if (kind === "audio") {
+    elements.microphoneSelect.value = "";
   }
   if (status.state === "recording") {
     pendingFailureCode = "device_lost";
@@ -440,6 +456,7 @@ async function ensureMediaReady(
 
   clearLocalPlayback();
   let stream;
+  hasRequestedMedia = true;
   try {
     stream = await navigator.mediaDevices.getUserMedia(recordingConstraints());
   } catch (error) {
@@ -453,7 +470,7 @@ async function ensureMediaReady(
 
   mediaStream = stream;
   for (const track of stream.getTracks()) {
-    track.onended = () => handleUnexpectedTrackEnd(generation);
+    track.onended = () => handleUnexpectedTrackEnd(generation, track.kind);
   }
   elements.preview.controls = false;
   elements.preview.muted = true;
@@ -946,6 +963,70 @@ async function replaceMediaStream(unavailableCode, generation) {
   await ensureMediaReady(unavailableCode, generation);
 }
 
+function startMediaSetup(unavailableCode, generation, setupOperation = null) {
+  if (mediaSetupPending || mediaSetupPromise !== null) {
+    return mediaSetupPromise;
+  }
+
+  const owner = (mediaSetupOwner += 1);
+  mediaSetupPending = true;
+  renderControls("Preparing recording devices.");
+  const operation =
+    setupOperation === null
+      ? replaceMediaStream(unavailableCode, generation)
+      : setupOperation();
+  const ownedPromise = operation
+    .catch(() => failWithCode(unavailableCode, generation))
+    .finally(() => {
+      if (mediaSetupOwner === owner && mediaSetupPromise === ownedPromise) {
+        mediaSetupPending = false;
+        mediaSetupPromise = null;
+        renderControls();
+      }
+    });
+  mediaSetupPromise = ownedPromise;
+  return ownedPromise;
+}
+
+async function refreshDevicesAfterChange(generation) {
+  const availability = await populateDeviceSelectors(generation);
+  if (!isCurrentLifecycle(generation) || availability === undefined) {
+    return;
+  }
+  if (!availability.cameraMissing && !availability.microphoneMissing) {
+    return;
+  }
+  if (status.state === "recording") {
+    pendingFailureCode = "device_lost";
+    requestRecorderStop();
+    return;
+  }
+  if (mediaStream === null) {
+    return;
+  }
+  const unavailableCode = availability.cameraMissing
+    ? "camera_unavailable"
+    : "microphone_unavailable";
+  await replaceMediaStream(unavailableCode, generation);
+}
+
+function handleDeviceChange() {
+  if (
+    !hasRequestedMedia ||
+    cleaningUp ||
+    cleanupPromise !== null ||
+    startPending ||
+    mediaSetupPending ||
+    mediaSetupPromise !== null
+  ) {
+    return;
+  }
+  const generation = lifecycleGeneration;
+  void startMediaSetup("device_lost", generation, () =>
+    refreshDevicesAfterChange(generation),
+  );
+}
+
 async function resetRecorder(mode = status.mode) {
   const generation = invalidateLifecycle();
   await cleanupLocalResources();
@@ -958,14 +1039,7 @@ async function resetRecorder(mode = status.mode) {
 }
 
 function configurationIdentity(args) {
-  const mode = args?.initial_mode === "long" ? "long" : "demo";
-  const lifecycle =
-    typeof args?.lifecycle_key === "string"
-      ? args.lifecycle_key
-      : typeof args?.component_key === "string"
-        ? args.component_key
-        : "component";
-  return `${lifecycle}\u0000${mode}`;
+  return args?.initial_mode === "long" ? "long" : "demo";
 }
 
 async function applyStreamlitRender(args) {
@@ -994,7 +1068,9 @@ elements.recordButton.addEventListener("click", () => {
     !componentHasRendered ||
     startPending ||
     cleaningUp ||
-    cleanupPromise !== null
+    cleanupPromise !== null ||
+    mediaSetupPending ||
+    mediaSetupPromise !== null
   ) {
     return;
   }
@@ -1069,23 +1145,29 @@ for (const input of elements.modeInputs) {
 }
 
 elements.cameraSelect.addEventListener("change", () => {
-  if (cleaningUp || cleanupPromise !== null) {
+  if (
+    cleaningUp ||
+    cleanupPromise !== null ||
+    mediaSetupPending ||
+    mediaSetupPromise !== null
+  ) {
     return;
   }
   const generation = lifecycleGeneration;
-  void replaceMediaStream("camera_unavailable", generation).catch(() =>
-    failWithCode("camera_unavailable", generation),
-  );
+  void startMediaSetup("camera_unavailable", generation);
 });
 
 elements.microphoneSelect.addEventListener("change", () => {
-  if (cleaningUp || cleanupPromise !== null) {
+  if (
+    cleaningUp ||
+    cleanupPromise !== null ||
+    mediaSetupPending ||
+    mediaSetupPromise !== null
+  ) {
     return;
   }
   const generation = lifecycleGeneration;
-  void replaceMediaStream("microphone_unavailable", generation).catch(() =>
-    failWithCode("microphone_unavailable", generation),
-  );
+  void startMediaSetup("microphone_unavailable", generation);
 });
 
 window.addEventListener("message", (event) => {
@@ -1111,6 +1193,13 @@ window.addEventListener("focus", reconcileActiveRecording);
 function cleanupForPageExit() {
   invalidateLifecycle();
   void cleanupLocalResources().catch(() => undefined);
+  if (
+    deviceChangeListening &&
+    typeof navigator.mediaDevices.removeEventListener === "function"
+  ) {
+    navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+    deviceChangeListening = false;
+  }
   resizeObserver?.disconnect();
 }
 
@@ -1120,6 +1209,11 @@ window.addEventListener("beforeunload", cleanupForPageExit);
 if (typeof window.ResizeObserver === "function") {
   resizeObserver = new window.ResizeObserver(reportFrameHeight);
   resizeObserver.observe(document.body);
+}
+
+if (typeof navigator.mediaDevices.addEventListener === "function") {
+  navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+  deviceChangeListening = true;
 }
 
 renderControls();

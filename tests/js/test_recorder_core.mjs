@@ -543,6 +543,16 @@ test("production core has no network, storage, media-link, or identity capabilit
   assert.doesNotMatch(source, /^\s*import\s/m);
 });
 
+test("recorder app configuration uses only real component render arguments", async () => {
+  const source = await readFile(
+    new URL("../../browser_recorder_component/recorder_app.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /args\?\.initial_mode/);
+  assert.doesNotMatch(source, /lifecycle_key|component_key/);
+});
+
 class FakeElement {
   constructor(id, properties = {}) {
     this.id = id;
@@ -614,15 +624,17 @@ function fakeStream() {
     },
   }));
   return {
-    active: true,
     tracks,
+    get active() {
+      return tracks.some((track) => track.stopCalls === 0);
+    },
     getTracks: () => tracks,
     getVideoTracks: () => tracks.filter((track) => track.kind === "video"),
     getAudioTracks: () => tracks.filter((track) => track.kind === "audio"),
   };
 }
 
-function fakeWritable({ writeGate = null, closeGate = null } = {}) {
+function fakeWritable({ abortGate = null, writeGate = null, closeGate = null } = {}) {
   const calls = { writes: [], close: 0, abort: 0 };
   return {
     calls,
@@ -636,7 +648,7 @@ function fakeWritable({ writeGate = null, closeGate = null } = {}) {
     },
     abort() {
       calls.abort += 1;
-      return Promise.resolve();
+      return abortGate?.promise ?? Promise.resolve();
     },
   };
 }
@@ -651,7 +663,9 @@ let recorderAppImport = 0;
 
 async function recorderAppHarness({
   audioCloseGate = null,
+  initialDevices = [],
   getUserMediaGate = null,
+  getUserMediaImplementation = null,
   pickerGate = null,
   writable = fakeWritable(),
 } = {}) {
@@ -735,13 +749,36 @@ async function recorderAppHarness({
   const window = new FakeWindow(parent);
   const stream = fakeStream();
   let getUserMediaCalls = 0;
+  const mediaConstraints = [];
+  let availableDevices = initialDevices;
+  const mediaDeviceListeners = new Map();
   const mediaDevices = {
-    getUserMedia() {
+    getUserMedia(constraints) {
       getUserMediaCalls += 1;
+      mediaConstraints.push(constraints);
+      if (getUserMediaImplementation !== null) {
+        return getUserMediaImplementation({
+          call: getUserMediaCalls,
+          constraints,
+          defaultStream: stream,
+        });
+      }
       return getUserMediaGate?.promise ?? Promise.resolve(stream);
     },
     enumerateDevices() {
-      return Promise.resolve([]);
+      return Promise.resolve(availableDevices);
+    },
+    addEventListener(type, listener) {
+      const listeners = mediaDeviceListeners.get(type) ?? [];
+      listeners.push(listener);
+      mediaDeviceListeners.set(type, listeners);
+    },
+    removeEventListener(type, listener) {
+      const listeners = mediaDeviceListeners.get(type) ?? [];
+      mediaDeviceListeners.set(
+        type,
+        listeners.filter((candidate) => candidate !== listener),
+      );
     },
   };
   const handleCalls = { picker: 0, createWritable: 0 };
@@ -755,9 +792,12 @@ async function recorderAppHarness({
     handleCalls.picker += 1;
     return pickerGate?.promise ?? Promise.resolve(handle);
   };
+  const audioContexts = [];
   window.AudioContext = class {
     constructor() {
       this.state = "running";
+      this.closeCalls = 0;
+      audioContexts.push(this);
     }
 
     createAnalyser() {
@@ -776,6 +816,7 @@ async function recorderAppHarness({
     }
 
     close() {
+      this.closeCalls += 1;
       this.state = "closed";
       return audioCloseGate?.promise ?? Promise.resolve();
     }
@@ -889,14 +930,18 @@ async function recorderAppHarness({
     return values.at(-1)?.value ?? null;
   }
 
-  async function render(mode, lifecycle = "test-lifecycle") {
+  function sendRender(mode) {
     window.emit("message", {
       source: parent,
       data: {
         type: "streamlit:render",
-        args: { initial_mode: mode, lifecycle_key: lifecycle },
+        args: { initial_mode: mode },
       },
     });
+  }
+
+  async function render(mode) {
+    sendRender(mode);
     await settleRecorderApp();
   }
 
@@ -916,6 +961,16 @@ async function recorderAppHarness({
     }
   }
 
+  function emitDeviceChange() {
+    for (const listener of mediaDeviceListeners.get("devicechange") ?? []) {
+      listener({ type: "devicechange" });
+    }
+  }
+
+  function setDevices(devices) {
+    availableDevices = devices;
+  }
+
   async function dispose() {
     window.emit("pagehide");
     await settleRecorderApp();
@@ -930,14 +985,19 @@ async function recorderAppHarness({
 
   return {
     advanceTime,
+    audioContexts,
     elements,
+    emitDeviceChange,
     getUserMediaCalls: () => getUserMediaCalls,
     handleCalls,
     latestStatus,
+    mediaConstraints,
     messages,
     modeInputs: [modeDemo, modeLong],
     recorderInstances,
     render,
+    sendRender,
+    setDevices,
     stream,
     window,
     writable,
@@ -1146,17 +1206,17 @@ test("long warning and deadline run independently of animation frames", async ()
   }
 });
 
-test("a cleared lifecycle deadline cannot stop a replacement recording", async () => {
+test("a cleared mode deadline cannot stop a replacement recording", async () => {
   const harness = await recorderAppHarness();
   try {
-    await harness.render("demo", "first");
+    await harness.render("demo");
     harness.elements["record-button"].emit("click");
     await settleRecorderApp();
     const firstRecorder = harness.recorderInstances[0];
     assert.ok(firstRecorder);
 
     await harness.advanceTime(100_000);
-    await harness.render("demo", "replacement");
+    await harness.render("long");
     harness.elements["record-button"].emit("click");
     await settleRecorderApp();
     const replacementRecorder = harness.recorderInstances[1];
@@ -1210,12 +1270,12 @@ test("skip cleanup gates record until a pending audio close completes", async ()
   }
 });
 
-test("configuration cleanup gates record until pending audio close completes", async () => {
+test("configuration cleanup does not wait for a pending audio close", async () => {
   const audioCloseGate = deferred();
   const pickerGate = deferred();
   const harness = await recorderAppHarness({ audioCloseGate, pickerGate });
   try {
-    await harness.render("long", "first");
+    await harness.render("long");
     harness.elements["record-button"].emit("click");
     const cancelled = new Error("cancelled");
     cancelled.name = "AbortError";
@@ -1223,7 +1283,16 @@ test("configuration cleanup gates record until pending audio close completes", a
     await settleRecorderApp();
     assert.equal(harness.latestStatus().state, "ready");
 
-    await harness.render("demo", "replacement");
+    await harness.render("demo");
+    assert.equal(harness.latestStatus().mode, "demo");
+    assert.equal(harness.latestStatus().state, "idle");
+    assert.equal(harness.elements["record-button"].disabled, false);
+    assert.equal(harness.audioContexts[0].closeCalls, 1);
+    assert.equal(
+      harness.stream.tracks.every((track) => track.stopCalls === 1),
+      true,
+    );
+
     harness.elements["record-button"].emit("click");
     await settleRecorderApp();
 
@@ -1233,19 +1302,281 @@ test("configuration cleanup gates record until pending audio close completes", a
     assert.equal(harness.elements["microphone-select"].disabled, true);
     assert.equal(harness.elements["skip-button"].disabled, true);
     assert.equal(harness.handleCalls.picker, 1);
-    assert.equal(harness.getUserMediaCalls(), 1);
-    assert.equal(harness.recorderInstances.length, 0);
+    assert.equal(harness.getUserMediaCalls(), 2);
+    assert.equal(harness.recorderInstances.length, 1);
+    assert.equal(harness.latestStatus().state, "recording");
 
     audioCloseGate.resolve();
     await settleRecorderApp();
     assert.equal(harness.latestStatus().mode, "demo");
-    assert.equal(harness.latestStatus().state, "idle");
+    assert.equal(harness.latestStatus().state, "recording");
+  } finally {
+    audioCloseGate.resolve();
+    await harness.dispose();
+  }
+});
+
+test("configuration cleanup stops recorder and tracks before a hanging writer abort", async () => {
+  const abortGate = deferred();
+  const writable = fakeWritable({ abortGate });
+  const harness = await recorderAppHarness({ writable });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    const recorder = harness.recorderInstances[0];
+    assert.ok(recorder);
+
+    harness.sendRender("demo");
+
+    assert.equal(recorder.stopCalls, 1);
     assert.equal(
       harness.stream.tracks.every((track) => track.stopCalls === 1),
       true,
     );
+    await settleRecorderApp();
+    assert.equal(writable.calls.abort, 1);
+    assert.equal(harness.latestStatus().mode, "demo");
+    assert.equal(harness.latestStatus().state, "idle");
   } finally {
-    audioCloseGate.resolve();
+    abortGate.resolve();
+    await harness.dispose();
+  }
+});
+
+test("pagehide synchronously tears down media despite a hanging writer abort", async () => {
+  const abortGate = deferred();
+  const writable = fakeWritable({ abortGate });
+  const harness = await recorderAppHarness({ writable });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    const recorder = harness.recorderInstances[0];
+
+    harness.window.emit("pagehide");
+
+    assert.equal(recorder.stopCalls, 1);
+    assert.equal(
+      harness.stream.tracks.every((track) => track.stopCalls === 1),
+      true,
+    );
+    await settleRecorderApp();
+    assert.equal(writable.calls.abort, 1);
+  } finally {
+    abortGate.resolve();
+    await harness.dispose();
+  }
+});
+
+test("rapid device changes and record share one pending media setup", async () => {
+  const pickerGate = deferred();
+  const replacementGate = deferred();
+  const firstStream = fakeStream();
+  const replacementStream = fakeStream();
+  const unexpectedStreams = [];
+  const harness = await recorderAppHarness({
+    pickerGate,
+    getUserMediaImplementation({ call }) {
+      if (call === 1) {
+        return Promise.resolve(firstStream);
+      }
+      if (call === 2) {
+        return replacementGate.promise;
+      }
+      const unexpected = fakeStream();
+      unexpectedStreams.push(unexpected);
+      return Promise.resolve(unexpected);
+    },
+  });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    const cancelled = new Error("cancelled");
+    cancelled.name = "AbortError";
+    pickerGate.reject(cancelled);
+    await settleRecorderApp();
+    assert.equal(harness.latestStatus().state, "ready");
+
+    harness.elements["camera-select"].value = "usb-camera";
+    harness.elements["camera-select"].emit("change");
+    harness.elements["microphone-select"].value = "usb-microphone";
+    harness.elements["microphone-select"].emit("change");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+
+    assert.equal(harness.getUserMediaCalls(), 2);
+    assert.equal(harness.elements["record-button"].disabled, true);
+    assert.equal(harness.elements["camera-select"].disabled, true);
+    assert.equal(harness.elements["microphone-select"].disabled, true);
+    assert.equal(harness.recorderInstances.length, 0);
+
+    replacementGate.resolve(replacementStream);
+    await settleRecorderApp();
+    assert.equal(firstStream.tracks.every((track) => track.stopCalls === 1), true);
+    assert.equal(
+      replacementStream.tracks.every((track) => track.stopCalls === 0),
+      true,
+    );
+    assert.equal(
+      unexpectedStreams.every((candidate) =>
+        candidate.tracks.every((track) => track.stopCalls === 1),
+      ),
+      true,
+    );
+    assert.equal(
+      harness.audioContexts.filter((context) => context.state === "running").length,
+      1,
+    );
+  } finally {
+    replacementGate.resolve(replacementStream);
+    await harness.dispose();
+  }
+});
+
+test("a replacement stream resolving after configuration cleanup is stopped", async () => {
+  const pickerGate = deferred();
+  const replacementGate = deferred();
+  const firstStream = fakeStream();
+  const replacementStream = fakeStream();
+  const harness = await recorderAppHarness({
+    pickerGate,
+    getUserMediaImplementation({ call }) {
+      return call === 1 ? Promise.resolve(firstStream) : replacementGate.promise;
+    },
+  });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    const cancelled = new Error("cancelled");
+    cancelled.name = "AbortError";
+    pickerGate.reject(cancelled);
+    await settleRecorderApp();
+
+    harness.elements["camera-select"].value = "usb-camera";
+    harness.elements["camera-select"].emit("change");
+    await settleRecorderApp();
+    assert.equal(harness.getUserMediaCalls(), 2);
+
+    harness.sendRender("demo");
+    await settleRecorderApp();
+    assert.equal(harness.elements["record-button"].disabled, true);
+    replacementGate.resolve(replacementStream);
+    await settleRecorderApp();
+
+    assert.equal(
+      replacementStream.tracks.every((track) => track.stopCalls === 1),
+      true,
+    );
+    assert.equal(harness.latestStatus().mode, "demo");
+    assert.equal(harness.latestStatus().state, "idle");
+  } finally {
+    replacementGate.resolve(replacementStream);
+    await harness.dispose();
+  }
+});
+
+test("devicechange clears a missing exact device and rebuilds with defaults", async () => {
+  const pickerGate = deferred();
+  const firstStream = fakeStream();
+  const usbStream = fakeStream();
+  const recoveredStream = fakeStream();
+  const harness = await recorderAppHarness({
+    pickerGate,
+    initialDevices: [
+      { kind: "videoinput", deviceId: "usb-camera", label: "USB camera" },
+      { kind: "videoinput", deviceId: "built-in-camera", label: "Built-in camera" },
+      { kind: "audioinput", deviceId: "built-in-mic", label: "Built-in mic" },
+    ],
+    getUserMediaImplementation({ call }) {
+      return Promise.resolve(
+        call === 1 ? firstStream : call === 2 ? usbStream : recoveredStream,
+      );
+    },
+  });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    const cancelled = new Error("cancelled");
+    cancelled.name = "AbortError";
+    pickerGate.reject(cancelled);
+    await settleRecorderApp();
+
+    harness.elements["camera-select"].value = "usb-camera";
+    harness.elements["camera-select"].emit("change");
+    await settleRecorderApp();
+    assert.deepEqual(harness.mediaConstraints[1].video.deviceId, {
+      exact: "usb-camera",
+    });
+
+    harness.setDevices([
+      { kind: "videoinput", deviceId: "built-in-camera", label: "Built-in camera" },
+      { kind: "audioinput", deviceId: "built-in-mic", label: "Built-in mic" },
+    ]);
+    harness.emitDeviceChange();
+    await settleRecorderApp();
+
+    assert.equal(harness.elements["camera-select"].value, "");
+    assert.equal(harness.getUserMediaCalls(), 3);
+    assert.equal(Object.hasOwn(harness.mediaConstraints[2].video, "deviceId"), false);
+    assert.equal(usbStream.tracks.every((track) => track.stopCalls === 1), true);
+    assert.equal(
+      recoveredStream.tracks.every((track) => track.stopCalls === 0),
+      true,
+    );
+    assert.equal(harness.latestStatus().state, "ready");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("track end clears stale exact device before record-again media setup", async () => {
+  const pickerGate = deferred();
+  const firstStream = fakeStream();
+  const usbStream = fakeStream();
+  const recoveredStream = fakeStream();
+  const harness = await recorderAppHarness({
+    pickerGate,
+    initialDevices: [
+      { kind: "videoinput", deviceId: "usb-camera", label: "USB camera" },
+      { kind: "audioinput", deviceId: "built-in-mic", label: "Built-in mic" },
+    ],
+    getUserMediaImplementation({ call }) {
+      return Promise.resolve(
+        call === 1 ? firstStream : call === 2 ? usbStream : recoveredStream,
+      );
+    },
+  });
+  try {
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    const cancelled = new Error("cancelled");
+    cancelled.name = "AbortError";
+    pickerGate.reject(cancelled);
+    await settleRecorderApp();
+
+    harness.elements["camera-select"].value = "usb-camera";
+    harness.elements["camera-select"].emit("change");
+    await settleRecorderApp();
+    harness.setDevices([
+      { kind: "videoinput", deviceId: "built-in-camera", label: "Built-in camera" },
+      { kind: "audioinput", deviceId: "built-in-mic", label: "Built-in mic" },
+    ]);
+
+    usbStream.getVideoTracks()[0].onended();
+    await settleRecorderApp();
+    assert.equal(harness.latestStatus().state, "failed");
+    assert.equal(harness.elements["camera-select"].value, "");
+
+    harness.elements["rerecord-button"].emit("click");
+    await settleRecorderApp();
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+
+    assert.equal(harness.getUserMediaCalls(), 3);
+    assert.equal(Object.hasOwn(harness.mediaConstraints[2].video, "deviceId"), false);
+    assert.equal(harness.latestStatus().state, "ready");
+  } finally {
     await harness.dispose();
   }
 });
