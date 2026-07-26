@@ -5,6 +5,7 @@ import os
 
 import streamlit as st
 
+from browser_recorder import RecorderStatus, render_browser_recorder
 from showcase_ice import resolve_turn_rtc_configuration
 from showcase_media import camera_is_playing, render_live_camera
 from showcase_workflow import advance_step, password_matches
@@ -18,6 +19,10 @@ SYNTHETIC_RESPONSE_KEYS = (
     "camera_smoothness",
     "information_load",
     "workflow_willingness",
+)
+RECORDER_SESSION_KEYS = (
+    "showcase_recorder_status",
+    "showcase_session_recorder",
 )
 
 st.set_page_config(page_title=PRODUCT_NAME, layout="centered")
@@ -133,10 +138,71 @@ def _go(action: str) -> None:
     st.rerun()
 
 
+def _clear_recorder_probe_state() -> None:
+    for key in RECORDER_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _return_to_overview() -> None:
+    _clear_recorder_probe_state()
+    st.session_state["showcase_step"] = "overview"
+    st.rerun()
+
+
+def _render_recorder_probe() -> None:
+    st.subheader("本机录制")
+    st.caption(
+        "视频和声音仅保存在本机，不会上传。请勿录入可识别身份的信息。"
+    )
+    if st.button("返回流程概览", key="return_to_overview"):
+        _return_to_overview()
+
+    status = render_browser_recorder(
+        key="showcase_session_recorder",
+        initial_mode="demo",
+    )
+    if not isinstance(status, RecorderStatus):
+        status = RecorderStatus()
+    st.session_state["showcase_recorder_status"] = status
+
+    if status.state == "recording":
+        st.info("正在本机录制。停止并确认保存后才能继续。")
+    elif status.state == "ready":
+        st.info("设备已就绪，可以开始本机录制。")
+    elif status.state == "stopped":
+        st.info("录制已停止。请保存并确认后继续。")
+    elif status.state == "saved" and status.saved_confirmed:
+        st.info("录像已保存在本机，可以继续后续流程。")
+        if st.button(
+            "继续后续流程",
+            type="primary",
+            key="finish_capture",
+        ):
+            st.session_state["showcase_camera_started"] = True
+            _go("finish_capture")
+    elif status.state == "saved":
+        st.info("请先确认录像已保存在本机。")
+    elif status.state in {"skipped", "failed"}:
+        st.warning("本次未完成录像。如需继续，请明确选择无录像继续。")
+        if st.button(
+            "无录像继续",
+            type="primary",
+            key="continue_without_recording",
+        ):
+            st.session_state.pop("showcase_camera_started", None)
+            _go("finish_capture")
+    else:
+        st.info("本机录制工具正在准备。")
+
+
 st.title(PRODUCT_NAME)
 st.caption(PRODUCT_CAPTION)
 _require_access()
 
+recorder_probe_enabled = (
+    st.query_params.get("recorder_probe") == "1"
+    and st.query_params.get_all("recorder_probe") == ["1"]
+)
 step = st.session_state.setdefault("showcase_step", "overview")
 
 st.sidebar.caption("SESSION PROGRESS")
@@ -163,38 +229,43 @@ with st.container():
         if st.button("开始演示", type="primary", key="begin_demo"):
             _go("begin")
     elif step == "capture":
-        st.subheader("实时摄像预览")
-        st.caption(
-            "实时预览仅使用摄像头，不启用麦克风；视频不写入文件，"
-            "也不会保存到项目存储。"
-        )
-        camera_unavailable = False
-        camera_context = None
-        try:
-            rtc_configuration = resolve_turn_rtc_configuration(
-                _secret("TWILIO_ACCOUNT_SID"),
-                _secret("TWILIO_AUTH_TOKEN"),
-            )
-            if rtc_configuration is None:
-                camera_unavailable = True
-            else:
-                camera_context = render_live_camera(rtc_configuration)
-        except Exception:
-            camera_unavailable = True
-            LOGGER.warning("showcase camera preview unavailable")
-
-        if camera_unavailable:
-            st.warning("实时摄像预览暂时不可用，可继续体验后续流程。")
-        elif camera_is_playing(camera_context):
-            st.session_state["showcase_camera_started"] = True
-            st.info("摄像头已连接。完成预览后可继续。")
+        if recorder_probe_enabled:
+            _render_recorder_probe()
         else:
-            st.info(
-                "正在建立安全摄像预览连接。若长时间无画面，可继续后续流程。"
+            st.subheader("实时摄像预览")
+            st.caption(
+                "实时预览仅使用摄像头，不启用麦克风；视频不写入文件，"
+                "也不会保存到项目存储。"
             )
+            camera_unavailable = False
+            camera_context = None
+            try:
+                rtc_configuration = resolve_turn_rtc_configuration(
+                    _secret("TWILIO_ACCOUNT_SID"),
+                    _secret("TWILIO_AUTH_TOKEN"),
+                )
+                if rtc_configuration is None:
+                    camera_unavailable = True
+                else:
+                    camera_context = render_live_camera(rtc_configuration)
+            except Exception:
+                camera_unavailable = True
+                LOGGER.warning("showcase camera preview unavailable")
 
-        if st.button("完成摄像演示", type="primary", key="finish_capture"):
-            _go("finish_capture")
+            if camera_unavailable:
+                st.warning("实时摄像预览暂时不可用，可继续体验后续流程。")
+            elif camera_is_playing(camera_context):
+                st.session_state["showcase_camera_started"] = True
+                st.info("摄像头已连接。完成预览后可继续。")
+            else:
+                st.info(
+                    "正在建立安全摄像预览连接。若长时间无画面，可继续后续流程。"
+                )
+
+            if st.button(
+                "完成摄像演示", type="primary", key="finish_capture"
+            ):
+                _go("finish_capture")
     elif step == "reflection":
         st.subheader("演示反馈")
         st.caption("以下为通用合成反馈，不对应任何研究测量内容或评分规则。")
@@ -234,6 +305,10 @@ with st.container():
             unsafe_allow_html=True,
         )
         if st.button("重新体验", key="restart_demo"):
-            for key in (*SYNTHETIC_RESPONSE_KEYS, "showcase_camera_started"):
+            for key in (
+                *SYNTHETIC_RESPONSE_KEYS,
+                "showcase_camera_started",
+                *RECORDER_SESSION_KEYS,
+            ):
                 st.session_state.pop(key, None)
             _go("restart")
