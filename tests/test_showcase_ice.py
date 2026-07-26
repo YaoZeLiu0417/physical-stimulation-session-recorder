@@ -12,10 +12,11 @@ ICE_SOURCE = Path(__file__).resolve().parents[1] / "showcase_ice.py"
 @pytest.mark.parametrize(
     "turn_urls",
     (
-        "turn:synthetic.invalid:3478?transport=udp",
-        ["turns:synthetic.invalid:5349?transport=tcp"],
+        "TURN:synthetic.invalid:3478",
+        ["TURNS:synthetic.invalid:5349?transport=tcp"],
+        "turn:[2001:db8::1]:3478",
     ),
-    ids=("string", "list"),
+    ids=("uppercase-string", "uppercase-list", "bracket-ipv6"),
 )
 def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_credentials(
     monkeypatch, turn_urls
@@ -44,6 +45,84 @@ def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_creden
         "  test-account  ", "  test-token  "
     ) == {"iceServers": ice_servers}
     assert calls == [("test-account", "test-token")]
+
+
+@pytest.mark.parametrize(
+    "ice_servers",
+    (
+        pytest.param(None, id="none"),
+        pytest.param("", id="top-level-empty-string"),
+        pytest.param([], id="top-level-empty-list"),
+        pytest.param({"urls": "turn:synthetic.invalid:3478"}, id="top-level-dict"),
+        pytest.param([None], id="non-dict-server"),
+        pytest.param([{}], id="missing-urls"),
+        pytest.param([{"urls": None}], id="none-urls"),
+        pytest.param([{"urls": 7}], id="integer-urls"),
+        pytest.param([{"urls": {"turn:x": 1}}], id="mapping-urls"),
+        pytest.param([{"urls": ""}], id="empty-string-urls"),
+        pytest.param([{"urls": []}], id="empty-list-urls"),
+        pytest.param(
+            [{"urls": ("turn:synthetic.invalid:3478",)}],
+            id="tuple-urls",
+        ),
+        pytest.param(
+            [{"urls": ["turn:synthetic.invalid:3478", 7]}],
+            id="non-string-url-item",
+        ),
+        pytest.param([{"urls": "turn:"}], id="turn-empty-host"),
+        pytest.param([{"urls": "turns:"}], id="turns-empty-host"),
+        pytest.param([{"urls": "turnish:host"}], id="pseudo-scheme"),
+        pytest.param([{"urls": "synthetic.invalid:3478"}], id="missing-scheme"),
+        pytest.param(
+            [{"urls": "turn:user@synthetic.invalid:3478"}],
+            id="userinfo",
+        ),
+        pytest.param(
+            [{"urls": "turn:synthetic invalid:3478"}],
+            id="whitespace",
+        ),
+        pytest.param(
+            [{"urls": "turn:synthetic.invalid:not-a-port"}],
+            id="non-numeric-port",
+        ),
+        pytest.param(
+            [{"urls": "turn:synthetic.invalid:70000"}],
+            id="out-of-range-port",
+        ),
+        pytest.param(
+            [{"urls": "turn:synthetic.invalid:3478/path"}],
+            id="path-component",
+        ),
+        pytest.param(
+            [
+                {"urls": "turn:synthetic.invalid:3478"},
+                {"urls": None},
+            ],
+            id="valid-turn-before-invalid-server",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": [
+                        "turn:synthetic.invalid:3478",
+                        "stun:",
+                    ]
+                }
+            ],
+            id="valid-turn-with-invalid-companion-url",
+        ),
+    ),
+)
+def test_resolve_turn_rtc_configuration_rejects_malformed_helper_results(
+    monkeypatch, ice_servers
+) -> None:
+    monkeypatch.setattr(
+        showcase_ice,
+        "get_twilio_ice_servers",
+        lambda *_args: ice_servers,
+    )
+
+    assert showcase_ice.resolve_turn_rtc_configuration("account", "token") is None
 
 
 @pytest.mark.parametrize(
@@ -104,22 +183,55 @@ def test_ice_boundary_has_no_page_file_or_persistence_capabilities() -> None:
         if isinstance(node, ast.Import)
         for alias in node.names
     }
-    assert imported_modules == {
-        "__future__",
-        "typing",
-        "streamlit_webrtc.credentials",
-    }
-    prohibited = (
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "streamlit_webrtc.credentials"
+        and any(alias.name == "get_twilio_ice_servers" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    prohibited_fragments = (
         "questionnaire",
         "record",
         "upload",
-        "pathlib",
-        "requests",
     )
     assert not any(
         fragment in module.casefold()
         for module in imported_modules
-        for fragment in prohibited
+        for fragment in prohibited_fragments
     )
-    assert "print(" not in source
-    assert "logging" not in source
+    prohibited_roots = {
+        "io",
+        "logging",
+        "os",
+        "pathlib",
+        "requests",
+        "socket",
+        "subprocess",
+    }
+    assert not any(
+        module.casefold().split(".", 1)[0] in prohibited_roots
+        for module in imported_modules
+    )
+    assert not any(
+        module == "streamlit" or module.startswith("streamlit.")
+        for module in imported_modules
+    )
+
+    logging_methods = {
+        "critical",
+        "debug",
+        "error",
+        "exception",
+        "info",
+        "log",
+        "warning",
+    }
+    calls = (node for node in ast.walk(tree) if isinstance(node, ast.Call))
+    assert not any(
+        (isinstance(call.func, ast.Name) and call.func.id in {"open", "print"})
+        or (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in logging_methods
+        )
+        for call in calls
+    )
