@@ -179,7 +179,9 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     assert list(tmp_path.iterdir()) == []
 
 
-def test_camera_initialization_failure_keeps_the_flow_available(monkeypatch):
+def test_camera_initialization_failure_keeps_the_flow_available(
+    monkeypatch, caplog
+):
     def unavailable_camera():
         raise RuntimeError("synthetic camera failure")
 
@@ -187,6 +189,18 @@ def test_camera_initialization_failure_keeps_the_flow_available(monkeypatch):
     app = _authenticate(_app_with_password())
     _element_by_key(app.button, "begin_demo").click().run()
 
+    camera_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "showcase camera preview unavailable"
+    ]
+    assert camera_logs
+    assert all(record.exc_info is None for record in camera_logs)
+    assert "synthetic camera failure" not in caplog.text
+    assert str(APP.resolve()) not in caplog.text
+    assert "等待摄像头连接。也可直接继续体验后续流程。" not in [
+        item.value for item in app.info
+    ]
     assert not app.exception
     assert [item.value for item in app.warning] == [
         "摄像头暂时不可用，可继续体验后续流程。"

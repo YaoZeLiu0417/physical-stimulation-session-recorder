@@ -161,14 +161,18 @@ with st.container():
             "点击 START 后，浏览器会请求摄像头权限。视频不写入文件，"
             "也不会保存到项目存储。"
         )
+        camera_unavailable = False
         try:
             camera_context = render_live_camera()
         except Exception:
-            LOGGER.warning("showcase camera preview unavailable", exc_info=True)
+            camera_unavailable = True
+            LOGGER.warning("showcase camera preview unavailable")
             camera_context = None
             st.warning("摄像头暂时不可用，可继续体验后续流程。")
 
-        if camera_is_playing(camera_context):
+        if camera_unavailable:
+            pass
+        elif camera_is_playing(camera_context):
             st.session_state["showcase_camera_started"] = True
             st.info("摄像头已连接。完成预览后可继续。")
         else:
