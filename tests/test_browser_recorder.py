@@ -25,6 +25,14 @@ class _UnhashableString(str):
     __hash__ = None
 
 
+class _HostileSchemaKey:
+    def __hash__(self):
+        return hash("mode")
+
+    def __eq__(self, other):
+        raise RuntimeError("hostile schema equality")
+
+
 def _with(field, value):
     return {**VALID_STATUS, field: value}
 
@@ -49,6 +57,15 @@ def test_parse_accepts_saved_status_and_returns_frozen_value_object() -> None:
 def test_parse_rejects_every_missing_key(missing_key) -> None:
     value = {key: item for key, item in VALID_STATUS.items() if key != missing_key}
 
+    assert parse_recorder_status(value) == DEFAULT_STATUS
+
+
+def test_parse_rejects_hostile_schema_key_without_calling_equality() -> None:
+    value = dict(VALID_STATUS)
+    mode = value.pop("mode")
+    value[_HostileSchemaKey()] = mode
+
+    assert len(value) == len(VALID_STATUS)
     assert parse_recorder_status(value) == DEFAULT_STATUS
 
 

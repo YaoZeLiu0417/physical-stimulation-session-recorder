@@ -70,7 +70,12 @@ _VALID_ERROR_CODES = {
 
 
 def parse_recorder_status(value: object) -> RecorderStatus:
-    if type(value) is not dict or set(value) != _STATUS_KEYS:
+    if type(value) is not dict or len(value) != len(_STATUS_KEYS):
+        return RecorderStatus()
+    for key in value:
+        if type(key) is not str:
+            return RecorderStatus()
+    if set(value) != _STATUS_KEYS:
         return RecorderStatus()
 
     mode = value["mode"]
