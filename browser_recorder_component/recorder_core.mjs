@@ -177,11 +177,12 @@ export class SerialChunkWriter {
     }
 
     this.#closing = true;
+    const writable = this.#writable;
     this.#closePromise = this.#tail
       .then(
         async () => {
           try {
-            await this.#writable.close();
+            await writable.close();
           } catch {
             throw sanitizedError("close_failed");
           }
@@ -198,6 +199,9 @@ export class SerialChunkWriter {
   }
 
   abort() {
+    if (this.#closePromise !== null) {
+      return this.#closePromise;
+    }
     if (this.#abortPromise !== null) {
       return this.#abortPromise;
     }

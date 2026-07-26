@@ -325,6 +325,75 @@ test("reports only close_failed when the final close rejects", async () => {
   assert.equal(closeCalls, 1);
 });
 
+test("close owns finalization when abort follows on an empty queue", async () => {
+  const closeGate = deferred();
+  let closeCalls = 0;
+  let abortCalls = 0;
+  const writable = {
+    async write() {},
+    close() {
+      closeCalls += 1;
+      return closeGate.promise;
+    },
+    async abort() {
+      abortCalls += 1;
+    },
+  };
+  const writer = new SerialChunkWriter(writable);
+
+  const closing = writer.close();
+  const firstAbort = writer.abort();
+  const secondAbort = writer.abort();
+  await Promise.resolve();
+  closeGate.resolve();
+  const results = await Promise.allSettled([closing, firstAbort, secondAbort]);
+
+  assert.equal(firstAbort, closing);
+  assert.equal(secondAbort, closing);
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["fulfilled", "fulfilled", "fulfilled"],
+  );
+  assert.equal(closeCalls, 1);
+  assert.equal(abortCalls, 0);
+});
+
+test("close drains a pending write before an interleaved abort", async () => {
+  const writeGate = deferred();
+  const events = [];
+  let abortCalls = 0;
+  const writable = {
+    write() {
+      events.push("write");
+      return writeGate.promise;
+    },
+    async close() {
+      events.push("close");
+    },
+    async abort() {
+      abortCalls += 1;
+    },
+  };
+  const writer = new SerialChunkWriter(writable);
+  const writing = writer.enqueue(numberedBlob(1));
+  await Promise.resolve();
+
+  const closing = writer.close();
+  const aborting = writer.abort();
+  assert.deepEqual(events, ["write"]);
+
+  writeGate.resolve();
+  const results = await Promise.allSettled([writing, closing, aborting]);
+
+  assert.equal(aborting, closing);
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["fulfilled", "fulfilled", "fulfilled"],
+  );
+  assert.deepEqual(events, ["write", "close"]);
+  assert.equal(abortCalls, 0);
+});
+
 test("aborts idempotently and stops queued writes", async () => {
   const firstWrite = deferred();
   const written = [];
@@ -348,12 +417,37 @@ test("aborts idempotently and stops queued writes", async () => {
 
   const firstAbort = writer.abort();
   const secondAbort = writer.abort();
+  const closing = writer.close();
   assert.equal(firstAbort, secondAbort);
+  assert.equal(closing, firstAbort);
   firstWrite.resolve();
-  await Promise.all([...writes, firstAbort]);
+  await Promise.all([...writes, firstAbort, closing]);
 
   assert.deepEqual(written, [1]);
   assert.equal(abortCalls, 1);
+});
+
+test("abort then close stays neutral when the underlying abort rejects", async () => {
+  let closeCalls = 0;
+  let abortCalls = 0;
+  const writable = {
+    async write() {},
+    async close() {
+      closeCalls += 1;
+    },
+    async abort() {
+      abortCalls += 1;
+      throw new Error("private abort failure detail");
+    },
+  };
+  const writer = new SerialChunkWriter(writable);
+
+  const aborting = writer.abort();
+  const closing = writer.close();
+  assert.equal(closing, aborting);
+  await Promise.all([aborting, closing]);
+  assert.equal(abortCalls, 1);
+  assert.equal(closeCalls, 0);
 });
 
 test("production core has no network, storage, media-link, or identity capability", async () => {
