@@ -58,9 +58,18 @@ def test_camera_is_playing_is_fail_closed() -> None:
     assert showcase_media.camera_is_playing(
         SimpleNamespace(state=SimpleNamespace(playing=True))
     ) is True
+    assert showcase_media.camera_is_playing(
+        SimpleNamespace(state=SimpleNamespace(playing="false"))
+    ) is False
+    assert showcase_media.camera_is_playing(
+        SimpleNamespace(state=SimpleNamespace(playing=1))
+    ) is False
+    assert showcase_media.camera_is_playing(
+        SimpleNamespace(state=SimpleNamespace(playing=object()))
+    ) is False
 
 
-def test_media_boundary_has_no_private_or_persistence_imports() -> None:
+def test_media_boundary_uses_only_allowlisted_imports_and_calls() -> None:
     tree = ast.parse(MEDIA_SOURCE.read_text(encoding="utf-8"))
     imported_modules = {
         node.module or ""
@@ -72,12 +81,14 @@ def test_media_boundary_has_no_private_or_persistence_imports() -> None:
         if isinstance(node, ast.Import)
         for alias in node.names
     }
-    prohibited_fragments = (
-        "aiortc", "av", "pathlib", "questionnaire",
-        "record", "requests", "upload",
-    )
-    assert not any(
-        fragment in module.casefold()
-        for module in imported_modules
-        for fragment in prohibited_fragments
-    )
+    assert imported_modules == {"__future__", "typing", "streamlit_webrtc"}
+
+    call_names = {
+        node.func.id
+        if isinstance(node.func, ast.Name)
+        else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    assert call_names <= {"getattr", "webrtc_streamer"}

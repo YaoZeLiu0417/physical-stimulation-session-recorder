@@ -28,4 +28,4 @@ def render_live_camera() -> Any:
 
 def camera_is_playing(context: Any) -> bool:
     state = getattr(context, "state", None)
-    return bool(getattr(state, "playing", False))
+    return getattr(state, "playing", False) is True
