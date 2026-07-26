@@ -19,6 +19,7 @@ def test_production_requirements_use_approved_webrtc_stack() -> None:
         "streamlit-webrtc==0.63.4",
         "aiortc==1.15.0",
         "av==17.0.0",
+        "twilio>=9.0,<10",
         "numpy>=1.24,<2.0",
         "requests>=2.31,<3",
         "protobuf<5",
