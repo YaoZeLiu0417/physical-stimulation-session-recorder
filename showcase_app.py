@@ -5,6 +5,7 @@ import os
 
 import streamlit as st
 
+from showcase_ice import resolve_turn_rtc_configuration
 from showcase_media import camera_is_playing, render_live_camera
 from showcase_workflow import advance_step, password_matches
 
@@ -164,25 +165,33 @@ with st.container():
     elif step == "capture":
         st.subheader("实时摄像预览")
         st.caption(
-            "点击 START 后，浏览器会请求摄像头权限。视频不写入文件，"
+            "实时预览仅使用摄像头，不启用麦克风；视频不写入文件，"
             "也不会保存到项目存储。"
         )
         camera_unavailable = False
+        camera_context = None
         try:
-            camera_context = render_live_camera()
+            rtc_configuration = resolve_turn_rtc_configuration(
+                _secret("TWILIO_ACCOUNT_SID"),
+                _secret("TWILIO_AUTH_TOKEN"),
+            )
+            if rtc_configuration is None:
+                camera_unavailable = True
+            else:
+                camera_context = render_live_camera(rtc_configuration)
         except Exception:
             camera_unavailable = True
             LOGGER.warning("showcase camera preview unavailable")
-            camera_context = None
-            st.warning("摄像头暂时不可用，可继续体验后续流程。")
 
         if camera_unavailable:
-            pass
+            st.warning("实时摄像预览暂时不可用，可继续体验后续流程。")
         elif camera_is_playing(camera_context):
             st.session_state["showcase_camera_started"] = True
             st.info("摄像头已连接。完成预览后可继续。")
         else:
-            st.info("等待摄像头连接。也可直接继续体验后续流程。")
+            st.info(
+                "正在建立安全摄像预览连接。若长时间无画面，可继续后续流程。"
+            )
 
         if st.button("完成摄像演示", type="primary", key="finish_capture"):
             _go("finish_capture")
@@ -192,9 +201,17 @@ with st.container():
         st.slider(
             "本次演示流程有多清晰？", 0, 4, 2, key="process_clarity"
         )
-        st.slider(
-            "摄像头交互有多顺畅？", 0, 4, 2, key="camera_smoothness"
-        )
+        if st.session_state.get("showcase_camera_started") is True:
+            st.slider(
+                "摄像头交互有多顺畅？",
+                0,
+                4,
+                2,
+                key="camera_smoothness",
+            )
+        else:
+            st.session_state.pop("camera_smoothness", None)
+            st.caption("本次未建立实时摄像预览，无需评价摄像头交互。")
         st.slider(
             "界面的信息量有多合适？", 0, 4, 2, key="information_load"
         )

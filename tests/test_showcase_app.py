@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from streamlit.testing.v1 import AppTest
 
+import showcase_ice
 import showcase_media
 
 
@@ -23,6 +24,26 @@ SYNTHETIC_RESPONSES = {
     "information_load": 1,
     "workflow_willingness": 4,
 }
+TURN_RTC_CONFIGURATION = {
+    "iceServers": [
+        {
+            "urls": ["turn:global.turn.twilio.com:3478?transport=udp"],
+            "username": "ephemeral-user",
+            "credential": "ephemeral-credential",
+        }
+    ]
+}
+NON_CAMERA_RESPONSE_KEYS = (
+    "process_clarity",
+    "information_load",
+    "workflow_willingness",
+)
+CAMERA_UNAVAILABLE_WARNING = (
+    "实时摄像预览暂时不可用，可继续体验后续流程。"
+)
+CAMERA_FEEDBACK_SKIPPED_CAPTION = (
+    "本次未建立实时摄像预览，无需评价摄像头交互。"
+)
 SYNTHETIC_LABELS = (
     "本次演示流程有多清晰？",
     "摄像头交互有多顺畅？",
@@ -63,9 +84,16 @@ EXPECTED_CONFIRMATION_INVENTORY = (
 @pytest.fixture(autouse=True)
 def _stub_live_camera(monkeypatch):
     monkeypatch.setattr(
+        showcase_ice,
+        "resolve_turn_rtc_configuration",
+        lambda account_sid, auth_token: TURN_RTC_CONFIGURATION,
+    )
+    monkeypatch.setattr(
         showcase_media,
         "render_live_camera",
-        lambda: SimpleNamespace(state=SimpleNamespace(playing=True)),
+        lambda rtc_configuration: SimpleNamespace(
+            state=SimpleNamespace(playing=True)
+        ),
     )
 
 
@@ -74,6 +102,8 @@ def _app_with_password(app_path: Path = APP) -> AppTest:
     app.secrets["SHOWCASE_PASSWORD_SHA256"] = hashlib.sha256(
         PASSWORD.encode("utf-8")
     ).hexdigest()
+    app.secrets["TWILIO_ACCOUNT_SID"] = "test-account"
+    app.secrets["TWILIO_AUTH_TOKEN"] = "test-token"
     return app
 
 
@@ -229,8 +259,11 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     capture_text = _visible_text(app)
     assert "实时摄像预览" in capture_text
     assert "摄像头" in capture_text
-    assert "不写入文件" in capture_text
-    assert "项目存储" in capture_text
+    assert (
+        "实时预览仅使用摄像头，不启用麦克风；视频不写入文件，"
+        "也不会保存到项目存储。"
+        in [item.value for item in app.caption]
+    )
     assert app.session_state["showcase_camera_started"] is True
     _assert_progress(app, "2 会话记录")
     _element_by_key(app.button, "finish_capture").click().run()
@@ -240,6 +273,9 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
         assert slider.value == 2
         assert slider.proto.min == 0
         assert slider.proto.max == 4
+    assert tuple(element.key for element in app.slider) == tuple(
+        SYNTHETIC_RESPONSES
+    )
     assert tuple(element.label for element in app.slider) == SYNTHETIC_LABELS
     _assert_progress(app, "3 引导反馈")
 
@@ -325,13 +361,98 @@ def test_confirmation_inventory_rejects_unknown_and_style_smuggled_output(
     assert unexpectedly_allowed == []
 
 
-def test_camera_initialization_failure_keeps_the_flow_available(
-    monkeypatch, caplog
-):
-    def unavailable_camera():
-        raise RuntimeError("synthetic camera failure")
+def test_camera_resolver_receives_synthetic_runtime_secrets(monkeypatch):
+    resolver_calls = []
 
-    monkeypatch.setattr(showcase_media, "render_live_camera", unavailable_camera)
+    def resolve_turn(account_sid, auth_token):
+        resolver_calls.append((account_sid, auth_token))
+        return TURN_RTC_CONFIGURATION
+
+    monkeypatch.setattr(
+        showcase_ice,
+        "resolve_turn_rtc_configuration",
+        resolve_turn,
+    )
+    app = _authenticate(_app_with_password())
+    _element_by_key(app.button, "begin_demo").click().run()
+
+    assert not app.exception
+    assert resolver_calls == [("test-account", "test-token")]
+    assert app.session_state["showcase_camera_started"] is True
+
+
+def test_missing_turn_skips_preview_and_camera_feedback(monkeypatch):
+    monkeypatch.setattr(
+        showcase_ice,
+        "resolve_turn_rtc_configuration",
+        lambda account_sid, auth_token: None,
+    )
+
+    renderer_calls = []
+
+    def unexpected_camera(_rtc_configuration=None):
+        renderer_calls.append(_rtc_configuration)
+        return SimpleNamespace(state=SimpleNamespace(playing=True))
+
+    monkeypatch.setattr(showcase_media, "render_live_camera", unexpected_camera)
+    app = _authenticate(_app_with_password())
+    _element_by_key(app.button, "begin_demo").click().run()
+
+    assert not app.exception
+    assert [item.value for item in app.warning] == [
+        CAMERA_UNAVAILABLE_WARNING
+    ]
+    assert renderer_calls == []
+    assert "showcase_camera_started" not in app.session_state
+
+    app.session_state["camera_smoothness"] = 4
+    _element_by_key(app.button, "finish_capture").click().run()
+    assert tuple(slider.key for slider in app.slider) == NON_CAMERA_RESPONSE_KEYS
+    assert CAMERA_FEEDBACK_SKIPPED_CAPTION in [
+        item.value for item in app.caption
+    ]
+    assert "camera_smoothness" not in app.session_state
+
+    _element_by_key(app.button, "save_reflection").click().run()
+    assert app.session_state["showcase_step"] == "confirmation"
+
+    confirmation_app = _app_with_password()
+    confirmation_app.session_state["showcase_authenticated"] = True
+    confirmation_app.session_state["showcase_step"] = "confirmation"
+    confirmation_app.run()
+    assert (
+        _main_content_inventory(confirmation_app)
+        == EXPECTED_CONFIRMATION_INVENTORY
+    )
+
+
+@pytest.mark.parametrize("failure_source", ("resolver", "renderer"))
+def test_camera_initialization_failure_keeps_the_flow_available(
+    monkeypatch, caplog, failure_source
+):
+    failure_text = f"synthetic {failure_source} failure"
+
+    if failure_source == "resolver":
+
+        def unavailable_resolver(account_sid, auth_token):
+            raise RuntimeError(failure_text)
+
+        monkeypatch.setattr(
+            showcase_ice,
+            "resolve_turn_rtc_configuration",
+            unavailable_resolver,
+        )
+    else:
+
+        def unavailable_camera(_rtc_configuration):
+            raise RuntimeError(failure_text)
+
+        monkeypatch.setattr(
+            showcase_media,
+            "render_live_camera",
+            unavailable_camera,
+        )
+
     app = _authenticate(_app_with_password())
     _element_by_key(app.button, "begin_demo").click().run()
 
@@ -342,17 +463,60 @@ def test_camera_initialization_failure_keeps_the_flow_available(
     ]
     assert camera_logs
     assert all(record.exc_info is None for record in camera_logs)
-    assert "synthetic camera failure" not in caplog.text
+    assert failure_text not in caplog.text
+    assert "test-account" not in caplog.text
+    assert "test-token" not in caplog.text
     assert str(APP.resolve()) not in caplog.text
-    assert "等待摄像头连接。也可直接继续体验后续流程。" not in [
+    assert "正在建立安全摄像预览连接。若长时间无画面，可继续后续流程。" not in [
         item.value for item in app.info
     ]
     assert not app.exception
+    assert failure_text not in _visible_text(app)
+    assert "test-account" not in _visible_text(app)
+    assert "test-token" not in _visible_text(app)
     assert [item.value for item in app.warning] == [
-        "摄像头暂时不可用，可继续体验后续流程。"
+        CAMERA_UNAVAILABLE_WARNING
     ]
+    assert "showcase_camera_started" not in app.session_state
+
+    app.session_state["camera_smoothness"] = 4
     _element_by_key(app.button, "finish_capture").click().run()
     assert app.session_state["showcase_step"] == "reflection"
+    assert tuple(slider.key for slider in app.slider) == NON_CAMERA_RESPONSE_KEYS
+    assert CAMERA_FEEDBACK_SKIPPED_CAPTION in [
+        item.value for item in app.caption
+    ]
+    assert "camera_smoothness" not in app.session_state
+
+
+def test_unconnected_camera_skips_camera_feedback(monkeypatch):
+    rendered_configurations = []
+
+    def render_unconnected_camera(rtc_configuration):
+        rendered_configurations.append(rtc_configuration)
+        return SimpleNamespace(state=SimpleNamespace(playing=False))
+
+    monkeypatch.setattr(
+        showcase_media,
+        "render_live_camera",
+        render_unconnected_camera,
+    )
+    app = _authenticate(_app_with_password())
+    _element_by_key(app.button, "begin_demo").click().run()
+
+    assert not app.exception
+    assert rendered_configurations == [TURN_RTC_CONFIGURATION]
+    assert "showcase_camera_started" not in app.session_state
+    assert [item.value for item in app.info] == [
+        "正在建立安全摄像预览连接。若长时间无画面，可继续后续流程。"
+    ]
+
+    _element_by_key(app.button, "finish_capture").click().run()
+    assert tuple(slider.key for slider in app.slider) == NON_CAMERA_RESPONSE_KEYS
+    assert CAMERA_FEEDBACK_SKIPPED_CAPTION in [
+        item.value for item in app.caption
+    ]
+    assert "camera_smoothness" not in app.session_state
 
 
 def test_visible_copy_is_neutral_on_every_authenticated_step():
