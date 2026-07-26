@@ -88,6 +88,52 @@ def _visible_text(app: AppTest) -> str:
     return "\n".join(values)
 
 
+def _main_content_inventory(app: AppTest):
+    inventory = []
+    for collection_name in (
+        "title",
+        "header",
+        "subheader",
+        "caption",
+        "markdown",
+        "text",
+        "info",
+        "warning",
+        "error",
+        "success",
+        "metric",
+        "json",
+        "code",
+        "button",
+        "slider",
+        "number_input",
+        "text_input",
+        "text_area",
+        "radio",
+        "selectbox",
+        "multiselect",
+        "dataframe",
+        "table",
+    ):
+        attributes = ("label",) if collection_name == "button" else (
+            "value",
+            "label",
+        )
+        for element in getattr(app.main, collection_name):
+            for attribute in attributes:
+                value = getattr(element, attribute, None)
+                if value is None:
+                    continue
+                if (
+                    collection_name == "markdown"
+                    and attribute == "value"
+                    and str(value).strip().startswith("<style>")
+                ):
+                    continue
+                inventory.append((collection_name, attribute, value))
+    return tuple(inventory)
+
+
 def _authenticate(app: AppTest) -> AppTest:
     app.run()
     _element_by_key(app.text_input, "showcase_password").set_value(PASSWORD)
@@ -159,7 +205,10 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _element_by_key(app.button, "finish_capture").click().run()
 
     for key in SYNTHETIC_RESPONSES:
-        assert _element_by_key(app.slider, key).value == 2
+        slider = _element_by_key(app.slider, key)
+        assert slider.value == 2
+        assert slider.proto.min == 0
+        assert slider.proto.max == 4
     assert tuple(element.label for element in app.slider) == SYNTHETIC_LABELS
     _assert_progress(app, "3 引导反馈")
 
@@ -182,6 +231,8 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _assert_progress(app, "4 完成确认")
     assert list(tmp_path.iterdir()) == []
 
+    # AppTest 1.37.1 and 1.45.1 retain stale pre-rerun slider deltas, so this
+    # fresh populated session verifies current confirmation rendering and cleanup.
     confirmation_app = _app_with_password()
     confirmation_app.session_state["showcase_authenticated"] = True
     confirmation_app.session_state["showcase_step"] = "confirmation"
@@ -190,13 +241,29 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
         confirmation_app.session_state[key] = value
     confirmation_app.run()
 
-    confirmation_text = _visible_text(confirmation_app)
-    assert not confirmation_app.slider
-    assert not confirmation_app.metric
-    assert "总分" not in confirmation_text
-    assert "得分" not in confirmation_text
-    for label in SYNTHETIC_LABELS:
-        assert label not in confirmation_text
+    assert _main_content_inventory(confirmation_app) == (
+        ("title", "value", PRODUCT_NAME),
+        ("caption", "value", PRODUCT_CAPTION),
+        (
+            "markdown",
+            "value",
+            '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
+        ),
+        (
+            "markdown",
+            "value",
+            '<div class="completion-status" role="status">'
+            "演示流程已完成。</div>",
+        ),
+        (
+            "markdown",
+            "value",
+            '<div class="privacy-note"><strong>隐私边界</strong><br>'
+            "本演示不包含研究名称、干预参数、测量内容、评分规则或真实参与者数据。"
+            "</div>",
+        ),
+        ("button", "label", "重新体验"),
+    )
 
     _element_by_key(confirmation_app.button, "restart_demo").click().run()
     assert confirmation_app.session_state["showcase_step"] == "overview"
