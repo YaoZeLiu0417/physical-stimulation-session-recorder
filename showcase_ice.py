@@ -12,23 +12,27 @@ _TURN_QUERIES = frozenset({"transport=tcp", "transport=udp"})
 _MISSING = object()
 
 
-def _ice_url_scheme(url: str) -> str | None:
+def _canonical_ice_url(url: str) -> tuple[str, str] | None:
     if not url or any(character.isspace() for character in url):
         return None
 
     try:
         parsed = urlsplit(url)
         scheme = parsed.scheme.casefold()
-        if scheme not in _ICE_SCHEMES or parsed.fragment:
+        if scheme not in _ICE_SCHEMES or "#" in url:
             return None
         if parsed.netloc:
             return None
+        transport = None
         if parsed.query:
+            query = parsed.query.casefold()
             if (
                 scheme not in _TURN_SCHEMES
-                or parsed.query.casefold() not in _TURN_QUERIES
+                or query not in _TURN_QUERIES
+                or (scheme == "turns" and query != "transport=tcp")
             ):
                 return None
+            transport = query.removeprefix("transport=")
         elif "?" in url:
             return None
 
@@ -40,13 +44,19 @@ def _ice_url_scheme(url: str) -> str | None:
             or endpoint.password is not None
         ):
             return None
-        if not endpoint.hostname or endpoint.netloc.endswith(":"):
+        host = endpoint.hostname
+        if not host or ":" in host or endpoint.netloc.endswith(":"):
             return None
-        _ = endpoint.port
+        port = endpoint.port
     except ValueError:
         return None
 
-    return scheme
+    canonical = f"{scheme}:{host}"
+    if port is not None:
+        canonical += f":{port}"
+    if transport is not None:
+        canonical += f"?transport={transport}"
+    return canonical, scheme
 
 
 def _validated_ice_servers(value: object) -> list[RTCIceServer] | None:
@@ -71,11 +81,14 @@ def _validated_ice_servers(value: object) -> list[RTCIceServer] | None:
         else:
             return None
 
+        canonical_urls = []
         server_has_turn = False
         for url in url_values:
-            scheme = _ice_url_scheme(url)
-            if scheme is None:
+            parsed_url = _canonical_ice_url(url)
+            if parsed_url is None:
                 return None
+            canonical_url, scheme = parsed_url
+            canonical_urls.append(canonical_url)
             server_has_turn = server_has_turn or scheme in _TURN_SCHEMES
 
         username = server.get("username", _MISSING)
@@ -94,7 +107,7 @@ def _validated_ice_servers(value: object) -> list[RTCIceServer] | None:
             return None
 
         sanitized = RTCIceServer(
-            urls=urls if isinstance(urls, str) else list(urls)
+            urls=canonical_urls[0] if isinstance(urls, str) else canonical_urls
         )
         if isinstance(username, str):
             sanitized["username"] = username

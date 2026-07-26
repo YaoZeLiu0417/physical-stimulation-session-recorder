@@ -2,6 +2,8 @@ import ast
 from pathlib import Path
 
 import pytest
+from aiortc.rtcicetransport import connection_kwargs
+from streamlit_webrtc.config import compile_rtc_configuration
 
 import showcase_ice
 
@@ -9,17 +11,46 @@ import showcase_ice
 ICE_SOURCE = Path(__file__).resolve().parents[1] / "showcase_ice.py"
 
 
+def _aiortc_connection_kwargs(rtc_configuration):
+    compiled = compile_rtc_configuration(rtc_configuration)
+    kwargs = connection_kwargs(compiled.iceServers)
+    assert "turn_server" in kwargs
+    return kwargs
+
+
 @pytest.mark.parametrize(
-    "turn_urls",
+    ("turn_urls", "canonical_turn_urls", "expected_turn_server"),
     (
-        "TURN:synthetic.invalid:3478",
-        ["TURNS:synthetic.invalid:5349?TRANSPORT=TCP"],
-        "turn:[2001:db8::1]:3478",
+        (
+            "TURN:Synthetic.INVALID:3478",
+            "turn:synthetic.invalid:3478",
+            ("synthetic.invalid", 3478),
+        ),
+        (
+            ["TURNS:synthetic.invalid:5349?TRANSPORT=TCP"],
+            ["turns:synthetic.invalid:5349?transport=tcp"],
+            ("synthetic.invalid", 5349),
+        ),
+        (
+            "turn:relay.synthetic.invalid?transport=tcp",
+            "turn:relay.synthetic.invalid?transport=tcp",
+            ("relay.synthetic.invalid", 3478),
+        ),
+        (
+            "turns:secure.synthetic.invalid",
+            "turns:secure.synthetic.invalid",
+            ("secure.synthetic.invalid", 5349),
+        ),
     ),
-    ids=("uppercase-string", "uppercase-list", "bracket-ipv6"),
+    ids=(
+        "uppercase-string",
+        "uppercase-list",
+        "lowercase-default-port",
+        "turns-default-transport",
+    ),
 )
 def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_credentials(
-    monkeypatch, turn_urls
+    monkeypatch, turn_urls, canonical_turn_urls, expected_turn_server
 ) -> None:
     ice_servers = [
         {"urls": "stun:synthetic.invalid:3478"},
@@ -41,10 +72,24 @@ def test_resolve_turn_rtc_configuration_accepts_turn_url_shapes_and_trims_creden
         fake_get_twilio_ice_servers,
     )
 
-    assert showcase_ice.resolve_turn_rtc_configuration(
+    result = showcase_ice.resolve_turn_rtc_configuration(
         "  test-account  ", "  test-token  "
-    ) == {"iceServers": ice_servers}
+    )
+    assert result == {
+        "iceServers": [
+            {"urls": "stun:synthetic.invalid:3478"},
+            {
+                "urls": canonical_turn_urls,
+                "username": "ephemeral-user",
+                "credential": "ephemeral-credential",
+            },
+        ]
+    }
     assert calls == [("test-account", "test-token")]
+    kwargs = _aiortc_connection_kwargs(result)
+    assert kwargs["turn_server"] == expected_turn_server
+    assert kwargs["turn_username"] == "ephemeral-user"
+    assert kwargs["turn_password"] == "ephemeral-credential"
 
 
 def test_resolve_turn_rtc_configuration_sanitizes_servers_and_unknown_fields(
@@ -57,7 +102,7 @@ def test_resolve_turn_rtc_configuration_sanitizes_servers_and_unknown_fields(
             "unknown": unknown_value,
         },
         {
-            "urls": ["turn:synthetic.invalid:3478?transport=UDP"],
+            "urls": ["TURN:Synthetic.INVALID:3478?TRANSPORT=UDP"],
             "username": "ephemeral-user",
             "credential": "ephemeral-credential",
             "unknown": unknown_value,
@@ -75,7 +120,7 @@ def test_resolve_turn_rtc_configuration_sanitizes_servers_and_unknown_fields(
         "iceServers": [
             {"urls": "stun:synthetic.invalid:3478"},
             {
-                "urls": ["turn:synthetic.invalid:3478?transport=UDP"],
+                "urls": ["turn:synthetic.invalid:3478?transport=udp"],
                 "username": "ephemeral-user",
                 "credential": "ephemeral-credential",
             },
@@ -86,6 +131,10 @@ def test_resolve_turn_rtc_configuration_sanitizes_servers_and_unknown_fields(
         sanitized is not original
         for sanitized, original in zip(result["iceServers"], ice_servers)
     )
+    kwargs = _aiortc_connection_kwargs(result)
+    assert kwargs["turn_server"] == ("synthetic.invalid", 3478)
+    assert kwargs["turn_username"] == "ephemeral-user"
+    assert kwargs["turn_password"] == "ephemeral-credential"
 
 
 @pytest.mark.parametrize(
@@ -306,6 +355,26 @@ def test_resolve_turn_rtc_configuration_rejects_invalid_ice_credentials(
         pytest.param(
             [
                 {
+                    "urls": "turn:synthetic.invalid:3478#",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="empty-fragment",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turn:[2001:db8::1]:3478",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="bracket-ipv6",
+        ),
+        pytest.param(
+            [
+                {
                     "urls": "turn://synthetic.invalid:3478",
                     "username": "ephemeral-user",
                     "credential": "ephemeral-credential",
@@ -332,6 +401,16 @@ def test_resolve_turn_rtc_configuration_rejects_invalid_ice_credentials(
                 }
             ],
             id="unsupported-transport",
+        ),
+        pytest.param(
+            [
+                {
+                    "urls": "turns:synthetic.invalid:5349?transport=udp",
+                    "username": "ephemeral-user",
+                    "credential": "ephemeral-credential",
+                }
+            ],
+            id="turns-udp-transport",
         ),
         pytest.param(
             [
