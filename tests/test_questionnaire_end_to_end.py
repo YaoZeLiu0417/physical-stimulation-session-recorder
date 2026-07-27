@@ -19,6 +19,7 @@ from questionnaire_specs import (
 )
 from questionnaire_ui import build_flow, formal_flow, questionnaire_state_keys
 from session_record_workflow import (
+    DAILY_CONTEXT_DEFAULTS,
     create_session_record,
     mark_questionnaire_visit_complete,
     persist_daily_questionnaire,
@@ -148,6 +149,7 @@ PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS = frozenset(
         "visit_status",
     }
 )
+DAILY_CONTEXT_FIELD_IDS = frozenset(DAILY_CONTEXT_DEFAULTS)
 QUESTIONNAIRE_FIELD_IDS = frozenset(
     question.id
     for question in (
@@ -165,14 +167,54 @@ QUESTIONNAIRE_FIELD_IDS = frozenset(
         ),
     )
 )
-PARTICIPANT_DATA_BYTE_MARKERS = tuple(
-    (marker, marker.encode("utf-8"))
-    for marker in sorted(
-        PARTICIPANT_DATA_IDENTIFIERS
-        | PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS
-        | QUESTIONNAIRE_FIELD_IDS
-    )
+PARTICIPANT_DATA_MARKERS = frozenset(
+    PARTICIPANT_DATA_IDENTIFIERS
+    | DAILY_CONTEXT_FIELD_IDS
+    | PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS
+    | QUESTIONNAIRE_FIELD_IDS
 )
+PARTICIPANT_DATA_BYTE_PATTERN = re.compile(
+    rb"(?<![A-Za-z0-9_])(?:"
+    + b"|".join(
+        re.escape(marker.encode("utf-8"))
+        for marker in sorted(
+            PARTICIPANT_DATA_MARKERS,
+            key=lambda value: (-len(value), value),
+        )
+    )
+    + rb")(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _json_participant_marker(value) -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).casefold()
+            if normalized_key in PARTICIPANT_DATA_MARKERS:
+                return normalized_key
+            nested_marker = _json_participant_marker(item)
+            if nested_marker is not None:
+                return nested_marker
+    elif isinstance(value, list):
+        for item in value:
+            nested_marker = _json_participant_marker(item)
+            if nested_marker is not None:
+                return nested_marker
+    elif isinstance(value, str):
+        normalized_value = value.casefold()
+        if normalized_value in PARTICIPANT_DATA_MARKERS:
+            return normalized_value
+    return None
+
+
+def _is_standard_pytest_nodeids(relative: Path, value) -> bool:
+    return (
+        tuple(part.casefold() for part in relative.parts)
+        == (".pytest_cache", "v", "cache", "nodeids")
+        and isinstance(value, list)
+        and all(isinstance(item, str) for item in value)
+    )
 
 
 def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
@@ -199,9 +241,19 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
         return "store index"
     if path_tokens & PARTICIPANT_ARTIFACT_NAME_TOKENS:
         return "participant artifact name"
-    data = path.read_bytes().lower()
-    for marker, encoded_marker in PARTICIPANT_DATA_BYTE_MARKERS:
-        if encoded_marker in data:
+    data = path.read_bytes()
+    try:
+        json_value = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        match = PARTICIPANT_DATA_BYTE_PATTERN.search(data)
+        if match is not None:
+            marker = match.group().decode("utf-8", errors="replace")
+            return f"participant data marker {marker}"
+    else:
+        if _is_standard_pytest_nodeids(relative, json_value):
+            return None
+        marker = _json_participant_marker(json_value)
+        if marker is not None:
             return f"participant data marker {marker}"
     return None
 
@@ -749,6 +801,15 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
             id="recording-json",
         ),
         pytest.param(
+            ".streamlit/cache.json",
+            json.dumps(
+                DAILY_CONTEXT_DEFAULTS,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8"),
+            id="daily-context-section-json",
+        ),
+        pytest.param(
             ".streamlit/cache.bin",
             b"binary-prefix participant_id binary-suffix",
             id="extension-independent-participant-data",
@@ -817,8 +878,16 @@ def test_cache_scans_complete_file_beyond_one_mebibyte(tmp_path):
 def test_operational_snapshot_allows_only_benign_cache_changes(tmp_path):
     before = _operational_side_effect_snapshot(tmp_path)
     benign_cache_files = {
-        ".pytest_cache/v/cache/nodeids": b"[]",
+        ".pytest_cache/v/cache/nodeids": json.dumps(
+            [
+                "tests/test_app.py::test_recording_gate",
+                "tests/test_app.py::test_daily_context",
+            ]
+        ).encode("utf-8"),
         ".streamlit/config.toml": b"[browser]\ngatherUsageStats = false\n",
+        ".streamlit/diagnostics.bin": (
+            b"test_recording_gate test_daily_context"
+        ),
         ".streamlit/metrics.csv": b"metric,value\nruns,1\n",
         "__pycache__/questionnaire_app.pyc": b"ordinary bytecode cache",
     }
