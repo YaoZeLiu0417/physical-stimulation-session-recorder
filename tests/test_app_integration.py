@@ -4,7 +4,9 @@ import hashlib
 import json
 import time
 from datetime import date, datetime, timezone
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_STORED, ZipFile
 
 import pytest
 import streamlit as st
@@ -221,6 +223,179 @@ def _terminal_metadata(terminal_state: str) -> dict[str, object]:
         "microphone_ready": False,
         "saved_confirmed": False,
     }
+
+
+def _zip_bytes(
+    members: tuple[str, ...] = ("responses.json", "responses.xlsx"),
+    *,
+    json_data: bytes = b"{}",
+) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", compression=ZIP_STORED) as archive:
+        for member in members:
+            data = json_data if member == "responses.json" else b"minimal-xlsx"
+            archive.writestr(member, data)
+    return output.getvalue()
+
+
+def _valid_bundle(*, json_data: bytes = b"{}") -> LocalExportBundle:
+    return LocalExportBundle(
+        filename="session-20260724-080910.zip",
+        mime_type="application/zip",
+        data=_zip_bytes(json_data=json_data),
+    )
+
+
+class _LocalExportBundleSubclass(LocalExportBundle):
+    pass
+
+
+def _corrupt_zip_bytes() -> bytes:
+    payload = b"unique-json-payload"
+    data = bytearray(_zip_bytes(json_data=payload))
+    payload_index = data.index(payload)
+    data[payload_index] ^= 1
+    return bytes(data)
+
+
+def _invalid_bundles() -> tuple[object, ...]:
+    valid_data = _zip_bytes()
+    return (
+        pytest.param(
+            _LocalExportBundleSubclass(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=valid_data,
+            ),
+            id="subclass",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="subject-sub-001.zip",
+                mime_type="application/zip",
+                data=valid_data,
+            ),
+            id="identifying-filename",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename=20260724080910,  # type: ignore[arg-type]
+                mime_type="application/zip",
+                data=valid_data,
+            ),
+            id="non-string-filename",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/octet-stream",
+                data=valid_data,
+            ),
+            id="wrong-mime",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type=object(),  # type: ignore[arg-type]
+                data=valid_data,
+            ),
+            id="non-string-mime",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=bytearray(valid_data),  # type: ignore[arg-type]
+            ),
+            id="non-bytes-data",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=b"not-a-zip",
+            ),
+            id="non-zip-data",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=_corrupt_zip_bytes(),
+            ),
+            id="corrupt-zip-data",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=_zip_bytes(("answers.json", "responses.xlsx")),
+            ),
+            id="wrong-member",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=_zip_bytes(("responses.json",)),
+            ),
+            id="missing-member",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=_zip_bytes(
+                    ("responses.json", "responses.xlsx", "private.txt")
+                ),
+            ),
+            id="extra-member",
+        ),
+        pytest.param(
+            LocalExportBundle(
+                filename="session-20260724-080910.zip",
+                mime_type="application/zip",
+                data=_zip_bytes(("responses.xlsx", "responses.json")),
+            ),
+            id="wrong-member-order",
+        ),
+    )
+
+
+def _operational_phase_state(record: dict[str, object]) -> dict[str, object]:
+    return {
+        "operational_record": copy.deepcopy(record),
+        "operational_export_bundle": _valid_bundle(),
+        "operational_export_error": True,
+        "operational_saved_locally": True,
+        "operational_complete": True,
+        "operational_export_retry": True,
+        "participant_identifier": "stale-participant-widget",
+        "operational_finish": True,
+        "operational_visit_selection": "V6",
+        "questionnaire::stale": {"private": "answer"},
+        "operational_recorder::stale": {"private": "status"},
+        "operational_recorder::pending::stale": _terminal_metadata("failed"),
+        "operational_recording_continue::stale": True,
+        "operational_daily_context::stale": "private context",
+        "operational_admin_day::stale": 6,
+    }
+
+
+def _assert_stale_phase_state_cleared(app: AppTest) -> None:
+    for key in (
+        "operational_export_bundle",
+        "operational_export_error",
+        "operational_saved_locally",
+        "operational_complete",
+        "operational_export_retry",
+        "operational_finish",
+        "operational_visit_selection",
+    ):
+        assert key not in app.session_state
+    assert not any(
+        "stale" in str(key) for key in app.session_state.filtered_state
+    )
 
 
 def _remaining_user_state_keys(app: AppTest) -> set[str]:
@@ -513,6 +688,31 @@ def test_malformed_cached_export_clears_local_save_acknowledgement(monkeypatch):
         "昨夜睡眠（小时）",
     ).value == 7.0
     assert not app.get("download_button")
+
+
+@pytest.mark.parametrize("invalid_bundle", _invalid_bundles())
+def test_invalid_cached_export_is_discarded_before_finalization(
+    monkeypatch,
+    invalid_bundle,
+):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(mode="long", state="recording"),
+    )
+    app.session_state["operational_export_bundle"] = copy.deepcopy(
+        invalid_bundle
+    )
+    app.session_state["operational_saved_locally"] = True
+
+    app.run()
+
+    assert not app.exception
+    assert "operational_export_bundle" not in app.session_state
+    assert "operational_saved_locally" not in app.session_state
+    assert len(recorder_calls) == 2
+    assert _element_by_label(app.number_input, "昨夜睡眠（小时）")
+    assert not app.get("download_button")
+    assert not [button for button in app.button if button.label == "完成本次会话"]
 
 
 def test_recording_blocks_questionnaire_and_uses_neutral_component_key(monkeypatch):
@@ -865,11 +1065,7 @@ def test_complete_questionnaire_builds_and_caches_one_export_from_a_snapshot(
 ):
     render_calls: list[dict[str, object]] = []
     export_calls: list[tuple[object, str, datetime]] = []
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"zip-exact-bytes",
-    )
+    bundle = _valid_bundle(json_data=b'{"export":"exact"}')
 
     def build_export(record, *, visit, exported_at):
         export_calls.append((record, visit, exported_at))
@@ -911,11 +1107,7 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
     questionnaire_calls: list[dict[str, object]] = []
     export_snapshots: list[dict[str, object]] = []
     downloads: list[dict[str, object]] = []
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"frozen-exact-download",
-    )
+    bundle = _valid_bundle(json_data=b'{"export":"frozen"}')
 
     def render_with_answer_probe(**kwargs):
         questionnaire_calls.append(kwargs)
@@ -991,13 +1183,13 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
     assert downloads == [
         {
             "label": "下载问卷记录（JSON + Excel）",
-            "data": b"frozen-exact-download",
+            "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
         },
         {
             "label": "下载问卷记录（JSON + Excel）",
-            "data": b"frozen-exact-download",
+            "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
         },
@@ -1010,11 +1202,7 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
 
 def test_download_button_receives_exact_bundle_bytes_name_and_mime(monkeypatch):
     captured = []
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"exact-download-zip-bytes",
-    )
+    bundle = _valid_bundle(json_data=b'{"download":"exact"}')
 
     def capture_download(**kwargs):
         captured.append(kwargs)
@@ -1032,7 +1220,7 @@ def test_download_button_receives_exact_bundle_bytes_name_and_mime(monkeypatch):
     assert captured == [
         {
             "label": "下载问卷记录（JSON + Excel）",
-            "data": b"exact-download-zip-bytes",
+            "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
         }
@@ -1043,11 +1231,7 @@ def test_download_button_receives_exact_bundle_bytes_name_and_mime(monkeypatch):
 def test_export_failure_is_neutral_retryable_and_preserves_responses(monkeypatch):
     render_calls: list[dict[str, object]] = []
     attempts = []
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"retry-zip",
-    )
+    bundle = _valid_bundle(json_data=b'{"export":"retry"}')
 
     def flaky_export(record, *, visit, exported_at):
         attempts.append(copy.deepcopy(record))
@@ -1079,12 +1263,47 @@ def test_export_failure_is_neutral_retryable_and_preserves_responses(monkeypatch
     assert len(app.get("download_button")) == 1
 
 
-def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch):
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"finish-zip",
+@pytest.mark.parametrize("invalid_bundle", _invalid_bundles())
+def test_invalid_built_export_is_neutral_retryable_and_preserves_answers(
+    monkeypatch,
+    invalid_bundle,
+):
+    attempts: list[dict[str, object]] = []
+    valid_bundle = _valid_bundle(json_data=b'{"retry":"valid"}')
+
+    def invalid_then_valid(record, *, visit, exported_at):
+        attempts.append(copy.deepcopy(record))
+        return invalid_bundle if len(attempts) == 1 else valid_bundle
+
+    app, _ = _signed_app(
+        monkeypatch,
+        status=_saved_status(),
+        render_questionnaire=_complete_renderer([]),
+        build_export=invalid_then_valid,
     )
+
+    assert not app.exception
+    visible = _visible_app_text(app)
+    assert "下载文件暂时无法生成，请重试。" in visible
+    assert "BadZipFile" not in visible
+    assert "subject-sub-001.zip" not in visible
+    retained = copy.deepcopy(app.session_state["operational_record"]["daily_core"])
+    assert retained == _minimal_daily_answers()
+    assert "operational_export_bundle" not in app.session_state
+    assert not app.get("download_button")
+    assert not [button for button in app.button if button.label == "完成本次会话"]
+
+    _element_by_label(app.button, "重试生成下载文件").click().run()
+
+    assert not app.exception
+    assert len(attempts) == 2
+    assert app.session_state["operational_record"]["daily_core"] == retained
+    assert app.session_state["operational_export_bundle"] is valid_bundle
+    assert len(app.get("download_button")) == 1
+
+
+def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch):
+    bundle = _valid_bundle(json_data=b'{"finish":"signed"}')
     app, _ = _signed_app(
         monkeypatch,
         status=_saved_status(),
@@ -1128,11 +1347,7 @@ def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch
 
 
 def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatch):
-    bundle = LocalExportBundle(
-        filename="session-20260724-080910.zip",
-        mime_type="application/zip",
-        data=b"admin-finish-zip",
-    )
+    bundle = _valid_bundle(json_data=b'{"finish":"admin"}')
     app = _admin_app(
         monkeypatch,
         status=_saved_status(),
@@ -1186,6 +1401,151 @@ def test_admin_completion_does_not_short_circuit_valid_signed_request(monkeypatc
     assert "operational_complete" not in app.session_state
     assert app.session_state["operational_record"]["subject_id"] == "sub-002"
     assert len(recorder_calls) == 1
+
+
+def test_admin_to_signed_same_context_clears_every_operational_phase(monkeypatch):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(mode="long", state="recording"),
+    )
+    original = copy.deepcopy(app.session_state["operational_record"])
+    for key, value in _operational_phase_state(original).items():
+        app.session_state[key] = copy.deepcopy(value)
+    app.session_state["authed"] = True
+    app.session_state["auth_source"] = "admin"
+
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["authed"] is True
+    assert app.session_state["auth_source"] == "signed_link"
+    assert app.session_state["subject_id"] == "sub-001"
+    assert app.session_state["visit"] == "daily"
+    assert app.session_state["participant_identifier"] == "sub-001"
+    assert app.session_state["operational_record"]["record_id"] != original[
+        "record_id"
+    ]
+    assert len(recorder_calls) == 2
+    _assert_stale_phase_state_cleared(app)
+    assert not app.get("download_button")
+
+
+def test_signed_to_admin_same_context_clears_phase_before_login(monkeypatch):
+    app, _ = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(mode="long", state="recording"),
+    )
+    original = copy.deepcopy(app.session_state["operational_record"])
+    for key, value in _operational_phase_state(original).items():
+        app.session_state[key] = copy.deepcopy(value)
+    admin_scope = hashlib.sha256(
+        f"sub-001|{original['record_date']}".encode("utf-8")
+    ).hexdigest()[:12]
+    selection_key = f"operational_admin_day::{admin_scope}::selection"
+    confirmation_key = f"operational_admin_day::{admin_scope}::confirmation"
+    app.session_state[selection_key] = 6
+    app.session_state[confirmation_key] = 6
+    app.secrets["APP_PASSWORD_SHA256"] = hashlib.sha256(
+        b"admin-password"
+    ).hexdigest()
+    app.query_params.clear()
+
+    app.run()
+
+    assert not app.exception
+    _assert_stale_phase_state_cleared(app)
+    assert selection_key not in app.session_state
+    assert confirmation_key not in app.session_state
+    assert "operational_record" not in app.session_state
+    assert "participant_identifier" not in app.session_state
+    _element_by_label(app.text_input, "访问密码").set_value("admin-password")
+    _element_by_label(app.button, "登录").click().run()
+
+    assert not app.exception
+    assert app.session_state["authed"] is True
+    assert app.session_state["auth_source"] == "admin"
+    assert "operational_record" not in app.session_state
+    assert not app.get("download_button")
+    assert _element_by_label(app.button, "确认日期")
+
+
+def test_passwordless_manual_completion_cannot_short_circuit_new_signed_identity(
+    monkeypatch,
+):
+    original = _record()
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        subject_id="sub-002",
+        status=RecorderStatus(mode="long", state="recording"),
+        initial_state={
+            **_operational_phase_state(original),
+            "subject_id": "sub-001",
+            "visit": "daily",
+        },
+    )
+
+    assert not app.exception
+    assert app.session_state["authed"] is True
+    assert app.session_state["auth_source"] == "signed_link"
+    assert app.session_state["subject_id"] == "sub-002"
+    assert app.session_state["visit"] == "daily"
+    assert app.session_state["operational_record"]["record_id"] != original[
+        "record_id"
+    ]
+    assert len(recorder_calls) == 1
+    _assert_stale_phase_state_cleared(app)
+
+
+def test_legacy_signed_completion_same_identity_remains_complete(monkeypatch):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        initial_state={
+            "authed": True,
+            "subject_id": "sub-001",
+            "visit": "daily",
+            "operational_complete": True,
+        },
+    )
+
+    assert not app.exception
+    assert app.session_state["auth_source"] == "signed_link"
+    assert app.session_state["operational_complete"] is True
+    assert recorder_calls == []
+    assert _visible_app_text(app).strip().endswith("本次会话已完成。")
+
+
+@pytest.mark.parametrize(
+    ("target_subject", "target_visit"),
+    [("sub-002", "daily"), ("sub-001", "V1")],
+)
+def test_legacy_signed_completion_is_cleared_for_different_verified_identity(
+    monkeypatch,
+    target_subject,
+    target_visit,
+):
+    original = _record()
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        subject_id=target_subject,
+        visit=target_visit,
+        status=RecorderStatus(mode="long", state="recording"),
+        initial_state={
+            **_operational_phase_state(original),
+            "authed": True,
+            "subject_id": "sub-001",
+            "visit": "daily",
+        },
+    )
+
+    assert not app.exception
+    assert app.session_state["auth_source"] == "signed_link"
+    assert app.session_state["subject_id"] == target_subject
+    assert app.session_state["visit"] == target_visit
+    assert app.session_state["operational_record"]["record_id"] != original[
+        "record_id"
+    ]
+    assert len(recorder_calls) == 1
+    _assert_stale_phase_state_cleared(app)
 
 
 def test_signed_completion_is_cleared_before_admin_login():
@@ -1473,10 +1833,8 @@ def test_participant_visible_tree_does_not_render_bundle_name_or_internal_payloa
     monkeypatch,
 ):
     sentinel = "PARTICIPANT-PRIVATE-7F31"
-    bundle = LocalExportBundle(
-        filename=f"{sentinel}.zip",
-        mime_type="application/zip",
-        data=sentinel.encode("ascii"),
+    bundle = _valid_bundle(
+        json_data=json.dumps({"sentinel": sentinel}).encode("ascii")
     )
     app, _ = _signed_app(
         monkeypatch,

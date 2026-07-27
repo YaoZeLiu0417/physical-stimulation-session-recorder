@@ -8,9 +8,12 @@ import copy
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Any
+from zipfile import ZipFile
 
 import streamlit as st
 
@@ -74,6 +77,72 @@ _OWNED_PREFIXES = (
     "operational_recording_continue::",
 )
 _FINISH_PREFIXES = (*_OWNED_PREFIXES, "operational_admin_day::")
+_EXPORT_FILENAME_RE = re.compile(
+    r"session-(\d{8})-(\d{6})\.zip\Z",
+    re.ASCII,
+)
+_EXPORT_MEMBERS = ("responses.json", "responses.xlsx")
+
+
+def _has_operational_phase_state(state: Any) -> bool:
+    return any(key in state for key in _FINISH_EXACT_KEYS) or any(
+        isinstance(key, str)
+        and any(key.startswith(prefix) for prefix in _FINISH_PREFIXES)
+        for key in state
+    )
+
+
+def _normalized_auth_role(state: Any) -> str | None:
+    source = state.get("auth_source")
+    if source in {"admin", "signed_link"}:
+        return source
+    if (
+        source is None
+        and state.get("authed") is True
+        and ("subject_id" in state or "visit" in state)
+    ):
+        return "signed_link"
+    if _has_operational_phase_state(state):
+        return "manual"
+    return None
+
+
+def _clear_operational_phase_state() -> None:
+    clear_owned_session_state(
+        st.session_state,
+        exact_keys=_FINISH_EXACT_KEYS,
+        prefixes=_FINISH_PREFIXES,
+    )
+
+
+def _valid_export_bundle(value: object) -> bool:
+    if type(value) is not LocalExportBundle:
+        return False
+    if (
+        type(value.filename) is not str
+        or type(value.mime_type) is not str
+        or value.mime_type != "application/zip"
+        or type(value.data) is not bytes
+    ):
+        return False
+    match = _EXPORT_FILENAME_RE.fullmatch(value.filename)
+    if match is None:
+        return False
+    try:
+        parsed = datetime.strptime(
+            "".join(match.groups()),
+            "%Y%m%d%H%M%S",
+        )
+        if value.filename != f"session-{parsed:%Y%m%d-%H%M%S}.zip":
+            return False
+        with ZipFile(BytesIO(value.data), mode="r") as archive:
+            if tuple(archive.namelist()) != _EXPORT_MEMBERS:
+                return False
+            if archive.testzip() is not None:
+                return False
+    except Exception:
+        return False
+    return True
 
 
 st.set_page_config(
@@ -131,7 +200,7 @@ def verify_link_params() -> tuple[VerifiedLink | None, str, bool]:
     return verified, "", attempted
 
 
-previous_auth_source = st.session_state.get("auth_source")
+previous_auth_role = _normalized_auth_role(st.session_state)
 previous_signed_context = (
     st.session_state.get("subject_id"),
     st.session_state.get("visit"),
@@ -142,20 +211,20 @@ invalid_signed_link = reconcile_link_auth_state(
     verified_link,
     signed_link_attempted=signed_link_attempted,
 )
-current_auth_source = st.session_state.get("auth_source")
+current_auth_role = _normalized_auth_role(st.session_state)
 auth_role_changed = (
-    previous_auth_source in {"admin", "signed_link"}
-    and previous_auth_source != current_auth_source
+    previous_auth_role is not None
+    and previous_auth_role != current_auth_role
 )
 signed_identity_changed = (
     verified_link is not None
-    and previous_auth_source == "signed_link"
+    and previous_auth_role == "signed_link"
+    and current_auth_role == "signed_link"
     and previous_signed_context
     != (verified_link.subject_id, verified_link.visit)
 )
 if auth_role_changed or signed_identity_changed:
-    st.session_state.pop(_COMPLETE_KEY, None)
-    st.session_state.pop("participant_identifier", None)
+    _clear_operational_phase_state()
 
 
 def require_app_password() -> None:
@@ -197,11 +266,7 @@ def _clear_current_session() -> None:
 
 def _finish_current_session() -> None:
     auth_source = st.session_state.get("auth_source")
-    clear_owned_session_state(
-        st.session_state,
-        exact_keys=_FINISH_EXACT_KEYS,
-        prefixes=_FINISH_PREFIXES,
-    )
+    _clear_operational_phase_state()
     if auth_source == "admin":
         st.session_state.pop("subject_id", None)
         st.session_state.pop("visit", None)
@@ -376,13 +441,11 @@ if not session_record_matches(
     st.session_state[_RECORD_KEY] = record
 
 cached_bundle = st.session_state.get(_EXPORT_KEY)
-if cached_bundle is not None and not isinstance(
-    cached_bundle,
-    LocalExportBundle,
-):
+cached_bundle_is_valid = _valid_export_bundle(cached_bundle)
+if cached_bundle is not None and not cached_bundle_is_valid:
     st.session_state.pop(_EXPORT_KEY, None)
     st.session_state.pop(_SAVED_LOCALLY_KEY, None)
-elif isinstance(cached_bundle, LocalExportBundle):
+elif cached_bundle_is_valid:
     _render_export_finalization(cached_bundle)
     st.stop()
 
@@ -590,7 +653,7 @@ def save_questionnaire_draft(
     updated_answers: dict[str, Any],
     answered_field_ids: set[str],
 ) -> None:
-    if isinstance(st.session_state.get(_EXPORT_KEY), LocalExportBundle):
+    if _valid_export_bundle(st.session_state.get(_EXPORT_KEY)):
         return
     current_step = int(st.session_state.get(state_keys.step, 0))
     if visit == "daily":
@@ -672,7 +735,7 @@ if bundle is None:
             visit=visit,
             exported_at=_utc_now(),
         )
-        if not isinstance(bundle, LocalExportBundle):
+        if not _valid_export_bundle(bundle):
             raise TypeError("export builder returned an invalid bundle")
     except Exception:
         st.session_state[_EXPORT_ERROR_KEY] = True
