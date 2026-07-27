@@ -1,7 +1,7 @@
 import ast
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from io import BytesIO
 import json
 import math
@@ -248,6 +248,150 @@ def test_workbook_writes_approved_date_like_cells_as_typed_values() -> None:
     assert worksheet["D2"].value == timedelta(hours=1, minutes=2, seconds=3)
 
 
+def test_excel_date_and_datetime_boundaries_round_trip_exactly() -> None:
+    maximum_datetime = datetime(9999, 12, 31, 23, 59, 59, 999_000)
+    values = {
+        "minimum_date": date(1900, 1, 1),
+        "modern_date": date(2026, 7, 27),
+        "maximum_date": date.max,
+        "minimum_datetime": datetime(1900, 1, 1),
+        "minimum_datetime_with_time": datetime(1900, 1, 1, 12, 30, 45, 123_000),
+        "modern_datetime": datetime(2026, 7, 27, 10, 30, 15, 123_000),
+        "maximum_datetime": maximum_datetime,
+        "normalized_minimum": datetime(
+            1900,
+            1,
+            1,
+            8,
+            tzinfo=timezone(timedelta(hours=8)),
+        ),
+    }
+
+    worksheet = _load_workbook(
+        _build_bundle(sheets={"Dates": [values]})
+    )["Dates"]
+
+    assert [cell.value for cell in worksheet[2]] == [
+        datetime(1900, 1, 1),
+        datetime(2026, 7, 27),
+        datetime(9999, 12, 31),
+        datetime(1900, 1, 1),
+        datetime(1900, 1, 1, 12, 30, 45, 123_000),
+        datetime(2026, 7, 27, 10, 30, 15, 123_000),
+        maximum_datetime,
+        datetime(1900, 1, 1),
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        date.min,
+        date(1899, 12, 31),
+        datetime.min,
+        datetime(1899, 12, 31, 23, 59, 59, 999_000),
+        datetime(2026, 7, 27, 10, 30, 15, 123_456),
+        datetime.max,
+    ],
+)
+def test_unrepresentable_or_submillisecond_dates_fail_before_workbook_creation(
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="Excel|millisecond"):
+        _build_bundle(sheets={"Dates": [{"value": value}]})
+
+
+class _FailingTimezone(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        raise RuntimeError("private timezone failure")
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14))),
+        datetime.max.replace(tzinfo=timezone(timedelta(hours=-14))),
+        datetime(2026, 7, 27, tzinfo=_FailingTimezone()),
+    ],
+)
+def test_timezone_normalization_failures_are_sanitized_before_workbook_creation(
+    value: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="datetime") as error:
+        _build_bundle(sheets={"Dates": [{"value": value}]})
+    assert "private timezone failure" not in str(error.value)
+
+
+def test_time_and_timedelta_representable_boundaries_round_trip_exactly() -> None:
+    maximum_duration = timedelta(
+        days=2_958_465,
+        seconds=86_399,
+        microseconds=999_000,
+    )
+    values = {
+        "minimum_time": time.min,
+        "modern_time": time(10, 30, 15, 123_000),
+        "maximum_time": time(23, 59, 59, 999_000),
+        "minimum_duration": -maximum_duration,
+        "negative_duration": timedelta(milliseconds=-1),
+        "zero_duration": timedelta(0),
+        "modern_duration": timedelta(days=30, milliseconds=123),
+        "maximum_duration": maximum_duration,
+    }
+
+    worksheet = _load_workbook(
+        _build_bundle(sheets={"Dates": [values]})
+    )["Dates"]
+
+    assert [cell.value for cell in worksheet[2]] == list(values.values())
+    assert [type(cell.value) for cell in worksheet[2]] == [
+        time,
+        time,
+        time,
+        timedelta,
+        timedelta,
+        timedelta,
+        timedelta,
+        timedelta,
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        time(10, 30, 15, 123_456),
+        time.max,
+        timedelta(microseconds=1),
+        timedelta(microseconds=-1),
+        timedelta(
+            days=2_958_466,
+        ),
+        timedelta(days=-2_958_466),
+        timedelta.max,
+    ],
+)
+def test_time_and_timedelta_values_that_cannot_round_trip_are_rejected(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="Excel|millisecond"):
+        _build_bundle(sheets={"Dates": [{"value": value}]})
+
+
 def test_formula_and_url_like_text_stays_plain_and_json_stays_raw() -> None:
     raw_values = [
         "=1+1",
@@ -337,6 +481,10 @@ def test_case_insensitive_normalized_duplicate_sheet_names_are_rejected(
         "session ",
         "会话",
         "a" * 65,
+        "participant-sub-001",
+        "study-tavns",
+        "intervention-day-7",
+        "export",
     ],
 )
 def test_unsafe_filename_prefixes_are_rejected(prefix: str) -> None:
@@ -348,6 +496,27 @@ def test_safe_custom_filename_prefix_is_supported() -> None:
     bundle = _build_bundle(filename_prefix="synthetic-session")
 
     assert bundle.filename == "synthetic-session-20260727-103000.zip"
+
+
+def test_empty_containers_consume_one_shared_cumulative_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 6)
+
+    _build_bundle(snapshot={}, sheets={"Data": [{}, {}]})
+    with pytest.raises(ValueError, match="too many values"):
+        _build_bundle(snapshot={}, sheets={"Data": [{}, {}, {}]})
+
+
+def test_empty_worksheets_consume_the_shared_cumulative_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 4)
+    _build_bundle(snapshot={}, sheets={"Only": []})
+
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 5)
+    with pytest.raises(ValueError, match="too many values"):
+        _build_bundle(snapshot={}, sheets={"First": [], "Second": []})
 
 
 @pytest.mark.parametrize(

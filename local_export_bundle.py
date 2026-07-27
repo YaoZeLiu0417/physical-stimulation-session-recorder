@@ -4,14 +4,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 import json
 import math
-import re
 import unicodedata
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import xlsxwriter
 
 
-_MAX_PREFIX_LENGTH = 64
 _MAX_JSON_DEPTH = 64
 _MAX_CONTAINER_ITEMS = 100_000
 _MAX_TOTAL_VALUES = 1_000_000
@@ -19,7 +17,15 @@ _MAX_EXCEL_TEXT_LENGTH = 32_767
 _MAX_EXACT_EXCEL_INTEGER = (1 << 53) - 1
 _FIXED_ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _FIXED_WORKBOOK_TIMESTAMP = datetime(2000, 1, 1)
-_PREFIX_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
+_MIN_EXCEL_DATE = date(1900, 1, 1)
+_MAX_EXCEL_DATETIME = datetime(9999, 12, 31, 23, 59, 59, 999_000)
+_MAX_EXCEL_TIMEDELTA = timedelta(
+    days=2_958_465,
+    seconds=86_399,
+    microseconds=999_000,
+)
+_MIN_EXCEL_TIMEDELTA = -_MAX_EXCEL_TIMEDELTA
+_ALLOWED_FILENAME_PREFIXES = frozenset({"session", "synthetic-session"})
 _FORBIDDEN_SHEET_CHARACTERS = frozenset("[]:*?/\\")
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
 
@@ -142,28 +148,68 @@ def _copy_cell_value(
 ) -> object:
     if isinstance(value, datetime):
         state.count()
-        offset = value.utcoffset()
-        if offset is not None:
-            return value.astimezone(timezone.utc).replace(tzinfo=None)
-        return value
+        try:
+            offset = value.utcoffset()
+            normalized = (
+                value.astimezone(timezone.utc).replace(tzinfo=None)
+                if offset is not None
+                else value.replace(tzinfo=None)
+            )
+        except Exception:
+            raise ValueError(
+                f"{context} datetime could not be normalized safely"
+            ) from None
+        if normalized.date() < _MIN_EXCEL_DATE:
+            raise ValueError(
+                f"{context} datetime is outside the Excel 1900 date range"
+            )
+        if normalized > _MAX_EXCEL_DATETIME:
+            raise ValueError(
+                f"{context} datetime is outside the Excel 1900 date range"
+            )
+        if normalized.microsecond % 1_000:
+            raise ValueError(
+                f"{context} datetime must use millisecond precision"
+            )
+        return normalized
     if isinstance(value, date):
         state.count()
+        if value < _MIN_EXCEL_DATE:
+            raise ValueError(
+                f"{context} date is outside the Excel 1900 date range"
+            )
         return value
     if isinstance(value, time):
         state.count()
-        if value.utcoffset() is not None:
+        try:
+            offset = value.utcoffset()
+        except Exception:
+            raise ValueError(f"{context} time could not be validated safely") from None
+        if offset is not None:
             raise ValueError(f"{context} timezone-aware time values are unsupported")
-        return value
+        if value.microsecond % 1_000:
+            raise ValueError(f"{context} time must use millisecond precision")
+        return value.replace(tzinfo=None)
     if isinstance(value, timedelta):
         state.count()
+        if value.microseconds % 1_000:
+            raise ValueError(f"{context} duration must use millisecond precision")
+        if not _MIN_EXCEL_TIMEDELTA <= value <= _MAX_EXCEL_TIMEDELTA:
+            raise ValueError(
+                f"{context} duration is outside the representable Excel range"
+            )
         return value
     return _copy_json_value(value, state=state, depth=0, context=context)
 
 
-def _canonical_json_bytes(snapshot: Mapping[str, object]) -> bytes:
+def _canonical_json_bytes(
+    snapshot: Mapping[str, object],
+    *,
+    state: _ValidationState,
+) -> bytes:
     copied = _copy_json_value(
         snapshot,
-        state=_ValidationState(),
+        state=state,
         depth=0,
         context="snapshot",
     )
@@ -233,6 +279,8 @@ def _validate_sheet_name(name: object, normalized_names: set[str]) -> str:
 
 def _prepare_sheets(
     sheets: Mapping[str, Sequence[Mapping[str, object]]],
+    *,
+    state: _ValidationState,
 ) -> list[tuple[str, list[str], list[dict[str, object]]]]:
     if not isinstance(sheets, Mapping):
         raise TypeError("sheets must be a mapping")
@@ -241,67 +289,83 @@ def _prepare_sheets(
     if len(sheets) > _MAX_CONTAINER_ITEMS:
         raise ValueError("sheets contains too many worksheets")
 
-    state = _ValidationState()
     normalized_names: set[str] = set()
     prepared: list[tuple[str, list[str], list[dict[str, object]]]] = []
-    for raw_name, raw_rows in sheets.items():
-        name = _validate_sheet_name(raw_name, normalized_names)
-        if not isinstance(raw_rows, Sequence) or isinstance(
-            raw_rows,
-            (str, bytes, bytearray),
-        ):
-            raise TypeError(f"rows for sheet {name!r} must be a sequence")
-        rows_identifier = _enter_container(
-            raw_rows,
-            state=state,
-            depth=0,
-            context=f"sheet {name!r} rows",
-        )
-        headers: list[str] = []
-        header_names: set[str] = set()
-        copied_rows: list[dict[str, object]] = []
-        try:
-            for row_index, raw_row in enumerate(raw_rows):
-                if not isinstance(raw_row, Mapping):
-                    raise TypeError(f"sheet {name!r} row {row_index} must be a mapping")
-                row_identifier = _enter_container(
-                    raw_row,
-                    state=state,
-                    depth=0,
-                    context=f"sheet {name!r} row {row_index}",
-                )
-                copied_row: dict[str, object] = {}
-                try:
-                    for key, value in raw_row.items():
-                        if not isinstance(key, str):
-                            raise TypeError(
-                                f"sheet {name!r} row keys must be strings"
-                            )
-                        _validate_unicode_text(key, context="worksheet header")
-                        _excel_text(key)
-                        if key in copied_row:
-                            raise ValueError(
-                                f"sheet {name!r} row contains a duplicate key"
-                            )
-                        copied_value = _copy_cell_value(
-                            value,
-                            state=state,
-                            context=f"sheet {name!r} row {row_index} cell {key!r}",
+    state.count()
+    sheets_identifier = _enter_container(
+        sheets,
+        state=state,
+        depth=0,
+        context="sheets",
+    )
+    try:
+        for raw_name, raw_rows in sheets.items():
+            state.count()
+            name = _validate_sheet_name(raw_name, normalized_names)
+            if not isinstance(raw_rows, Sequence) or isinstance(
+                raw_rows,
+                (str, bytes, bytearray),
+            ):
+                raise TypeError(f"rows for sheet {name!r} must be a sequence")
+            state.count()
+            rows_identifier = _enter_container(
+                raw_rows,
+                state=state,
+                depth=0,
+                context=f"sheet {name!r} rows",
+            )
+            headers: list[str] = []
+            header_names: set[str] = set()
+            copied_rows: list[dict[str, object]] = []
+            try:
+                for row_index, raw_row in enumerate(raw_rows):
+                    if not isinstance(raw_row, Mapping):
+                        raise TypeError(
+                            f"sheet {name!r} row {row_index} must be a mapping"
                         )
-                        if isinstance(copied_value, str):
-                            _excel_text(copied_value)
-                        elif isinstance(copied_value, (dict, list)):
-                            _excel_text(_canonical_cell_json(copied_value))
-                        copied_row[key] = copied_value
-                        if key not in header_names:
-                            header_names.add(key)
-                            headers.append(key)
-                finally:
-                    state.active_container_ids.remove(row_identifier)
-                copied_rows.append(copied_row)
-        finally:
-            state.active_container_ids.remove(rows_identifier)
-        prepared.append((name, headers, copied_rows))
+                    state.count()
+                    row_identifier = _enter_container(
+                        raw_row,
+                        state=state,
+                        depth=0,
+                        context=f"sheet {name!r} row {row_index}",
+                    )
+                    copied_row: dict[str, object] = {}
+                    try:
+                        for key, value in raw_row.items():
+                            if not isinstance(key, str):
+                                raise TypeError(
+                                    f"sheet {name!r} row keys must be strings"
+                                )
+                            _validate_unicode_text(key, context="worksheet header")
+                            _excel_text(key)
+                            if key in copied_row:
+                                raise ValueError(
+                                    f"sheet {name!r} row contains a duplicate key"
+                                )
+                            copied_value = _copy_cell_value(
+                                value,
+                                state=state,
+                                context=(
+                                    f"sheet {name!r} row {row_index} cell {key!r}"
+                                ),
+                            )
+                            if isinstance(copied_value, str):
+                                _excel_text(copied_value)
+                            elif isinstance(copied_value, (dict, list)):
+                                _excel_text(_canonical_cell_json(copied_value))
+                            copied_row[key] = copied_value
+                            if key not in header_names:
+                                header_names.add(key)
+                                headers.append(key)
+                    finally:
+                        state.active_container_ids.remove(row_identifier)
+                    copied_rows.append(copied_row)
+            finally:
+                state.active_container_ids.remove(rows_identifier)
+            prepared.append((name, headers, copied_rows))
+    finally:
+        state.active_container_ids.remove(sheets_identifier)
     return prepared
 
 
@@ -334,12 +398,27 @@ def _write_cell(
     elif isinstance(value, float):
         result = worksheet.write_number(row, column, value, cell_format)
     elif isinstance(value, datetime):
-        result = worksheet.write_datetime(
-            row,
-            column,
-            value,
-            formats["datetime_accent" if column == 0 else "datetime"],
-        )
+        datetime_format = formats[
+            "datetime_accent" if column == 0 else "datetime"
+        ]
+        if value.date() == _MIN_EXCEL_DATE:
+            elapsed_milliseconds = (
+                ((value.hour * 60 + value.minute) * 60 + value.second) * 1_000
+                + value.microsecond // 1_000
+            )
+            result = worksheet.write_number(
+                row,
+                column,
+                1 + elapsed_milliseconds / 86_400_000,
+                datetime_format,
+            )
+        else:
+            result = worksheet.write_datetime(
+                row,
+                column,
+                value,
+                datetime_format,
+            )
     elif isinstance(value, date):
         result = worksheet.write_datetime(
             row,
@@ -537,11 +616,9 @@ def _validate_export_time(exported_at: datetime) -> None:
 def _validate_filename_prefix(filename_prefix: str) -> None:
     if not isinstance(filename_prefix, str):
         raise TypeError("filename_prefix must be a string")
-    if not 1 <= len(filename_prefix) <= _MAX_PREFIX_LENGTH:
-        raise ValueError("filename_prefix must contain between 1 and 64 characters")
-    if _PREFIX_PATTERN.fullmatch(filename_prefix) is None:
+    if filename_prefix not in _ALLOWED_FILENAME_PREFIXES:
         raise ValueError(
-            "filename_prefix must use lowercase ASCII letters, digits, and single hyphens"
+            "filename_prefix must be 'session' or 'synthetic-session'"
         )
 
 
@@ -568,8 +645,9 @@ def build_local_export_bundle(
     _validate_export_time(exported_at)
     _validate_filename_prefix(filename_prefix)
 
-    json_bytes = _canonical_json_bytes(snapshot)
-    prepared_sheets = _prepare_sheets(sheets)
+    validation_state = _ValidationState()
+    json_bytes = _canonical_json_bytes(snapshot, state=validation_state)
+    prepared_sheets = _prepare_sheets(sheets, state=validation_state)
     workbook_bytes = _build_workbook_bytes(prepared_sheets)
 
     archive_output = BytesIO()
