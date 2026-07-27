@@ -1,5 +1,6 @@
 import ast
 from datetime import date
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -52,6 +53,8 @@ RECORDING_KEYS = (
 ALLOWED_RUNTIME_CACHE_DIRS = frozenset(
     {".pytest_cache", ".streamlit", "__pycache__"}
 )
+CACHE_SCAN_LIMIT_BYTES = 8 * 1024 * 1024
+FILE_HASH_CHUNK_BYTES = 64 * 1024
 FORBIDDEN_PARTICIPANT_TERMS = frozenset(
     {
         "derived",
@@ -178,8 +181,10 @@ QUESTIONNAIRE_FIELD_IDS = frozenset(
 )
 PARTICIPANT_DATA_MARKERS = frozenset(
     PARTICIPANT_DATA_IDENTIFIERS
+    | DAILY_CONTEXT_SIGNATURE_FIELD_IDS
     | NSSI_DAILY_CONTEXT_FIELD_IDS
     | PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS
+    | PRIVATE_EXPORT_IDENTIFIERS
     | QUESTIONNAIRE_FIELD_IDS
 )
 PARTICIPANT_DATA_BYTE_PATTERN = re.compile(
@@ -198,17 +203,19 @@ PARTICIPANT_DATA_BYTE_PATTERN = re.compile(
 
 def _json_participant_marker(value) -> str | None:
     if isinstance(value, dict):
-        normalized_keys = {str(key).casefold() for key in value}
-        context_keys = normalized_keys & DAILY_CONTEXT_FIELD_IDS
+        normalized_keys = {
+            _privacy_tokens(str(key)) for key in value
+        }
+        context_keys = normalized_keys & DAILY_CONTEXT_FIELD_ID_TOKENS
         if (
             len(context_keys) >= 2
-            and context_keys & DAILY_CONTEXT_SIGNATURE_FIELD_IDS
+            and context_keys & DAILY_CONTEXT_SIGNATURE_FIELD_ID_TOKENS
         ):
             return "daily-context-section"
         for key, item in value.items():
-            normalized_key = str(key).casefold()
-            if normalized_key in PARTICIPANT_DATA_MARKERS:
-                return normalized_key
+            normalized_key = _privacy_tokens(str(key))
+            if normalized_key in PARTICIPANT_DATA_MARKER_TOKENS:
+                return "_".join(normalized_key)
             nested_marker = _json_participant_marker(item)
             if nested_marker is not None:
                 return nested_marker
@@ -218,9 +225,9 @@ def _json_participant_marker(value) -> str | None:
             if nested_marker is not None:
                 return nested_marker
     elif isinstance(value, str):
-        normalized_value = value.casefold()
-        if normalized_value in PARTICIPANT_DATA_MARKERS:
-            return normalized_value
+        normalized_value = _privacy_tokens(value)
+        if normalized_value in PARTICIPANT_DATA_MARKER_TOKENS:
+            return "_".join(normalized_value)
     return None
 
 
@@ -231,6 +238,36 @@ def _is_standard_pytest_nodeids(relative: Path, value) -> bool:
         and isinstance(value, list)
         and all(isinstance(item, str) for item in value)
     )
+
+
+def _is_runtime_cache_path(relative: Path) -> bool:
+    return bool(
+        ALLOWED_RUNTIME_CACHE_DIRS.intersection(
+            part.casefold() for part in relative.parts
+        )
+    )
+
+
+def _read_cache_bytes(path: Path, relative: Path) -> bytes:
+    assert path.stat().st_size <= CACHE_SCAN_LIMIT_BYTES, (
+        f"cache file exceeds scan limit: {relative.as_posix()}"
+    )
+    with path.open("rb") as stream:
+        data = stream.read(CACHE_SCAN_LIMIT_BYTES + 1)
+    assert len(data) <= CACHE_SCAN_LIMIT_BYTES, (
+        f"cache file exceeds scan limit: {relative.as_posix()}"
+    )
+    return data
+
+
+def _stream_file_fingerprint(path: Path) -> dict[str, object]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(FILE_HASH_CHUNK_BYTES):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
@@ -257,9 +294,11 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
         return "store index"
     if path_tokens & PARTICIPANT_ARTIFACT_NAME_TOKENS:
         return "participant artifact name"
-    data = path.read_bytes()
+    if not _is_runtime_cache_path(relative):
+        return None
+    data = _read_cache_bytes(path, relative)
     try:
-        json_value = json.loads(data.decode("utf-8-sig"))
+        json_value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError):
         match = PARTICIPANT_DATA_BYTE_PATTERN.search(data)
         if match is not None:
@@ -283,7 +322,7 @@ def _operational_side_effect_snapshot(root: Path) -> dict[str, object]:
             f"participant artifact detected at {relative.as_posix()}: "
             f"{artifact_reason}"
         )
-        if ALLOWED_RUNTIME_CACHE_DIRS.intersection(relative.parts):
+        if _is_runtime_cache_path(relative):
             continue
         key = relative.as_posix()
         if path.is_symlink():
@@ -291,7 +330,7 @@ def _operational_side_effect_snapshot(root: Path) -> dict[str, object]:
         elif path.is_dir():
             snapshot[key] = ("directory", None)
         else:
-            snapshot[key] = ("file", path.read_bytes())
+            snapshot[key] = ("file", _stream_file_fingerprint(path))
     return snapshot
 
 
@@ -536,11 +575,42 @@ def _surface_strings(value):
 
 def _privacy_tokens(value: str) -> tuple[str, ...]:
     separated = re.sub(
-        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|"
+        r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])",
         " ",
         value,
     )
     return tuple(re.findall(r"[a-z0-9]+", separated.casefold()))
+
+
+PARTICIPANT_DATA_MARKER_TOKENS = frozenset(
+    _privacy_tokens(marker) for marker in PARTICIPANT_DATA_MARKERS
+)
+DAILY_CONTEXT_FIELD_ID_TOKENS = frozenset(
+    _privacy_tokens(identifier) for identifier in DAILY_CONTEXT_FIELD_IDS
+)
+DAILY_CONTEXT_SIGNATURE_FIELD_ID_TOKENS = frozenset(
+    _privacy_tokens(identifier)
+    for identifier in DAILY_CONTEXT_SIGNATURE_FIELD_IDS
+)
+PRIVATE_EXPORT_IDENTIFIER_TOKENS = frozenset(
+    _privacy_tokens(identifier)
+    for identifier in PRIVATE_EXPORT_IDENTIFIERS
+)
+
+
+def _private_identifier_matches(strings) -> set[str]:
+    matches: set[str] = set()
+    for value in strings:
+        tokens = _privacy_tokens(value)
+        for private_tokens in PRIVATE_EXPORT_IDENTIFIER_TOKENS:
+            width = len(private_tokens)
+            if any(
+                tokens[index : index + width] == private_tokens
+                for index in range(len(tokens) - width + 1)
+            ):
+                matches.add("_".join(private_tokens))
+    return matches
 
 
 def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
@@ -568,14 +638,7 @@ def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
             f"{label} exposes forbidden participant terms: "
             f"{sorted(forbidden_terms)}"
         )
-        identifiers = {
-            identifier
-            for value in strings
-            for identifier in re.findall(
-                r"[a-z0-9]+(?:_[a-z0-9]+)*", value.casefold()
-            )
-        }
-        private_identifiers = identifiers & PRIVATE_EXPORT_IDENTIFIERS
+        private_identifiers = _private_identifier_matches(strings)
         assert not private_identifiers, (
             f"{label} exposes private identifiers: "
             f"{sorted(private_identifiers)}"
@@ -618,7 +681,10 @@ def test_participant_privacy_tokens_cover_identifier_styles(sensitive_text):
 
 def test_participant_privacy_tokens_do_not_match_innocent_substrings():
     class VisibleSurface:
-        main = "scorecard brisk thresholding pathways preupload"
+        main = (
+            "scorecard brisk thresholding pathways preupload recording "
+            "identities rawhide formalities safetywise videography filenames"
+        )
         sidebar = ""
 
         def __getattr__(self, name):
@@ -632,6 +698,52 @@ def test_participant_privacy_tokens_do_not_match_innocent_substrings():
         {},
         EmptyWorkbook(),
     )
+
+
+@pytest.mark.parametrize(
+    "private_identifier",
+    (
+        "recordId",
+        "rawAnswers",
+        "formalVisits",
+        "safetySignals",
+        "videoFilename",
+        "RecordId",
+        "RawAnswers",
+        "FormalVisits",
+        "SafetySignals",
+        "VideoFilename",
+        "record-id",
+        "raw-answers",
+        "formal-visits",
+        "safety-signals",
+        "video-filename",
+        "record id",
+        "raw answers",
+        "formal visits",
+        "safety signals",
+        "video filename",
+    ),
+)
+def test_participant_privacy_rejects_private_identifier_styles(
+    private_identifier,
+):
+    class VisibleSurface:
+        main = private_identifier
+        sidebar = ""
+
+        def __getattr__(self, name):
+            return ()
+
+    class EmptyWorkbook:
+        worksheets = ()
+
+    with pytest.raises(AssertionError, match="private identifiers"):
+        _assert_participant_surfaces_are_raw_only(
+            VisibleSurface(),
+            {},
+            EmptyWorkbook(),
+        )
 
 
 def test_visible_text_collector_captures_every_structured_render_channel(tmp_path):
@@ -803,6 +915,46 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
         ),
         pytest.param(
             ".streamlit/cache.json",
+            b'{"participantId":"sub-001"}',
+            id="camel-case-participant-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            '{"participant_id":"sub-001"}'.encode("utf-16le"),
+            id="utf16-participant-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"rawAnswers":{"item":"private"}}',
+            id="private-export-camel-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            '{"videoFilename":"private.webm"}'.encode("utf-16le"),
+            id="private-export-utf16-camel-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"nssiUrge0to10":4}',
+            id="numeric-camel-questionnaire-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"mood1to9":4}',
+            id="numeric-camel-daily-context-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"pain0to10":4}',
+            id="numeric-camel-pain-json",
+        ),
+        pytest.param(
+            ".Streamlit/cache.json",
+            b'{"participantId":"sub-001"}',
+            id="mixed-case-cache-directory",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
             b'{"value":{"nssi_urge_now":3}}',
             id="questionnaire-field-json",
         ),
@@ -939,6 +1091,106 @@ def test_common_diagnostics_json_is_not_participant_data(tmp_path, diagnostics):
     )
 
     assert _operational_side_effect_snapshot(tmp_path) == before
+
+
+def test_large_noncache_file_uses_streaming_fingerprint(tmp_path, monkeypatch):
+    large_file = tmp_path / "neutral-cache-fixture.dat"
+    size = 12 * 1024 * 1024 + 123
+    with large_file.open("wb") as stream:
+        stream.seek(size - 1)
+        stream.write(b"\0")
+
+    original_read_bytes = Path.read_bytes
+
+    def reject_large_read_bytes(path):
+        if path == large_file:
+            raise AssertionError("large noncache file must be streamed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_large_read_bytes)
+    original_open = Path.open
+    open_count = 0
+    read_sizes = []
+
+    class TrackingReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            assert 0 < size <= FILE_HASH_CHUNK_BYTES
+            return self.stream.read(size)
+
+        def seek(self, *args, **kwargs):
+            raise AssertionError("large noncache file must use one traversal")
+
+    def track_large_file_open(path, *args, **kwargs):
+        nonlocal open_count
+        stream = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path != large_file or mode != "rb":
+            return stream
+        open_count += 1
+        return TrackingReader(stream)
+
+    monkeypatch.setattr(Path, "open", track_large_file_open)
+    digest = hashlib.sha256()
+    remaining = size
+    zero_chunk = b"\0" * (64 * 1024)
+    while remaining:
+        chunk = zero_chunk[: min(remaining, len(zero_chunk))]
+        digest.update(chunk)
+        remaining -= len(chunk)
+
+    snapshot = _operational_side_effect_snapshot(tmp_path)
+
+    assert snapshot[large_file.name] == (
+        "file",
+        {"size": size, "sha256": digest.hexdigest()},
+    )
+    assert open_count == 1
+    assert len(read_sizes) > 1
+    assert set(read_sizes) == {FILE_HASH_CHUNK_BYTES}
+
+
+def test_oversized_cache_file_fails_closed(tmp_path):
+    oversized = tmp_path / ".streamlit/cache.bin"
+    oversized.parent.mkdir(parents=True, exist_ok=True)
+    with oversized.open("wb") as stream:
+        stream.seek(8 * 1024 * 1024)
+        stream.write(b"\0")
+
+    with pytest.raises(AssertionError, match="cache file exceeds scan limit"):
+        _operational_side_effect_snapshot(tmp_path)
+
+
+def test_cache_growth_after_stat_fails_closed(tmp_path, monkeypatch):
+    oversized = tmp_path / ".streamlit/cache.bin"
+    oversized.parent.mkdir(parents=True, exist_ok=True)
+    with oversized.open("wb") as stream:
+        stream.seek(CACHE_SCAN_LIMIT_BYTES)
+        stream.write(b"\0")
+    small_file = tmp_path / "small.bin"
+    small_file.write_bytes(b"small")
+    stale_small_stat = small_file.stat()
+    original_stat = Path.stat
+
+    def stale_cache_stat(path, *args, **kwargs):
+        if path == oversized:
+            return stale_small_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stale_cache_stat)
+
+    with pytest.raises(AssertionError, match="cache file exceeds scan limit"):
+        _read_cache_bytes(oversized, Path(".streamlit/cache.bin"))
 
 
 @pytest.mark.parametrize(
