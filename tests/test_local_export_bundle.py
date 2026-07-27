@@ -6,6 +6,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
+import traceback
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import openpyxl
@@ -46,6 +47,19 @@ def _read_bundle(bundle: LocalExportBundle) -> tuple[dict[str, object], bytes]:
 def _load_workbook(bundle: LocalExportBundle) -> openpyxl.Workbook:
     _, workbook_bytes = _read_bundle(bundle)
     return openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=False)
+
+
+def _assert_exception_has_no_sentinel(error: BaseException, sentinel: str) -> None:
+    rendered = "".join(
+        traceback.TracebackException.from_exception(error).format(chain=True)
+    )
+    assert sentinel not in rendered
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        assert sentinel not in str(current)
+        current = current.__cause__ or current.__context__
 
 
 def test_bundle_has_exact_neutral_filename_mime_type_and_zip_member_order() -> None:
@@ -232,6 +246,25 @@ def test_generation_is_binary_deterministic_for_equal_canonical_inputs() -> None
 
     assert first == second
     assert first.data == second.data
+
+
+def test_all_inner_workbook_zip_timestamps_are_fixed() -> None:
+    bundle = _build_bundle(
+        sheets={
+            "Session": [{"key": "value"}],
+            "Responses": [{"item": "q1", "value": 1}],
+        }
+    )
+
+    with ZipFile(BytesIO(bundle.data), "r") as outer_archive:
+        workbook_bytes = outer_archive.read("responses.xlsx")
+    with ZipFile(BytesIO(workbook_bytes), "r") as workbook_archive:
+        members = workbook_archive.infolist()
+
+    assert members
+    assert {member.date_time for member in members} == {
+        (1980, 1, 1, 0, 0, 0)
+    }
 
 
 def test_workbook_preserves_sheet_and_first_seen_header_order_and_values() -> None:
@@ -499,6 +532,17 @@ class _FailingTimezone(tzinfo):
         return timedelta(0)
 
 
+class _HostileTimezone(tzinfo):
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        raise RuntimeError(self.sentinel)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -521,6 +565,60 @@ def test_timezone_normalization_failures_are_sanitized_before_workbook_creation(
     assert "private timezone failure" not in str(error.value)
 
 
+@pytest.mark.parametrize("location", ["snapshot_key", "sheet_name", "header"])
+def test_validation_errors_never_expose_caller_controlled_names(
+    location: str,
+) -> None:
+    sentinel = f"PRIVATE_{location.upper()}_7F3A"
+    snapshot: dict[str, object] = {"safe": "value"}
+    sheets: dict[str, list[dict[str, object]]] = {
+        "Safe": [{"safe": object()}]
+    }
+    if location == "snapshot_key":
+        snapshot = {sentinel: object()}
+        sheets = {"Safe": []}
+    elif location == "sheet_name":
+        snapshot = {}
+        sheets = {sentinel: [{"safe": object()}]}
+    elif location == "header":
+        snapshot = {}
+        sheets = {"Safe": [{sentinel: object()}]}
+
+    with pytest.raises((TypeError, ValueError)) as error:
+        _build_bundle(snapshot=snapshot, sheets=sheets)
+
+    _assert_exception_has_no_sentinel(error.value, sentinel)
+
+
+def test_cell_timezone_failure_has_no_caller_exception_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "PRIVATE_CELL_TIMEZONE_91C2"
+    value = datetime(2026, 7, 27, tzinfo=_HostileTimezone(sentinel))
+
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="datetime") as error:
+        _build_bundle(sheets={"Safe": [{"when": value}]})
+    _assert_exception_has_no_sentinel(error.value, sentinel)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_export_timezone_failure_has_no_caller_exception_chain() -> None:
+    sentinel = "PRIVATE_EXPORT_TIMEZONE_62D1"
+    exported_at = datetime(2026, 7, 27, tzinfo=_HostileTimezone(sentinel))
+
+    with pytest.raises(ValueError, match="exported_at") as error:
+        _build_bundle(exported_at=exported_at)
+    _assert_exception_has_no_sentinel(error.value, sentinel)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
 def test_time_and_timedelta_representable_boundaries_round_trip_exactly() -> None:
     maximum_duration = timedelta(
         days=2_958_465,
@@ -531,8 +629,6 @@ def test_time_and_timedelta_representable_boundaries_round_trip_exactly() -> Non
         "minimum_time": time.min,
         "modern_time": time(10, 30, 15, 123_000),
         "maximum_time": time(23, 59, 59, 999_000),
-        "minimum_duration": -maximum_duration,
-        "negative_duration": timedelta(milliseconds=-1),
         "zero_duration": timedelta(0),
         "modern_duration": timedelta(days=30, milliseconds=123),
         "maximum_duration": maximum_duration,
@@ -550,9 +646,31 @@ def test_time_and_timedelta_representable_boundaries_round_trip_exactly() -> Non
         timedelta,
         timedelta,
         timedelta,
-        timedelta,
-        timedelta,
     ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        timedelta(milliseconds=-1),
+        -timedelta(
+            days=2_958_465,
+            seconds=86_399,
+            microseconds=999_000,
+        ),
+    ],
+)
+def test_negative_durations_are_rejected_before_workbook_creation(
+    value: timedelta,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="duration"):
+        _build_bundle(sheets={"Dates": [{"value": value}]})
 
 
 @pytest.mark.parametrize(
@@ -701,6 +819,73 @@ def test_empty_worksheets_consume_the_shared_cumulative_budget(
     monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 5)
     with pytest.raises(ValueError, match="too many values"):
         _build_bundle(snapshot={}, sheets={"First": [], "Second": []})
+
+
+def test_exact_excel_column_limit_is_accepted_with_exact_dense_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = {f"column_{index}": index for index in range(16_384)}
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 16_389)
+
+    worksheet = _load_workbook(
+        _build_bundle(snapshot={}, sheets={"Wide": [headers]})
+    )["Wide"]
+
+    assert worksheet.max_column == 16_384
+    assert worksheet.cell(2, 16_384).value == 16_383
+
+
+def test_more_than_excel_column_limit_fails_before_workbook_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = {f"column_{index}": index for index in range(16_385)}
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 20_000)
+
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="16,384|column"):
+        _build_bundle(snapshot={}, sheets={"Wide": [headers]})
+
+
+def test_sparse_rectangular_amplification_consumes_cumulative_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 9)
+
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="too many values"):
+        _build_bundle(
+            snapshot={},
+            sheets={"Sparse": [{"left": 1}, {"right": 2}]},
+        )
+
+
+def test_dense_rectangle_does_not_double_count_present_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_export_bundle, "_MAX_TOTAL_VALUES", 10)
+
+    worksheet = _load_workbook(
+        _build_bundle(
+            snapshot={},
+            sheets={
+                "Dense": [
+                    {"left": 1, "right": 2},
+                    {"left": 3, "right": 4},
+                ]
+            },
+        )
+    )["Dense"]
+
+    assert [cell.value for cell in worksheet[2]] == [1, 2]
+    assert [cell.value for cell in worksheet[3]] == [3, 4]
 
 
 @pytest.mark.parametrize(

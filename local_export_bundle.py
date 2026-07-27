@@ -14,6 +14,7 @@ import xlsxwriter
 _MAX_JSON_DEPTH = 64
 _MAX_CONTAINER_ITEMS = 100_000
 _MAX_TOTAL_VALUES = 1_000_000
+_MAX_EXCEL_COLUMNS = 16_384
 _MAX_EXCEL_TEXT_LENGTH = 32_767
 _FIXED_ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _FIXED_WORKBOOK_TIMESTAMP = datetime(2000, 1, 1)
@@ -24,7 +25,6 @@ _MAX_EXCEL_TIMEDELTA = timedelta(
     seconds=86_399,
     microseconds=999_000,
 )
-_MIN_EXCEL_TIMEDELTA = -_MAX_EXCEL_TIMEDELTA
 _ALLOWED_FILENAME_PREFIXES = frozenset({"session", "synthetic-session"})
 _FORBIDDEN_SHEET_CHARACTERS = frozenset("[]:*?/\\")
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
@@ -46,16 +46,22 @@ class _ValidationState:
         self.value_count = 0
 
     def count(self) -> None:
-        self.value_count += 1
+        self.reserve(1)
+
+    def reserve(self, count: int) -> None:
+        self.value_count += count
         if self.value_count > _MAX_TOTAL_VALUES:
             raise ValueError("input structure contains too many values")
 
 
 def _validate_unicode_text(value: str, *, context: str) -> None:
+    encoding_failed = False
     try:
         value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{context} must contain valid Unicode text") from exc
+    except UnicodeEncodeError:
+        encoding_failed = True
+    if encoding_failed:
+        raise ValueError(f"{context} must contain valid Unicode text")
     if any(
         ord(character) < 32 and character not in {"\t", "\n"}
         for character in value
@@ -72,16 +78,21 @@ def _validate_excel_number(value: object, *, context: str) -> int | float:
         raise TypeError(f"{context} contains an unsupported numeric type")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{context} numbers must be finite")
+    conversion_failed = False
+    serialized = ""
+    round_tripped: int | float = 0
     try:
         serialized = f"{value:.16G}"
         try:
-            round_tripped: int | float = int(serialized)
+            round_tripped = int(serialized)
         except ValueError:
             round_tripped = float(serialized)
     except (OverflowError, ValueError):
+        conversion_failed = True
+    if conversion_failed:
         raise ValueError(
             f"{context} cannot survive the Excel numeric round-trip"
-        ) from None
+        )
 
     type_changed = type(round_tripped) is not type(value)
     value_changed = round_tripped != value
@@ -145,17 +156,20 @@ def _copy_json_value(
         )
         copied: dict[str, object] = {}
         try:
-            for key, item in value.items():
+            for item_index, (key, item) in enumerate(value.items()):
                 if not isinstance(key, str):
                     raise TypeError(f"{context} mapping keys must be strings")
-                _validate_unicode_text(key, context=f"{context} mapping key")
+                _validate_unicode_text(
+                    key,
+                    context=f"{context} mapping key at index {item_index}",
+                )
                 if key in copied:
                     raise ValueError(f"{context} contains a duplicate mapping key")
                 copied[key] = _copy_json_value(
                     item,
                     state=state,
                     depth=depth + 1,
-                    context=f"{context}.{key}",
+                    context=f"{context} mapping value at index {item_index}",
                 )
         finally:
             state.active_container_ids.remove(identifier)
@@ -179,7 +193,7 @@ def _copy_json_value(
             ]
         finally:
             state.active_container_ids.remove(identifier)
-    raise TypeError(f"{context} contains an unsupported value: {type(value).__name__}")
+    raise TypeError(f"{context} contains an unsupported value type")
 
 
 def _copy_cell_value(
@@ -190,6 +204,8 @@ def _copy_cell_value(
 ) -> object:
     if isinstance(value, datetime):
         state.count()
+        normalization_failed = False
+        normalized = datetime(1900, 1, 1)
         try:
             offset = value.utcoffset()
             normalized = (
@@ -198,9 +214,11 @@ def _copy_cell_value(
                 else value.replace(tzinfo=None)
             )
         except Exception:
+            normalization_failed = True
+        if normalization_failed:
             raise ValueError(
                 f"{context} datetime could not be normalized safely"
-            ) from None
+            )
         if normalized.date() < _MIN_EXCEL_DATE:
             raise ValueError(
                 f"{context} datetime is outside the Excel 1900 date range"
@@ -223,10 +241,14 @@ def _copy_cell_value(
         return value
     if isinstance(value, time):
         state.count()
+        offset_failed = False
+        offset = None
         try:
             offset = value.utcoffset()
         except Exception:
-            raise ValueError(f"{context} time could not be validated safely") from None
+            offset_failed = True
+        if offset_failed:
+            raise ValueError(f"{context} time could not be validated safely")
         if offset is not None:
             raise ValueError(f"{context} timezone-aware time values are unsupported")
         if value.microsecond % 1_000:
@@ -234,9 +256,13 @@ def _copy_cell_value(
         return value.replace(tzinfo=None)
     if isinstance(value, timedelta):
         state.count()
+        if value < timedelta(0):
+            raise ValueError(
+                f"{context} duration cannot be negative in the Excel 1900 date system"
+            )
         if value.microseconds % 1_000:
             raise ValueError(f"{context} duration must use millisecond precision")
-        if not _MIN_EXCEL_TIMEDELTA <= value <= _MAX_EXCEL_TIMEDELTA:
+        if value > _MAX_EXCEL_TIMEDELTA:
             raise ValueError(
                 f"{context} duration is outside the representable Excel range"
             )
@@ -341,55 +367,70 @@ def _prepare_sheets(
         context="sheets",
     )
     try:
-        for raw_name, raw_rows in sheets.items():
+        for worksheet_index, (raw_name, raw_rows) in enumerate(sheets.items()):
             state.count()
             name = _validate_sheet_name(raw_name, normalized_names)
+            worksheet_context = f"worksheet at index {worksheet_index}"
             if not isinstance(raw_rows, Sequence) or isinstance(
                 raw_rows,
                 (str, bytes, bytearray),
             ):
-                raise TypeError(f"rows for sheet {name!r} must be a sequence")
+                raise TypeError(f"{worksheet_context} rows must be a sequence")
             state.count()
             rows_identifier = _enter_container(
                 raw_rows,
                 state=state,
                 depth=0,
-                context=f"sheet {name!r} rows",
+                context=f"{worksheet_context} rows",
             )
             headers: list[str] = []
             header_names: set[str] = set()
             copied_rows: list[dict[str, object]] = []
+            present_cell_count = 0
             try:
                 for row_index, raw_row in enumerate(raw_rows):
                     if not isinstance(raw_row, Mapping):
                         raise TypeError(
-                            f"sheet {name!r} row {row_index} must be a mapping"
+                            f"{worksheet_context} row at index {row_index} "
+                            "must be a mapping"
                         )
                     state.count()
                     row_identifier = _enter_container(
                         raw_row,
                         state=state,
                         depth=0,
-                        context=f"sheet {name!r} row {row_index}",
+                        context=f"{worksheet_context} row at index {row_index}",
                     )
                     copied_row: dict[str, object] = {}
                     try:
-                        for key, value in raw_row.items():
+                        for cell_index, (key, value) in enumerate(raw_row.items()):
                             if not isinstance(key, str):
                                 raise TypeError(
-                                    f"sheet {name!r} row keys must be strings"
+                                    f"{worksheet_context} row at index {row_index} "
+                                    "keys must be strings"
                                 )
-                            _validate_unicode_text(key, context="worksheet header")
+                            header_context = (
+                                f"{worksheet_context} header at entry index "
+                                f"{cell_index}"
+                            )
+                            _validate_unicode_text(key, context=header_context)
                             _excel_text(key)
                             if key in copied_row:
                                 raise ValueError(
-                                    f"sheet {name!r} row contains a duplicate key"
+                                    f"{worksheet_context} row at index {row_index} "
+                                    "contains a duplicate key"
+                                )
+                            is_new_header = key not in header_names
+                            if is_new_header and len(headers) >= _MAX_EXCEL_COLUMNS:
+                                raise ValueError(
+                                    f"{worksheet_context} cannot exceed 16,384 columns"
                                 )
                             copied_value = _copy_cell_value(
                                 value,
                                 state=state,
                                 context=(
-                                    f"sheet {name!r} row {row_index} cell {key!r}"
+                                    f"{worksheet_context} row at index {row_index} "
+                                    f"cell at entry index {cell_index}"
                                 ),
                             )
                             if isinstance(copied_value, str):
@@ -397,14 +438,17 @@ def _prepare_sheets(
                             elif isinstance(copied_value, (dict, list)):
                                 _excel_text(_canonical_cell_json(copied_value))
                             copied_row[key] = copied_value
-                            if key not in header_names:
+                            if is_new_header:
                                 header_names.add(key)
                                 headers.append(key)
                     finally:
                         state.active_container_ids.remove(row_identifier)
                     copied_rows.append(copied_row)
+                    present_cell_count += len(copied_row)
             finally:
                 state.active_container_ids.remove(rows_identifier)
+            rectangular_cell_count = len(copied_rows) * len(headers)
+            state.reserve(rectangular_cell_count - present_cell_count)
             prepared.append((name, headers, copied_rows))
     finally:
         state.active_container_ids.remove(sheets_identifier)
@@ -497,16 +541,22 @@ def _line_count(value: object) -> int:
     return max(1, sum(max(1, (len(line) + 47) // 48) for line in lines))
 
 
-def _column_width(header: str, rows: Sequence[Mapping[str, object]]) -> float:
-    widest = max(
-        [len(part) for part in _cell_text(header).splitlines() or [""]]
-        + [
-            len(part)
-            for row in rows
-            for part in (_cell_text(row.get(header)).splitlines() or [""])
-        ]
-    )
-    return min(47.25, max(12, widest + 2))
+def _display_width(value: object) -> int:
+    return max(len(part) for part in _cell_text(value).splitlines() or [""])
+
+
+def _column_widths(
+    headers: Sequence[str],
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, float]:
+    widest = {header: _display_width(header) for header in headers}
+    for row in rows:
+        for header, value in row.items():
+            widest[header] = max(widest[header], _display_width(value))
+    return {
+        header: min(47.25, max(12, width + 2))
+        for header, width in widest.items()
+    }
 
 
 def _workbook_formats(workbook: object) -> dict[str, object]:
@@ -568,14 +618,19 @@ def _build_workbook_bytes(
             }
         )
         formats = _workbook_formats(workbook)
-        for name, headers, rows in sheets:
+        for worksheet_index, (name, headers, rows) in enumerate(sheets):
+            worksheet_context = f"worksheet at index {worksheet_index}"
             worksheet = workbook.add_worksheet(name)
             worksheet.set_tab_color("#2D2674")
             worksheet.freeze_panes(1, 0)
             _require_write_success(
                 worksheet.set_row(0, 24),
-                context=f"sheet {name!r} header height",
+                context=f"{worksheet_context} header height",
             )
+            column_widths = _column_widths(headers, rows)
+            header_columns = {
+                header: column for column, header in enumerate(headers)
+            }
             for column, header in enumerate(headers):
                 _require_write_success(
                     worksheet.write_string(
@@ -584,22 +639,22 @@ def _build_workbook_bytes(
                         _excel_text(header),
                         formats["header"],
                     ),
-                    context=f"sheet {name!r} header {header!r}",
+                    context=f"{worksheet_context} header at column {column}",
                 )
                 _require_write_success(
                     worksheet.set_column(
                         column,
                         column,
-                        _column_width(header, rows),
+                        column_widths[header],
                     ),
-                    context=f"sheet {name!r} column {column}",
+                    context=f"{worksheet_context} column {column}",
                 )
             if headers:
                 worksheet.autofilter(0, 0, len(rows), len(headers) - 1)
             else:
                 _require_write_success(
                     worksheet.set_column(0, 0, 12),
-                    context=f"sheet {name!r} empty column",
+                    context=f"{worksheet_context} empty column",
                 )
                 worksheet.autofilter(0, 0, 0, 0)
             for row_index, row in enumerate(rows, start=1):
@@ -609,20 +664,17 @@ def _build_workbook_bytes(
                         18,
                         15
                         * max(
-                            (
-                                _line_count(row.get(header))
-                                for header in headers
-                            ),
+                            (_line_count(value) for value in row.values()),
                             default=1,
                         ),
                     ),
                 )
                 _require_write_success(
                     worksheet.set_row(row_index, height),
-                    context=f"sheet {name!r} row {row_index}",
+                    context=f"{worksheet_context} row {row_index}",
                 )
-                for column, header in enumerate(headers):
-                    value = row.get(header)
+                for header, value in row.items():
+                    column = header_columns[header]
                     cell_format = formats["accent" if column == 0 else "body"]
                     _write_cell(
                         worksheet,
@@ -631,7 +683,9 @@ def _build_workbook_bytes(
                         value=value,
                         cell_format=cell_format,
                         formats=formats,
-                        context=f"sheet {name!r} cell ({row_index}, {column})",
+                        context=(
+                            f"{worksheet_context} cell ({row_index}, {column})"
+                        ),
                     )
         workbook.close()
     except Exception:
@@ -646,7 +700,17 @@ def _build_workbook_bytes(
 def _validate_export_time(exported_at: datetime) -> None:
     if not isinstance(exported_at, datetime):
         raise TypeError("exported_at must be a datetime")
-    if exported_at.tzinfo is None or exported_at.utcoffset() != timedelta(0):
+    if exported_at.tzinfo is None:
+        raise ValueError("exported_at must be timezone-aware UTC")
+    offset_failed = False
+    offset = None
+    try:
+        offset = exported_at.utcoffset()
+    except Exception:
+        offset_failed = True
+    if offset_failed:
+        raise ValueError("exported_at timezone could not be validated safely")
+    if offset != timedelta(0):
         raise ValueError("exported_at must be timezone-aware UTC")
     if exported_at.microsecond != 0:
         raise ValueError("exported_at must use second precision")
