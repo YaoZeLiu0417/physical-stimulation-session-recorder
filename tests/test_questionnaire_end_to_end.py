@@ -205,6 +205,11 @@ def _visible_text(app) -> str:
         "warning",
         "error",
         "success",
+        "json",
+        "code",
+        "dataframe",
+        "table",
+        "metric",
         "button",
         "radio",
         "slider",
@@ -212,6 +217,7 @@ def _visible_text(app) -> str:
         "text_area",
         "multiselect",
         "checkbox",
+        "selectbox",
     ):
         for element in getattr(app, collection_name):
             for attribute in ("value", "label", "help", "placeholder"):
@@ -225,6 +231,56 @@ def _worksheet_rows(worksheet) -> list[dict[str, object]]:
     rows = list(worksheet.iter_rows(values_only=True))
     headers = rows[0]
     return [dict(zip(headers, row, strict=True)) for row in rows[1:]]
+
+
+def _assert_json_cell(actual: object, expected: object) -> None:
+    assert isinstance(actual, str)
+    assert actual == json.dumps(
+        expected,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert json.loads(actual) == expected
+
+
+def test_visible_text_collector_captures_every_structured_render_channel(tmp_path):
+    sentinel = "VISIBLE-CHANNEL-SENTINEL-7F31"
+    app_path = tmp_path / "visible_channels.py"
+    app_path.write_text(
+        "\n".join(
+            (
+                "import streamlit as st",
+                f"sentinel = {sentinel!r}",
+                'st.json({"value": sentinel + ":json"})',
+                'st.code(sentinel + ":code")',
+                'st.dataframe([{"value": sentinel + ":dataframe"}])',
+                'st.table([{"value": sentinel + ":table"}])',
+                'st.metric(sentinel + ":metric-label", sentinel + ":metric-value")',
+                "st.selectbox(",
+                '    sentinel + ":selectbox-label",',
+                '    (sentinel + ":selectbox-value",),',
+                ")",
+            )
+        ),
+        encoding="utf-8",
+    )
+    app = AppTest.from_file(str(app_path), default_timeout=10).run()
+
+    assert not app.exception
+    visible = _visible_text(app)
+    for suffix in (
+        ":json",
+        ":code",
+        ":dataframe",
+        ":table",
+        ":metric-label",
+        ":metric-value",
+        ":selectbox-label",
+        ":selectbox-value",
+    ):
+        assert f"{sentinel}{suffix}" in visible
 
 
 def test_questionnaire_fixture_source_is_session_memory_only():
@@ -510,25 +566,31 @@ def test_every_formal_visit_keeps_complete_instrument_and_item_inventory(visit):
     )
 
     visit_payload = record["formal_visits"][visit]
-    assert list(visit_payload["raw_answers"]) == [
-        question.id for question in active_questions
-    ]
-    assert visit_payload["raw_answers"] == questionnaire_answers(record, visit)
+    expected_ids = [question.id for question in active_questions]
+    assert expected_ids == [question.id for question in questions]
+    assert list(visit_payload["raw_answers"]) == expected_ids
+    assert visit_payload["raw_answers"] == answers
+    assert questionnaire_answers(record, visit) == answers
+    for field_id, expected_value in answers.items():
+        stored_value = visit_payload["raw_answers"][field_id]
+        assert stored_value == expected_value
+        assert type(stored_value) is type(expected_value)
     assert tuple(visit_payload["instruments"]) == VISIT_INSTRUMENT_IDS[visit]
     assert visit_payload["complete"] is True
-    assert all(
-        record["field_status"][visit][question.id] == "answered"
-        for question in active_questions
-    )
-    assert record["completion"]["answered_field_ids"][visit] == sorted(
-        question.id for question in active_questions
-    )
+    expected_status = {field_id: "answered" for field_id in expected_ids}
+    assert record["field_status"][visit] == expected_status
+    assert record["completion"]["answered_field_ids"][visit] == sorted(answers)
+    assert record["completion"]["current_step"][visit] == len(expected_ids) - 1
     for instrument_id in VISIT_INSTRUMENT_IDS[visit]:
         payload = visit_payload["instruments"][instrument_id]
-        expected_ids = [
-            question.id
-            for question in FORMAL_INSTRUMENTS[instrument_id].questions
+        instrument = FORMAL_INSTRUMENTS[instrument_id]
+        expected_instrument_ids = [
+            question.id for question in instrument.questions
         ]
+        expected_instrument_answers = {
+            field_id: answers[field_id] for field_id in expected_instrument_ids
+        }
+        required_count = sum(question.required for question in instrument.questions)
         assert set(payload) == {
             "instrument_id",
             "instrument_version",
@@ -540,11 +602,19 @@ def test_every_formal_visit_keeps_complete_instrument_and_item_inventory(visit):
         }
         assert payload["instrument_id"] == instrument_id
         assert payload["instrument_version"] == "1.0"
-        assert list(payload["raw_answers"]) == expected_ids
+        assert payload["label"] == instrument.label
+        assert payload["time_window"] == instrument.time_window
+        assert list(payload["raw_answers"]) == expected_instrument_ids
+        assert payload["raw_answers"] == expected_instrument_answers
+        for field_id, expected_value in expected_instrument_answers.items():
+            stored_value = payload["raw_answers"][field_id]
+            assert stored_value == expected_value
+            assert type(stored_value) is type(expected_value)
         assert payload["complete"] is True
-        assert payload["completeness"]["answered"] == payload["completeness"][
-            "required"
-        ]
+        assert payload["completeness"] == {
+            "answered": required_count,
+            "required": required_count,
+        }
 
     mark_questionnaire_visit_complete(
         record,
@@ -552,10 +622,14 @@ def test_every_formal_visit_keeps_complete_instrument_and_item_inventory(visit):
         completed_at_iso=COMPLETED_AT_ISO,
     )
     assert questionnaire_visit_complete(record, visit) is True
-    assert record["completion"]["questionnaire_visits"][visit]["revision"] == 1
-    assert record["completion"]["questionnaire_visits"][visit][
-        "completed_at_iso"
-    ] == COMPLETED_AT_ISO
+    assert record["completion"]["status"] == "complete"
+    assert record["completion"]["answered_field_ids"][visit] == sorted(answers)
+    assert record["field_status"][visit] == expected_status
+    assert record["completion"]["questionnaire_visits"][visit] == {
+        "status": "complete",
+        "revision": 1,
+        "completed_at_iso": COMPLETED_AT_ISO,
+    }
 
 
 def test_browser_required_gate_and_back_navigation_restore_answer_and_step():
@@ -625,10 +699,11 @@ def test_fixture_shows_support_copy_for_answered_suicide_thought_branch():
 
 
 def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surface():
-    answers = _negative_daily_answers()
+    answers = _positive_daily_answers()
+    flow = build_flow(answers, 1)
     app = _complete_fixture(
         _start_fixture("day1"),
-        tuple(DAILY_CORE),
+        flow,
         "daily",
         answers,
     )
@@ -649,7 +724,8 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
         workbook_data = archive.read("responses.xlsx")
     workbook = openpyxl.load_workbook(BytesIO(workbook_data), data_only=False)
 
-    expected_answered = [question.id for question in DAILY_CORE]
+    export_questions = (*DAILY_CORE, *DAILY_CONDITIONAL)
+    expected_answered = [question.id for question in export_questions]
     assert payload["export_schema_version"] == 1
     assert payload["participant_id"] == SUBJECT_ID
     assert payload["record_date"] == RECORD_DATE.isoformat()
@@ -665,19 +741,26 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
     assert payload["visits"][0]["visit_status"] == "complete"
     assert payload["visits"][0]["instrument_status"] == "complete"
     assert payload["visits"][0]["completed_at_iso"] == COMPLETED_AT_ISO
-    response_by_id = {item["field_id"]: item for item in payload["responses"]}
-    assert list(response_by_id) == [
-        question.id for question in (*DAILY_CORE, *DAILY_CONDITIONAL)
-    ]
-    for field_id, value in answers.items():
-        assert response_by_id[field_id]["answered"] is True
-        assert response_by_id[field_id]["applicability"] == "applicable"
-        assert response_by_id[field_id]["raw_value"] == value
-    for question in DAILY_CONDITIONAL:
-        item = response_by_id[question.id]
-        assert item["answered"] is False
-        assert item["applicability"] == "not_applicable"
-        assert item["raw_value"] is None
+    json_responses = {
+        (item["visit"], item["instrument_id"], item["field_id"]): item
+        for item in payload["responses"]
+    }
+    expected_response_keys = {
+        ("daily", "daily_nssi_ema", question.id) for question in export_questions
+    }
+    assert set(json_responses) == expected_response_keys
+    for question in export_questions:
+        key = ("daily", "daily_nssi_ema", question.id)
+        item = json_responses[key]
+        expected_value = answers[question.id]
+        assert item["instrument_version"] == "1.0"
+        assert item["question_text"] == question.prompt
+        assert item["question_kind"] == question.kind
+        assert item["answered"] is True
+        assert item["applicability"] == "applicable"
+        assert item["raw_value"] == expected_value
+        assert type(item["raw_value"]) is type(expected_value)
+        assert isinstance(item["display_value"], str)
 
     assert workbook.sheetnames == ["Session", "Responses", "Visits", "Recording"]
     session_rows = _worksheet_rows(workbook["Session"])
@@ -685,11 +768,102 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
     visit_rows = _worksheet_rows(workbook["Visits"])
     recording_rows = _worksheet_rows(workbook["Recording"])
     assert len(session_rows) == 1
-    assert session_rows[0]["participant_id"] == SUBJECT_ID
-    assert len(response_rows) == len(DAILY_CORE) + len(DAILY_CONDITIONAL)
-    assert [row["field_id"] for row in response_rows] == list(response_by_id)
-    assert [row["instrument_id"] for row in visit_rows] == ["daily_nssi_ema"]
+    session_row = session_rows[0]
+    assert set(session_row) == {
+        "export_schema_version",
+        "participant_id",
+        "record_date",
+        "intervention_day",
+        "visit",
+        "exported_at_iso",
+        "daily_context",
+        "answered_field_ids",
+        "field_status",
+    }
+    assert session_row["export_schema_version"] == 1
+    assert session_row["participant_id"] == SUBJECT_ID
+    assert session_row["record_date"] == RECORD_DATE.isoformat()
+    assert session_row["intervention_day"] == 1
+    assert session_row["visit"] == "daily"
+    assert session_row["exported_at_iso"] == EXPORTED_AT_ISO
+    _assert_json_cell(session_row["daily_context"], payload["daily_context"])
+    _assert_json_cell(session_row["answered_field_ids"], expected_answered)
+    _assert_json_cell(session_row["field_status"], payload["field_status"])
+
+    workbook_responses = {
+        (row["visit"], row["instrument_id"], row["field_id"]): row
+        for row in response_rows
+    }
+    assert set(workbook_responses) == expected_response_keys
+    for key, json_item in json_responses.items():
+        row = workbook_responses[key]
+        assert set(row) == {
+            "visit",
+            "instrument_id",
+            "field_id",
+            "question_text",
+            "question_kind",
+            "answered",
+            "applicability",
+            "raw_value",
+            "display_value",
+        }
+        for field_name in (
+            "visit",
+            "instrument_id",
+            "field_id",
+            "question_text",
+            "question_kind",
+            "answered",
+            "applicability",
+            "display_value",
+        ):
+            assert row[field_name] == json_item[field_name]
+        expected_value = json_item["raw_value"]
+        if isinstance(expected_value, (list, dict)):
+            _assert_json_cell(row["raw_value"], expected_value)
+        else:
+            assert row["raw_value"] == expected_value
+            assert type(row["raw_value"]) is type(expected_value)
+
+    json_visits = {
+        (item["visit"], item["instrument_id"]): item
+        for item in payload["visits"]
+    }
+    workbook_visits = {
+        (row["visit"], row["instrument_id"]): row for row in visit_rows
+    }
+    assert set(json_visits) == {("daily", "daily_nssi_ema")}
+    assert set(workbook_visits) == set(json_visits)
+    for key, json_item in json_visits.items():
+        row = workbook_visits[key]
+        assert set(row) == {
+            "visit",
+            "visit_status",
+            "completed_at_iso",
+            "instrument_id",
+            "instrument_version",
+            "instrument_status",
+            "answered_field_ids",
+            "field_status",
+        }
+        for field_name in (
+            "visit",
+            "visit_status",
+            "completed_at_iso",
+            "instrument_id",
+            "instrument_version",
+            "instrument_status",
+        ):
+            assert row[field_name] == json_item[field_name]
+        _assert_json_cell(
+            row["answered_field_ids"], json_item["answered_field_ids"]
+        )
+        _assert_json_cell(row["field_status"], json_item["field_status"])
+
     assert recording_rows == [_recording()]
+    assert tuple(recording_rows[0]) == RECORDING_KEYS
+    assert recording_rows[0]["status"] == "saved"
 
     serialized = json.dumps(payload, ensure_ascii=False).casefold()
     workbook_surface = "\n".join(
@@ -712,6 +886,11 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
         "formal_visits",
         "raw_answers",
         "video_filename",
+        "score-sentinel-7f31",
+        "risk-sentinel-7f31",
+        "path-sentinel-7f31",
+        "upload-sentinel-7f31",
+        "internal-mapping-sentinel-7f31",
     )
     assert all(value not in serialized for value in forbidden)
     assert all(value not in workbook_surface for value in forbidden)
