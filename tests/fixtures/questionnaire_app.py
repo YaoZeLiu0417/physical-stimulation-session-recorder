@@ -83,13 +83,21 @@ def finish_session():
     st.session_state[COMPLETE_KEY] = True
 
 
+scenario_values = st.query_params.get_all("scenario")
+if scenario_values and (
+    len(scenario_values) != 1 or scenario_values[0] not in SCENARIOS
+):
+    st.error("This questionnaire scenario is unavailable.")
+    st.stop()
+scenario = scenario_values[0] if scenario_values else None
+harness_mode = scenario is None
+
+
 if st.session_state.get(COMPLETE_KEY) is True:
     st.success("This session is complete.")
     st.stop()
 
 record = st.session_state.get(RECORD_KEY)
-scenario = st.query_params.get("scenario")
-harness_mode = scenario not in SCENARIOS
 if record is None:
     if not harness_mode:
         selected_visit, selected_day = SCENARIOS[scenario]

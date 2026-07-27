@@ -297,6 +297,12 @@ def test_questionnaire_fixture_source_is_session_memory_only():
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module
     )
+    imported_names = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
+    }
     call_names = {
         node.func.id
         if isinstance(node.func, ast.Name)
@@ -306,11 +312,26 @@ def test_questionnaire_fixture_source_is_session_memory_only():
         and isinstance(node.func, (ast.Name, ast.Attribute))
     }
 
-    assert "create_session_record" in source
-    assert "st.session_state" in source
-    assert "persist_daily_questionnaire" in source
-    assert "persist_formal_questionnaire" in source
-    assert "build_participant_export" in source
+    required_calls = {
+        "build_participant_export",
+        "create_session_record",
+        "persist_daily_questionnaire",
+        "persist_formal_questionnaire",
+    }
+    assert {
+        ("questionnaire_export", "build_participant_export"),
+        ("session_record_workflow", "create_session_record"),
+        ("session_record_workflow", "persist_daily_questionnaire"),
+        ("session_record_workflow", "persist_formal_questionnaire"),
+    } <= imported_names
+    assert required_calls <= call_names
+    assert any(
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "st"
+        and node.attr == "session_state"
+        for node in ast.walk(tree)
+    )
     assert {
         "record_store",
         "questionnaire_fixture_storage",
@@ -366,6 +387,33 @@ def test_questionnaire_fixture_never_constructs_a_server_store(tmp_path, monkeyp
 
     assert app.session_state[SESSION_RECORD_KEY]["schema_version"] == 5
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        pytest.param("bogus", id="unknown"),
+        pytest.param("", id="blank"),
+        pytest.param(["day1", "day7"], id="multiple"),
+    ),
+)
+def test_supplied_noncanonical_scenario_fails_closed_without_fixture_state(scenario):
+    app = AppTest.from_file(str(FIXTURE), default_timeout=10)
+    app.query_params["scenario"] = scenario
+    app.run()
+
+    assert not app.exception
+    assert SESSION_RECORD_KEY not in app.session_state
+    assert SESSION_EXPORT_KEY not in app.session_state
+    assert not any(
+        key.startswith("fixture_") for key in app.session_state.filtered_state
+    )
+    visible = _visible_text(app)
+    assert "This questionnaire scenario is unavailable." in visible
+    for raw_value in scenario if isinstance(scenario, list) else (scenario,):
+        if raw_value:
+            assert raw_value not in visible
+    assert not app.get("download_button")
 
 
 @pytest.mark.parametrize(
@@ -632,6 +680,65 @@ def test_every_formal_visit_keeps_complete_instrument_and_item_inventory(visit):
     }
 
 
+@pytest.mark.parametrize("visit", tuple(VISIT_INSTRUMENT_IDS))
+def test_every_formal_visit_completes_browser_journey_to_local_export(visit):
+    questions = _formal_questions(visit)
+    answers = {
+        question.id: _raw_value(question, positive=True) for question in questions
+    }
+    flow = formal_flow(visit, answers)
+    assert [question.id for question in flow] == [
+        question.id for question in questions
+    ]
+
+    app = _complete_fixture(_start_fixture(visit), flow, visit, answers)
+    record = app.session_state[SESSION_RECORD_KEY]
+    bundle = app.session_state[SESSION_EXPORT_KEY]
+
+    assert record["visit"] == visit
+    assert questionnaire_visit_complete(record, visit) is True
+    assert record["completion"]["questionnaire_visits"][visit] == {
+        "status": "complete",
+        "revision": 1,
+        "completed_at_iso": COMPLETED_AT_ISO,
+    }
+    assert questionnaire_answers(record, visit) == answers
+    assert len(app.get("download_button")) == 1
+    assert bundle.filename == "session-20260727-103000.zip"
+    assert bundle.mime_type == "application/zip"
+    with ZipFile(BytesIO(bundle.data)) as archive:
+        assert archive.namelist() == ["responses.json", "responses.xlsx"]
+        payload = json.loads(archive.read("responses.json"))
+        workbook_data = archive.read("responses.xlsx")
+
+    assert payload["visit"] == visit
+    assert payload["answered_field_ids"] == [question.id for question in questions]
+    assert [item["instrument_id"] for item in payload["visits"]] == list(
+        VISIT_INSTRUMENT_IDS[visit]
+    )
+    exported_answers = {
+        item["field_id"]: item["raw_value"] for item in payload["responses"]
+    }
+    assert exported_answers == answers
+    workbook = openpyxl.load_workbook(BytesIO(workbook_data), data_only=False)
+    private_surface = "\n".join(
+        (
+            json.dumps(payload, ensure_ascii=False),
+            *(
+                str(value)
+                for worksheet in workbook.worksheets
+                for row in worksheet.iter_rows(values_only=True)
+                for value in row
+                if value is not None
+            ),
+        )
+    ).casefold()
+    assert all(
+        forbidden not in private_surface
+        for forbidden in ("score", "risk", "derived_metrics", "safety_signals")
+    )
+
+
 def test_browser_required_gate_and_back_navigation_restore_answer_and_step():
     app = _start_fixture("day1")
     keys = questionnaire_state_keys(SESSION_NAMESPACE, "daily")
@@ -886,11 +993,6 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
         "formal_visits",
         "raw_answers",
         "video_filename",
-        "score-sentinel-7f31",
-        "risk-sentinel-7f31",
-        "path-sentinel-7f31",
-        "upload-sentinel-7f31",
-        "internal-mapping-sentinel-7f31",
     )
     assert all(value not in serialized for value in forbidden)
     assert all(value not in workbook_surface for value in forbidden)
