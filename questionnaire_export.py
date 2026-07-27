@@ -105,12 +105,6 @@ _SESSION_KEYS = (
     "created_at_iso",
     "updated_at_iso",
 )
-_COMPLETION_KEYS = (
-    "status",
-    "answered_field_ids",
-    "current_step",
-    "questionnaire_visits",
-)
 _RECORDING_KEYS = (
     "version",
     "storage",
@@ -290,6 +284,12 @@ def _plain_string(value: object) -> object:
     return str.__str__(value) if isinstance(value, str) else value
 
 
+def _exact_int(value: object) -> int:
+    if type(value) is not int:
+        raise _invalid_record()
+    return value
+
+
 def _projection_questions(
     *, visit: str, intervention_day: object
 ) -> tuple[QuestionSpec, ...]:
@@ -368,7 +368,9 @@ def _project_completion(source: object, *, visit: str) -> dict[str, object]:
     answered = [_plain_string(field_id) for field_id in raw_answered]
     if len(answered) != declared_answer_count:
         raise _invalid_record()
-    current_step = _required_item(current_step_by_visit, visit)
+    current_step = _exact_int(
+        _required_item(current_step_by_visit, visit)
+    )
     metadata = _mapping(_required_item(visits, visit))
     return {
         "status": status,
@@ -379,7 +381,9 @@ def _project_completion(source: object, *, visit: str) -> dict[str, object]:
                 "status": _plain_string(
                     _required_item(metadata, "status")
                 ),
-                "revision": _required_item(metadata, "revision"),
+                "revision": _exact_int(
+                    _required_item(metadata, "revision")
+                ),
                 "completed_at_iso": _plain_string(
                     _required_item(metadata, "completed_at_iso")
                 ),
@@ -447,8 +451,12 @@ def _project_formal_visits(
                 _required_item(payload, "raw_answers"), spec.questions
             ),
             "completeness": {
-                "answered": _required_item(completeness, "answered"),
-                "required": _required_item(completeness, "required"),
+                "answered": _exact_int(
+                    _required_item(completeness, "answered")
+                ),
+                "required": _exact_int(
+                    _required_item(completeness, "required")
+                ),
             },
             "complete": _required_item(payload, "complete"),
         }
@@ -477,7 +485,7 @@ def _materialize_record(
     record_visit = _plain_string(captured["visit"])
     if record_visit != safe_visit:
         raise ValueError("visit is invalid")
-    intervention_day = captured["intervention_day"]
+    intervention_day = _exact_int(captured["intervention_day"])
     questions = _projection_questions(
         visit=safe_visit, intervention_day=intervention_day
     )
@@ -499,13 +507,13 @@ def _materialize_record(
         weekly_answers = {}
     return (
         {
-            "schema_version": captured["schema_version"],
+            "schema_version": _exact_int(captured["schema_version"]),
             "record_id": _plain_string(captured["record_id"]),
             "subject_id": _plain_string(captured["subject_id"]),
             "record_date": _plain_string(captured["record_date"]),
             "intervention_day": intervention_day,
             "visit": record_visit,
-            "revision": captured["revision"],
+            "revision": _exact_int(captured["revision"]),
             "instrument_versions": _project_instrument_versions(
                 captured["instrument_versions"]
             ),
@@ -570,11 +578,13 @@ def _completion_projection(
     except ValueError:
         raise _invalid_record() from None
     revision = record.get("revision")
+    metadata_revision = metadata.get("revision")
     if (
         metadata.get("status") != "complete"
         or type(revision) is not int
         or revision < 1
-        or metadata.get("revision") != revision
+        or type(metadata_revision) is not int
+        or metadata_revision != revision
     ):
         raise _invalid_record()
     projected = {
@@ -854,6 +864,8 @@ def _validate_formal_payload(
             if question.required and statuses[question.id] != "not_applicable"
         }
         completeness = _mapping(payload.get("completeness"))
+        answered_count = completeness.get("answered")
+        required_count = completeness.get("required")
         if (
             payload.get("instrument_id") != instrument_id
             or payload.get("instrument_version") != formal_version
@@ -865,8 +877,10 @@ def _validate_formal_payload(
                 if key in {question.id for question in spec.questions}
             }
             != expected_answers
-            or completeness.get("answered") != len(active_required)
-            or completeness.get("required") != len(active_required)
+            or type(answered_count) is not int
+            or answered_count != len(active_required)
+            or type(required_count) is not int
+            or required_count != len(active_required)
             or payload.get("complete") is not True
         ):
             raise _invalid_record()

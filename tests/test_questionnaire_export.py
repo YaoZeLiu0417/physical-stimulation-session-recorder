@@ -51,6 +51,11 @@ RECORDING_KEYS = (
     "microphone_ready",
     "saved_confirmed",
 )
+INSTRUMENT_VERSION_KEYS = (
+    "daily_nssi_ema",
+    "weekly_nssi",
+    "formal_nssi_crf",
+)
 
 
 def _raw_value(question, *, positive: bool) -> object:
@@ -259,21 +264,16 @@ class _SwitchingMapping(Mapping[str, object]):
         self,
         source: Mapping[str, object],
         *,
-        key: str,
-        later_value: object,
-        safe_reads: int,
+        later_values: Mapping[str, object],
     ) -> None:
         self._source = source
-        self._key = key
-        self._later_value = later_value
-        self._safe_reads = safe_reads
-        self._reads = 0
+        self._later_values = later_values
+        self.read_counts: dict[str, int] = {}
 
     def __getitem__(self, key: str) -> object:
-        if key == self._key:
-            self._reads += 1
-            if self._reads > self._safe_reads:
-                return self._later_value
+        self.read_counts[key] = self.read_counts.get(key, 0) + 1
+        if self.read_counts[key] > 1 and key in self._later_values:
+            return self._later_values[key]
         return self._source[key]
 
     def __iter__(self):
@@ -285,6 +285,22 @@ class _SwitchingMapping(Mapping[str, object]):
 
 class _EqualitySpoof(str):
     def __new__(cls, visible_value: str, accepted_value: str):
+        instance = super().__new__(cls, visible_value)
+        instance.accepted_value = accepted_value
+        return instance
+
+    def __eq__(self, other: object) -> bool:
+        return other == self.accepted_value
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    def __hash__(self) -> int:
+        return hash(self.accepted_value)
+
+
+class _EqualitySpoofInt(int):
+    def __new__(cls, visible_value: int, accepted_value: int):
         instance = super().__new__(cls, visible_value)
         instance.accepted_value = accepted_value
         return instance
@@ -1073,29 +1089,24 @@ def test_safe_unicode_newline_and_tab_remain_valid_export_text() -> None:
     assert dict(snapshot.daily_context)["tags"] == (safe_text,)
 
 
-@pytest.mark.parametrize(
-    ("field", "safe_value"),
-    (
-        ("storage", "browser_local"),
-        ("status", "saved"),
-        ("mode", "long"),
-    ),
-)
-def test_stateful_recording_mapping_is_materialized_once_for_real_zip(
-    field: str, safe_value: str
+def test_stateful_recording_mapping_reads_each_allowlisted_key_once_for_real_zip(
 ) -> None:
-    sentinel = f"PRIVATE_DEVICE_PATH_SENTINEL_{field}_91ba"
     record = _completed_record()
-    record["recording"] = _SwitchingMapping(
-        record["recording"],
-        key=field,
-        later_value=sentinel,
-        safe_reads=2,
+    safe_recording = record["recording"]
+    sentinels = {
+        key: f"PRIVATE_DEVICE_PATH_SENTINEL_{key}_91ba"
+        for key in RECORDING_KEYS
+    }
+    switching = _SwitchingMapping(
+        safe_recording,
+        later_values=sentinels,
     )
+    record["recording"] = switching
 
     bundle, names, parsed_json, workbook = _bundle_parts(record, visit="daily")
 
-    assert parsed_json["recording"][field] == safe_value
+    assert parsed_json["recording"] == safe_recording
+    assert switching.read_counts == {key: 1 for key in RECORDING_KEYS}
     rendered = json.dumps(parsed_json, ensure_ascii=False)
     workbook_values = "\n".join(
         str(cell.value)
@@ -1104,7 +1115,8 @@ def test_stateful_recording_mapping_is_materialized_once_for_real_zip(
         for cell in row
         if cell.value is not None
     )
-    assert sentinel not in "\n".join([bundle.filename, *names, rendered, workbook_values])
+    boundary = "\n".join([bundle.filename, *names, rendered, workbook_values])
+    assert all(sentinel not in boundary for sentinel in sentinels.values())
 
 
 @pytest.mark.parametrize(
@@ -1120,12 +1132,15 @@ def test_stateful_instrument_versions_are_materialized_once_for_real_zip(
 ) -> None:
     sentinel = f"PRIVATE_VERSION_SENTINEL_{version_key}_64af"
     record = _completed_record(day=day, visit=visit)
-    record["instrument_versions"] = _SwitchingMapping(
+    sentinels = {
+        key: f"PRIVATE_VERSION_SENTINEL_{key}_64af"
+        for key in INSTRUMENT_VERSION_KEYS
+    }
+    switching = _SwitchingMapping(
         record["instrument_versions"],
-        key=version_key,
-        later_value=sentinel,
-        safe_reads=1,
+        later_values=sentinels,
     )
+    record["instrument_versions"] = switching
 
     _, _, parsed_json, _ = _bundle_parts(record, visit=visit)
 
@@ -1135,7 +1150,66 @@ def test_stateful_instrument_versions_are_materialized_once_for_real_zip(
         if response["instrument_id"] == instrument_id
     }
     assert versions == {"1.0"}
-    assert sentinel not in json.dumps(parsed_json, ensure_ascii=False)
+    assert switching.read_counts == {
+        key: 1 for key in INSTRUMENT_VERSION_KEYS
+    }
+    rendered = json.dumps(parsed_json, ensure_ascii=False)
+    assert sentinel not in rendered
+    assert all(value not in rendered for value in sentinels.values())
+
+
+@pytest.mark.parametrize("impostor_kind", ("bool", "subclass"))
+@pytest.mark.parametrize(
+    "location",
+    (
+        "top_level_revision",
+        "completion_revision",
+        "completeness_answered",
+        "completeness_required",
+    ),
+)
+def test_integer_metadata_impostors_fail_before_bundle(
+    location: str, impostor_kind: str, monkeypatch
+) -> None:
+    record = _completed_record(visit="V1")
+    if location == "top_level_revision":
+        target = record
+        field = "revision"
+    elif location == "completion_revision":
+        target = record["completion"]["questionnaire_visits"]["V1"]
+        field = "revision"
+    else:
+        instruments = record["formal_visits"]["V1"]["instruments"]
+        payload = next(
+            value
+            for value in instruments.values()
+            if value["completeness"]["answered"] == 1
+            and value["completeness"]["required"] == 1
+        )
+        target = payload["completeness"]
+        field = location.removeprefix("completeness_")
+    expected = target[field]
+    assert type(expected) is int
+    target[field] = (
+        True
+        if impostor_kind == "bool"
+        else _EqualitySpoofInt(expected + 1, expected)
+    )
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_export(
+            record,
+            visit="V1",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
 
 
 @pytest.mark.parametrize(
