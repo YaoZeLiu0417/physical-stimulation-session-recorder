@@ -28,7 +28,7 @@ questionnaire wording or participant examples.
 
 - Chrome captures the camera and microphone locally.
 - The recording is saved as WebM directly to the participant-selected local
-  destination. The Streamlit application does not receive the media bytes.
+  destination. Recording media is not sent to the Streamlit server.
 - Keep the page open until Chrome reports that the local save has completed.
 - A saved recording must be explicitly confirmed before the questionnaire can
   continue.
@@ -38,8 +38,9 @@ questionnaire wording or participant examples.
 
 ## Questionnaire And Local Export
 
-- Raw questionnaire responses exist only in Streamlit session memory while the
-  page remains open.
+- Questionnaire answers travel over the Streamlit connection to the current
+  server process. Raw questionnaire responses are held only in current server
+  session memory while the page remains open.
 - Complete the questionnaire in the displayed order and use the on-screen
   support contact whenever the support notice appears.
 - At completion, download the local ZIP. It contains JSON and Excel copies of
@@ -47,9 +48,10 @@ questionnaire wording or participant examples.
 - Open the ZIP locally and confirm that both files are present before selecting
   the local-save confirmation.
 - The local-save confirmation enables the final action. Finish clears the
-  application-owned session state from Streamlit session memory.
-- The application does not upload recording or questionnaire data.
-- The application does not store participant data on the server.
+  application-owned state from current server session memory.
+- Questionnaire answers and export bytes are not written to server disk or a
+  database.
+- Recording, questionnaire, and export data are not sent to external storage.
 
 ## Data-Loss Boundary
 
@@ -69,8 +71,9 @@ Before opening the service for use:
 3. Save and play a short local WebM using non-participant test material.
 4. Complete a synthetic questionnaire flow and download the local ZIP.
 5. Confirm that the ZIP contains matching JSON and Excel response data.
-6. Confirm that browser network activity contains no recording or
-   questionnaire transfer.
+6. Confirm that browser network activity contains no recording transfer or
+   external-storage request, and only the expected Streamlit questionnaire
+   connection.
 7. Confirm that the support contact text is visible when the support notice is
    triggered with synthetic data.
 8. Refresh a synthetic unfinished session and confirm the documented data-loss

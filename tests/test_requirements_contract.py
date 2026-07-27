@@ -22,6 +22,44 @@ def _package_name(spec: str) -> str:
     return re.sub(r"[-_.]+", "-", name)
 
 
+def _operations_guide_text() -> str:
+    guide = OPERATIONS_GUIDE.read_text(encoding="utf-8").casefold()
+    return re.sub(r"\s+", " ", guide)
+
+
+def _system_package_specs(path: Path) -> tuple[str, ...]:
+    specs = []
+    for package_file in path.glob("packages*.txt"):
+        for raw_line in package_file.read_text(encoding="utf-8").splitlines():
+            spec = raw_line.split("#", 1)[0].strip()
+            if spec:
+                specs.append(spec)
+    return tuple(specs)
+
+
+def _server_media_system_packages(path: Path) -> set[str]:
+    media_prefixes = (
+        "ffmpeg",
+        "gstreamer",
+        "libavcodec",
+        "libavdevice",
+        "libavfilter",
+        "libavformat",
+        "libavresample",
+        "libavutil",
+        "libpostproc",
+        "libswresample",
+        "libswscale",
+    )
+    package_names = {
+        re.split(r"[=:\s]", spec, maxsplit=1)[0].casefold()
+        for spec in _system_package_specs(path)
+    }
+    return {
+        name for name in package_names if name.startswith(media_prefixes)
+    }
+
+
 def test_package_name_uses_pep_503_normalization() -> None:
     assert {
         _package_name("Python_DotEnv>=1"),
@@ -35,11 +73,29 @@ def test_package_name_uses_pep_503_normalization() -> None:
 
 
 def test_deployment_installs_no_server_media_system_packages() -> None:
-    assert tuple(ROOT.glob("packages*.txt")) == ()
+    assert not _server_media_system_packages(ROOT)
+
+
+def test_system_package_contract_allows_unrelated_packages_and_rejects_media(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "packages-observability.txt").write_text(
+        "curl\nca-certificates  # TLS roots\n",
+        encoding="utf-8",
+    )
+
+    assert not _server_media_system_packages(tmp_path)
+
+    (tmp_path / "packages-media.txt").write_text(
+        "FFmpeg  # media process\nlibavcodec-extra\n",
+        encoding="utf-8",
+    )
+
+    assert _server_media_system_packages(tmp_path) == {"ffmpeg", "libavcodec-extra"}
 
 
 def test_operations_guide_describes_current_browser_local_flow() -> None:
-    guide = OPERATIONS_GUIDE.read_text(encoding="utf-8").casefold()
+    guide = _operations_guide_text()
     required_statements = (
         "controlled access",
         "signed access link",
@@ -48,7 +104,6 @@ def test_operations_guide_describes_current_browser_local_flow() -> None:
         "camera and microphone",
         "webm",
         "participant-selected local destination",
-        "streamlit session memory",
         "raw questionnaire responses",
         "json and excel",
         "local zip",
@@ -57,14 +112,27 @@ def test_operations_guide_describes_current_browser_local_flow() -> None:
         "refreshing or closing the page",
         "cannot be recovered",
         "support contact",
-        "does not upload recording or questionnaire data",
-        "does not store participant data on the server",
+        "recording media is not sent to the streamlit server",
+        "questionnaire answers travel over the streamlit connection",
+        "current server session memory",
+        "not written to server disk or a database",
+        "not sent to external storage",
     )
     assert all(statement in guide for statement in required_statements)
 
 
+def test_operations_guide_does_not_conflate_transient_server_memory_with_upload() -> None:
+    guide = _operations_guide_text()
+    misleading_statements = (
+        "does not upload recording or questionnaire data",
+        "does not store participant data on the server",
+        "no recording or questionnaire transfer",
+    )
+    assert all(statement not in guide for statement in misleading_statements)
+
+
 def test_operations_guide_has_no_legacy_cloud_or_server_media_guidance() -> None:
-    guide = OPERATIONS_GUIDE.read_text(encoding="utf-8").casefold()
+    guide = _operations_guide_text()
     legacy_fragments = (
         "baidu",
         "oauth",
@@ -89,7 +157,7 @@ def test_operations_guide_has_no_legacy_cloud_or_server_media_guidance() -> None
 
 
 def test_operations_guide_contains_no_sensitive_or_study_specific_examples() -> None:
-    guide = OPERATIONS_GUIDE.read_text(encoding="utf-8").casefold()
+    guide = _operations_guide_text()
     prohibited_fragments = (
         "password",
         "token",

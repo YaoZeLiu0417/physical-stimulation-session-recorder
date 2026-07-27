@@ -179,11 +179,36 @@ def _write_python_modules(root: Path, sources: dict[str, str]) -> None:
         path.write_text(source, encoding="utf-8")
 
 
-def _module_trees(closure: dict[str, object]) -> tuple[ast.Module, ...]:
+def _closure_modules(
+    closure: dict[str, object],
+) -> tuple[tuple[str, ast.Module, bool], ...]:
     return tuple(
-        module.tree if isinstance(module, _LocalModule) else module
-        for module in closure.values()
+        (
+            module.name if isinstance(module, _LocalModule) else module_name,
+            module.tree if isinstance(module, _LocalModule) else module,
+            isinstance(module, _LocalModule) and module.path.name == "__init__.py",
+        )
+        for module_name, module in closure.items()
     )
+
+
+def _import_from_base_name(
+    module_name: str,
+    is_package: bool,
+    node: ast.ImportFrom,
+) -> str | None:
+    if not node.level:
+        return node.module
+    package_parts = module_name.split(".")
+    if not is_package:
+        package_parts.pop()
+    parent_count = node.level - 1
+    if parent_count > len(package_parts):
+        return None
+    base_parts = package_parts[: len(package_parts) - parent_count]
+    if node.module:
+        base_parts.extend(node.module.split("."))
+    return ".".join(base_parts) or None
 
 
 def _qualified_expression_name(
@@ -203,7 +228,9 @@ def _qualified_expression_name(
     return f"{resolved_head}{separator}{tail}"
 
 
-def _import_aliases(tree: ast.Module) -> dict[str, str]:
+def _import_aliases(
+    module_name: str, tree: ast.Module, is_package: bool
+) -> dict[str, str]:
     aliases = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -213,13 +240,15 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
                 aliases[bound_name] = (
                     imported if alias.asname else imported.split(".", 1)[0]
                 )
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            module_name = node.module.casefold()
+        elif isinstance(node, ast.ImportFrom):
+            base_name = _import_from_base_name(module_name, is_package, node)
+            if not base_name:
+                continue
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 bound_name = (alias.asname or alias.name).casefold()
-                aliases[bound_name] = f"{module_name}.{alias.name.casefold()}"
+                aliases[bound_name] = f"{base_name}.{alias.name}".casefold()
     return aliases
 
 
@@ -239,37 +268,31 @@ def _docstring_nodes(tree: ast.Module) -> set[ast.Constant]:
 
 
 def _operational_closure_violations(closure: dict[str, object]) -> set[str]:
-    trees = _module_trees(closure)
-    imported_names = {
-        alias.name.casefold()
-        for tree in trees
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    } | {
-        imported_name
-        for tree in trees
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module
-        for imported_name in {
-            node.module.casefold(),
-            *(
-                f"{node.module}.{alias.name}".casefold()
-                for alias in node.names
-                if alias.name != "*"
-            ),
-        }
-    }
-    imported_roots = {name.split(".", 1)[0] for name in imported_names}
+    modules = _closure_modules(closure)
+    imported_names = set()
+    for module_name, tree, is_package in modules:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_names.update(alias.name.casefold() for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                base_name = _import_from_base_name(module_name, is_package, node)
+                if not base_name:
+                    continue
+                imported_names.add(base_name.casefold())
+                imported_names.update(
+                    f"{base_name}.{alias.name}".casefold()
+                    for alias in node.names
+                    if alias.name != "*"
+                )
     prohibited_imports = {
         "requests",
         "httpx",
         "aiohttp",
         "socket",
         "ftplib",
-        "urllib",
+        "urllib.request",
         "urllib3",
-        "http",
+        "http.client",
         "websockets",
         "smtplib",
         "imaplib",
@@ -283,7 +306,12 @@ def _operational_closure_violations(closure: dict[str, object]) -> set[str]:
         "av",
     }
     violations = {
-        f"import:{module}" for module in prohibited_imports & imported_roots
+        f"import:{prohibited}"
+        for prohibited in prohibited_imports
+        if any(
+            imported == prohibited or imported.startswith(f"{prohibited}.")
+            for imported in imported_names
+        )
     }
     exact_identifier_fragments = {
         "history",
@@ -321,13 +349,16 @@ def _operational_closure_violations(closure: dict[str, object]) -> set[str]:
             if fragment in normalized:
                 violations.add(f"source:{fragment}")
 
-    for imported_name in imported_names:
-        for component in imported_name.split("."):
+    for qualified_name in {
+        *(name.casefold() for name, _, _ in modules),
+        *imported_names,
+    }:
+        for component in qualified_name.split("."):
             add_identifier_violations(component)
 
-    for tree in trees:
+    for module_name, tree, is_package in modules:
         docstrings = _docstring_nodes(tree)
-        aliases = _import_aliases(tree)
+        aliases = _import_aliases(module_name, tree, is_package)
         for node in ast.walk(tree):
             identifiers = []
             if isinstance(node, ast.Name):
@@ -347,7 +378,14 @@ def _operational_closure_violations(closure: dict[str, object]) -> set[str]:
                     violations.add("source:st.video")
                 if call_name in prohibited_calls or (
                     call_name is not None
-                    and call_name.startswith("subprocess.check_")
+                    and call_name.startswith(
+                        (
+                            "subprocess.check_",
+                            "os.exec",
+                            "os.spawn",
+                            "os.posix_spawn",
+                        )
+                    )
                 ):
                     violations.add(f"call:{call_name}")
 
@@ -357,10 +395,6 @@ def _operational_closure_violations(closure: dict[str, object]) -> set[str]:
                 and node not in docstrings
             ):
                 value = node.value.casefold()
-                if re.search(r"\bhttps?://", value):
-                    violations.add("url:https")
-                if re.search(r"\bftp://", value):
-                    violations.add("url:ftp")
                 for fragment in (
                     "upload",
                     "baidu",
@@ -1045,6 +1079,25 @@ def test_local_runtime_closure_resolves_relative_submodule(tmp_path, monkeypatch
     assert set(closure) == {"pkg", "pkg.entry", "pkg.sibling"}
 
 
+def test_operational_scanner_keeps_relative_capability_module_name(
+    tmp_path, monkeypatch
+):
+    _write_python_modules(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/entry.py": "from . import cleanup as maintenance\n",
+            "pkg/cleanup.py": "ENABLED = True\n",
+        },
+    )
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+
+    closure = _local_runtime_closure(tmp_path / "pkg/entry.py")
+
+    assert set(closure) == {"pkg", "pkg.entry", "pkg.cleanup"}
+    assert "source:cleanup" in _operational_closure_violations(closure)
+
+
 def test_local_runtime_closure_keeps_same_stem_modules_distinct(tmp_path, monkeypatch):
     _write_python_modules(
         tmp_path,
@@ -1126,8 +1179,40 @@ def test_operational_closure_scanner_rejects_network_and_process_calls(
 
 
 @pytest.mark.parametrize(
+    ("capability", "synthetic_source"),
+    (
+        ("os.execv", "os.execv('tool', ['tool'])"),
+        ("os.execlpe", "os.execlpe('tool', 'tool', {})"),
+        ("os.spawnv", "os.spawnv(0, 'tool', ['tool'])"),
+        ("os.spawnlpe", "os.spawnlpe(0, 'tool', 'tool', {})"),
+        ("os.posix_spawn", "os.posix_spawn('tool', ['tool'], {})"),
+        ("os.posix_spawnp", "os.posix_spawnp('tool', ['tool'], {})"),
+        ("os.execve", "from os import execve as execute\nexecute('tool', ['tool'], {})"),
+        ("os.spawnve", "from os import spawnve as execute\nexecute(0, 'tool', ['tool'], {})"),
+        (
+            "os.posix_spawnp",
+            "from os import posix_spawnp as execute\nexecute('tool', ['tool'], {})",
+        ),
+    ),
+)
+def test_operational_closure_scanner_rejects_os_exec_and_spawn_calls(
+    capability, synthetic_source
+):
+    closure = {"synthetic": ast.parse(synthetic_source)}
+    assert f"call:{capability}" in _operational_closure_violations(closure)
+
+
+@pytest.mark.parametrize(
     "module_name",
-    ("ReQuEsTs", "HtTpX", "AiOhTtP", "SoCkEt", "FtPlIb", "UrLlIb", "HtTp"),
+    (
+        "ReQuEsTs",
+        "HtTpX",
+        "AiOhTtP",
+        "SoCkEt",
+        "FtPlIb",
+        "UrLlIb.ReQuEsT",
+        "HtTp.ClIeNt",
+    ),
 )
 def test_operational_closure_scanner_rejects_case_insensitive_network_imports(
     module_name
@@ -1165,9 +1250,26 @@ def test_operational_closure_scanner_resolves_aliased_process_calls(
     assert f"call:{capability}" in _operational_closure_violations(closure)
 
 
-def test_operational_closure_scanner_rejects_network_urls_case_insensitively():
-    closure = {"synthetic": ast.parse("endpoint = 'HTTPS://example.invalid/api'")}
-    assert "url:https" in _operational_closure_violations(closure)
+def test_operational_closure_scanner_allows_safe_url_and_http_helpers():
+    closure = {
+        "synthetic": ast.parse(
+            "from urllib.parse import urlencode\n"
+            "from http.cookies import SimpleCookie\n"
+            "support_link = 'HTTPS://support.example.invalid/help'\n"
+            "query = urlencode({'topic': 'help'})\n"
+            "cookie = SimpleCookie()\n"
+        )
+    }
+    assert not _operational_closure_violations(closure)
+
+
+def test_operational_closure_scanner_rejects_explicit_upload_endpoint():
+    closure = {
+        "synthetic": ast.parse(
+            "endpoint = 'HTTPS://storage.example.invalid/upload'\n"
+        )
+    }
+    assert "source:upload" in _operational_closure_violations(closure)
 
 
 def test_operational_closure_scanner_ignores_harmless_comments_and_docstrings():
