@@ -64,6 +64,35 @@ class _HostileDatetime(datetime):
         raise RuntimeError("PRIVATE_DATETIME_ABC123")
 
 
+class _RaisingOffset(timedelta):
+    def __new__(cls) -> "_RaisingOffset":
+        return super().__new__(cls)
+
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError("PRIVATE_OFFSET_COMPARE_77")
+
+
+class _LyingNonzeroOffset(timedelta):
+    def __new__(cls) -> "_LyingNonzeroOffset":
+        return super().__new__(cls, hours=9)
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _OffsetTimezone(tzinfo):
+    def __init__(self, offset: timedelta) -> None:
+        self.offset = offset
+        self.utcoffset_calls = 0
+
+    def utcoffset(self, value: datetime | None) -> timedelta | None:
+        self.utcoffset_calls += 1
+        return self.offset
+
+    def dst(self, value: datetime | None) -> timedelta | None:
+        return None
+
+
 def _build_archive(
     *,
     process_clarity: int = 4,
@@ -354,6 +383,29 @@ def test_datetime_subclass_is_rejected_without_calling_hostile_isoformat() -> No
     assert "PRIVATE_DATETIME_ABC123" not in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+
+
+def test_timedelta_subclass_comparison_error_is_sanitized_without_a_chain() -> None:
+    offset_timezone = _OffsetTimezone(_RaisingOffset())
+    generated_at = datetime(2026, 7, 28, tzinfo=offset_timezone)
+
+    with pytest.raises(ValueError, match="generated_at") as error:
+        _build_archive(generated_at=generated_at)
+
+    assert "PRIVATE_OFFSET_COMPARE_77" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert offset_timezone.utcoffset_calls == 1
+
+
+def test_timedelta_subclass_cannot_disguise_a_nonzero_offset() -> None:
+    offset_timezone = _OffsetTimezone(_LyingNonzeroOffset())
+    generated_at = datetime(2026, 7, 28, tzinfo=offset_timezone)
+
+    with pytest.raises(ValueError, match="generated_at"):
+        _build_archive(generated_at=generated_at)
+
+    assert offset_timezone.utcoffset_calls == 1
 
 
 def test_source_is_closed_to_operational_data_storage_and_network_modules() -> None:

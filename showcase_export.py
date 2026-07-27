@@ -40,6 +40,10 @@ def _trusted_generated_at(generated_at: datetime) -> datetime:
         raise ValueError(
             "generated_at timezone could not be validated safely"
         )
+    if type(offset) is not timedelta:
+        raise ValueError(
+            "generated_at timezone could not be validated safely"
+        ) from None
     if offset != timedelta(0):
         raise ValueError("generated_at must be timezone-aware UTC")
     if generated_at.microsecond != 0:
