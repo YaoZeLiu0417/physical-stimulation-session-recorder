@@ -1,13 +1,4 @@
-# Web UI
 streamlit==1.37.1
-streamlit-webrtc==0.63.4
-
-# WebRTC / 视频
-aiortc==1.15.0        # requires av >= 14, < 18
-av==17.0.0            # provides prebuilt Linux wheels
-
-# 基础依赖
 numpy>=1.24,<2.0
-requests>=2.31,<3
-protobuf<5             # 与当前 streamlit 版本更稳
-python-dotenv>=1.0,<2  
+XlsxWriter>=3.2,<4
+protobuf<5

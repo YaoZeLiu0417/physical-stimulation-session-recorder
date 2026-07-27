@@ -39,6 +39,12 @@ from session_record_workflow import (
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "app.py"
+APP_WORKFLOW_PATH = ROOT / "app_workflow.py"
+DELETED_OPERATIONAL_PATHS = (
+    ROOT / "upload_workflow.py",
+    ROOT / "bd_init.py",
+    ROOT / "tests" / "test_upload_workflow.py",
+)
 SESSION_EXACT_KEYS = {
     "operational_record",
     "operational_export_bundle",
@@ -64,6 +70,34 @@ def _source() -> str:
 
 def _tree() -> ast.Module:
     return ast.parse(_source())
+
+
+def _local_runtime_closure(entry_path: Path) -> dict[str, ast.Module]:
+    pending = [entry_path]
+    closure: dict[str, ast.Module] = {}
+    while pending:
+        path = pending.pop()
+        module_name = path.stem
+        if module_name in closure:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        closure[module_name] = tree
+        imported_roots = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        pending.extend(
+            candidate
+            for module in imported_roots
+            if (candidate := ROOT / f"{module}.py").is_file()
+        )
+    return closure
 
 
 def _record(*, visit: str = "daily", day: int = 6) -> dict[str, object]:
@@ -671,6 +705,97 @@ def test_app_source_has_no_server_media_storage_upload_or_history_runtime():
         "st.video",
     )
     assert all(fragment not in lowered for fragment in forbidden_fragments)
+
+
+def test_operational_import_closure_has_no_server_upload_or_history_capability():
+    closure = _local_runtime_closure(APP_PATH)
+    assert {"record_store", "upload_workflow", "bd_init"}.isdisjoint(closure)
+
+    imported_roots = {
+        alias.name.split(".", 1)[0]
+        for tree in closure.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".", 1)[0]
+        for tree in closure.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert {
+        "requests",
+        "toml",
+        "dotenv",
+        "streamlit_webrtc",
+        "aiortc",
+        "av",
+    }.isdisjoint(imported_roots)
+
+    closure_source = "\n".join(ast.unparse(tree).casefold() for tree in closure.values())
+    forbidden_fragments = (
+        "upload",
+        "baidu",
+        "oauth",
+        "refresh_token",
+        "client_secret",
+        "remote_path",
+        "historical recording",
+        "recordings_dir",
+        "local_cleanup",
+        ".flv",
+        ".mp4",
+        "transcod",
+    )
+    assert all(fragment not in closure_source for fragment in forbidden_fragments)
+
+
+def test_obsolete_operational_modules_are_absent_and_unreferenced():
+    assert all(not path.exists() for path in DELETED_OPERATIONAL_PATHS)
+
+    prohibited_modules = {"upload_workflow", "bd_init"}
+    for path in ROOT.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported_roots = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert prohibited_modules.isdisjoint(imported_roots), path.name
+
+
+def test_app_and_workflow_have_no_obsolete_server_media_symbols():
+    source = "\n".join(
+        path.read_text(encoding="utf-8").casefold()
+        for path in (APP_PATH, APP_WORKFLOW_PATH)
+    )
+    forbidden_fragments = (
+        "upload",
+        "requests",
+        "toml",
+        "dotenv",
+        "streamlit_webrtc",
+        "aiortc",
+        "from av",
+        "import av",
+        "completedrecording",
+        "trusted_recording",
+        "recordings_dir",
+        "local_cleanup",
+        "cleanup_pending",
+        "baidu",
+        "oauth",
+        ".flv",
+        ".mp4",
+        "transcod",
+        "historical",
+    )
+    assert all(fragment not in source for fragment in forbidden_fragments)
 
 
 def test_runtime_call_order_is_context_then_recorder_then_questionnaire_then_export():
