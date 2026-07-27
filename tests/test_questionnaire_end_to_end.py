@@ -3,6 +3,7 @@ from datetime import date
 from io import BytesIO
 import json
 from pathlib import Path
+import re
 from zipfile import ZipFile
 
 import openpyxl
@@ -50,12 +51,121 @@ RECORDING_KEYS = (
 ALLOWED_RUNTIME_CACHE_DIRS = frozenset(
     {".pytest_cache", ".streamlit", "__pycache__"}
 )
+FORBIDDEN_PARTICIPANT_TERMS = frozenset(
+    {
+        "derived",
+        "risk",
+        "risks",
+        "score",
+        "scored",
+        "scores",
+        "scoring",
+        "threshold",
+        "thresholds",
+        "path",
+        "paths",
+        "upload",
+        "uploaded",
+        "uploading",
+        "uploads",
+    }
+)
+PRIVATE_EXPORT_IDENTIFIERS = frozenset(
+    {
+        "derived_metrics",
+        "formal_visits",
+        "local_path",
+        "raw_answers",
+        "record_id",
+        "remote_path",
+        "revision",
+        "safety_signals",
+        "video_filename",
+    }
+)
+PARTICIPANT_ARTIFACT_SUFFIXES = frozenset(
+    {
+        ".avi",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".webm",
+        ".xls",
+        ".xlsx",
+        ".zip",
+    }
+)
+PARTICIPANT_ARTIFACT_NAME_TOKENS = frozenset(
+    {
+        "answer",
+        "answers",
+        "participant",
+        "questionnaire",
+        "recording",
+        "recordings",
+        "response",
+        "responses",
+    }
+)
+PARTICIPANT_DATA_IDENTIFIERS = frozenset(
+    {
+        "answers",
+        "answered_field_ids",
+        "conditional_details",
+        "daily_core",
+        "formal_visits",
+        "participant_id",
+        "questionnaire_answers",
+        "record_id",
+        "responses",
+        "subject_id",
+        "weekly_extension",
+    }
+)
+
+
+def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
+    path_tokens = {
+        token
+        for part in relative.parts
+        for token in re.findall(r"[a-z0-9]+", part.casefold())
+    }
+    if "recordings" in path_tokens:
+        return "recordings directory"
+    if path.is_dir():
+        return None
+    if path.suffix.casefold() in PARTICIPANT_ARTIFACT_SUFFIXES:
+        return f"prohibited {path.suffix.casefold()} artifact"
+    if path.suffix.casefold() in {".pyc", ".pyo"}:
+        return None
+    if (
+        path.name.casefold() in {"index", "index.json"}
+        and "store" in path_tokens
+    ):
+        return "store index"
+    if path_tokens & PARTICIPANT_ARTIFACT_NAME_TOKENS:
+        return "participant artifact name"
+    if path.suffix.casefold() in {".csv", ".json", ".tsv", ".txt"}:
+        text = path.read_bytes()[:1_048_577].decode("utf-8", errors="ignore")
+        identifiers = set(
+            re.findall(r"[a-z0-9]+(?:_[a-z0-9]+)*", text.casefold())
+        )
+        if identifiers & PARTICIPANT_DATA_IDENTIFIERS:
+            return "participant data fields"
+    return None
 
 
 def _operational_side_effect_snapshot(root: Path) -> dict[str, object]:
     snapshot: dict[str, object] = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
+        artifact_reason = _participant_artifact_reason(path, relative)
+        assert artifact_reason is None, (
+            f"participant artifact detected at {relative.as_posix()}: "
+            f"{artifact_reason}"
+        )
         if ALLOWED_RUNTIME_CACHE_DIRS.intersection(relative.parts):
             continue
         key = relative.as_posix()
@@ -283,6 +393,69 @@ def _assert_json_cell(actual: object, expected: object) -> None:
     assert json.loads(actual) == expected
 
 
+def _participant_bundle(app):
+    bundle = app.session_state[SESSION_EXPORT_KEY]
+    assert bundle.filename == "session-20260727-103000.zip"
+    assert bundle.mime_type == "application/zip"
+    with ZipFile(BytesIO(bundle.data)) as archive:
+        assert archive.namelist() == ["responses.json", "responses.xlsx"]
+        payload = json.loads(archive.read("responses.json"))
+        workbook_data = archive.read("responses.xlsx")
+    workbook = openpyxl.load_workbook(BytesIO(workbook_data), data_only=False)
+    return payload, workbook
+
+
+def _surface_strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _surface_strings(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _surface_strings(item)
+    elif value is not None:
+        yield str(value)
+
+
+def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
+    workbook_values = tuple(
+        value
+        for worksheet in workbook.worksheets
+        for row in worksheet.iter_rows(values_only=True)
+        for value in row
+        if value is not None
+    )
+    surfaces = {
+        "participant-visible text": _visible_text(app),
+        "participant JSON": payload,
+        "participant XLSX": workbook_values,
+    }
+    for label, surface in surfaces.items():
+        strings = tuple(_surface_strings(surface))
+        terms = {
+            token
+            for value in strings
+            for token in re.findall(r"[a-z0-9]+", value.casefold())
+        }
+        forbidden_terms = terms & FORBIDDEN_PARTICIPANT_TERMS
+        assert not forbidden_terms, (
+            f"{label} exposes forbidden participant terms: "
+            f"{sorted(forbidden_terms)}"
+        )
+        identifiers = {
+            identifier
+            for value in strings
+            for identifier in re.findall(
+                r"[a-z0-9]+(?:_[a-z0-9]+)*", value.casefold()
+            )
+        }
+        private_identifiers = identifiers & PRIVATE_EXPORT_IDENTIFIERS
+        assert not private_identifiers, (
+            f"{label} exposes private identifiers: "
+            f"{sorted(private_identifiers)}"
+        )
+
+
 def test_visible_text_collector_captures_every_structured_render_channel(tmp_path):
     sentinel = "VISIBLE-CHANNEL-SENTINEL-7F31"
     app_path = tmp_path / "visible_channels.py"
@@ -439,6 +612,78 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
     app = _complete_fixture(_start_fixture("day1"), flow, "daily", answers)
 
     assert SESSION_EXPORT_KEY in app.session_state
+    assert _operational_side_effect_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "data"),
+    (
+        pytest.param(
+            ".pytest_cache/sub-001.json",
+            b'{"participant_id":"sub-001"}',
+            id="participant-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"answers":{"nssi_urge_now":3}}',
+            id="generic-participant-json",
+        ),
+        pytest.param(
+            ".streamlit/responses.xlsx",
+            b"participant workbook",
+            id="participant-xlsx",
+        ),
+        pytest.param(
+            "__pycache__/responses.zip",
+            b"participant archive",
+            id="participant-zip",
+        ),
+        pytest.param(
+            ".pytest_cache/recording.webm",
+            b"participant video",
+            id="participant-video",
+        ),
+        pytest.param(
+            ".streamlit/recordings/chunk.bin",
+            b"participant media",
+            id="recordings-directory",
+        ),
+        pytest.param(
+            "__pycache__/record_store/index.json",
+            b'{"records":["sub-001"]}',
+            id="store-index",
+        ),
+        pytest.param(
+            ".pytest_cache/cache.csv",
+            b"participant_id,answer\nsub-001,true\n",
+            id="other-participant-data",
+        ),
+    ),
+)
+def test_cache_directories_cannot_hide_participant_artifacts(
+    tmp_path, relative_path, data
+):
+    artifact = tmp_path / relative_path
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(data)
+
+    with pytest.raises(AssertionError, match="participant artifact"):
+        _operational_side_effect_snapshot(tmp_path)
+
+
+def test_operational_snapshot_allows_only_benign_cache_changes(tmp_path):
+    before = _operational_side_effect_snapshot(tmp_path)
+    benign_cache_files = {
+        ".pytest_cache/v/cache/nodeids": b"[]",
+        ".streamlit/config.toml": b"[browser]\ngatherUsageStats = false\n",
+        ".streamlit/metrics.csv": b"metric,value\nruns,1\n",
+        "__pycache__/questionnaire_app.pyc": b"ordinary bytecode cache",
+    }
+    for relative_path, data in benign_cache_files.items():
+        cache_file = tmp_path / relative_path
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_bytes(data)
+
     assert _operational_side_effect_snapshot(tmp_path) == before
 
 
@@ -649,6 +894,52 @@ def test_day_seven_keeps_daily_and_weekly_raw_inventory_distinct():
     }
 
 
+def test_day_seven_browser_journey_exports_weekly_raw_answers():
+    weekly_questions = _weekly_questions()
+    weekly_answers = {
+        question.id: _raw_value(question, positive=True)
+        for question in weekly_questions
+    }
+    answers = {**_negative_daily_answers(), **weekly_answers}
+    flow = build_flow(answers, 7)
+
+    app = _complete_fixture(
+        _start_fixture("day7"),
+        flow,
+        "daily",
+        answers,
+    )
+    record = app.session_state[SESSION_RECORD_KEY]
+    payload, workbook = _participant_bundle(app)
+
+    weekly_ids = [question.id for question in weekly_questions]
+    assert questionnaire_visit_complete(record, "daily") is True
+    assert record["weekly_extension"] == weekly_answers
+    assert payload["intervention_day"] == 7
+    assert payload["answered_field_ids"] == [question.id for question in flow]
+    weekly_json = [
+        item for item in payload["responses"] if item["field_id"] in weekly_ids
+    ]
+    assert [item["field_id"] for item in weekly_json] == weekly_ids
+    assert [item["raw_value"] for item in weekly_json] == [
+        weekly_answers[field_id] for field_id in weekly_ids
+    ]
+    assert {item["instrument_id"] for item in weekly_json} == {
+        instrument.id for instrument in WEEKLY_INSTRUMENTS
+    }
+    weekly_rows = [
+        row
+        for row in _worksheet_rows(workbook["Responses"])
+        if row["field_id"] in weekly_ids
+    ]
+    assert [row["field_id"] for row in weekly_rows] == weekly_ids
+    assert [row["raw_value"] for row in weekly_rows] == [
+        weekly_answers[field_id] for field_id in weekly_ids
+    ]
+    _assert_participant_surfaces_are_raw_only(app, payload, workbook)
+    assert len(app.get("download_button")) == 1
+
+
 @pytest.mark.parametrize("visit", tuple(VISIT_INSTRUMENT_IDS))
 def test_every_formal_visit_keeps_complete_instrument_and_item_inventory(visit):
     record = _new_record(day=7, visit=visit)
@@ -774,22 +1065,7 @@ def test_every_formal_visit_completes_browser_journey_to_local_export(visit):
     }
     assert exported_answers == answers
     workbook = openpyxl.load_workbook(BytesIO(workbook_data), data_only=False)
-    private_surface = "\n".join(
-        (
-            json.dumps(payload, ensure_ascii=False),
-            *(
-                str(value)
-                for worksheet in workbook.worksheets
-                for row in worksheet.iter_rows(values_only=True)
-                for value in row
-                if value is not None
-            ),
-        )
-    ).casefold()
-    assert all(
-        forbidden not in private_surface
-        for forbidden in ("score", "risk", "derived_metrics", "safety_signals")
-    )
+    _assert_participant_surfaces_are_raw_only(app, payload, workbook)
 
 
 def test_browser_required_gate_and_back_navigation_restore_answer_and_step():
@@ -1025,32 +1301,8 @@ def test_current_visit_export_has_exact_json_xlsx_raw_inventory_and_private_surf
     assert tuple(recording_rows[0]) == RECORDING_KEYS
     assert recording_rows[0]["status"] == "saved"
 
-    serialized = json.dumps(payload, ensure_ascii=False).casefold()
-    workbook_surface = "\n".join(
-        str(value)
-        for worksheet in workbook.worksheets
-        for row in worksheet.iter_rows(values_only=True)
-        for value in row
-        if value is not None
-    ).casefold()
-    forbidden = (
-        "score",
-        "risk",
-        "upload",
-        "remote_path",
-        "local_path",
-        "record_id",
-        "revision",
-        "derived_metrics",
-        "safety_signals",
-        "formal_visits",
-        "raw_answers",
-        "video_filename",
-    )
-    assert all(value not in serialized for value in forbidden)
-    assert all(value not in workbook_surface for value in forbidden)
-    visible = _visible_text(app).casefold()
-    assert all(value not in visible for value in forbidden)
+    _assert_participant_surfaces_are_raw_only(app, payload, workbook)
+
     assert len(app.get("download_button")) == 1
 
     finish = _unique_element(
