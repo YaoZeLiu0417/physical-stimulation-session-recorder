@@ -20,15 +20,24 @@ from make_links import build_subject_link
 def test_link_auth_imports_participant_validation_from_pure_module() -> None:
     source_path = Path(__file__).parent.parent / "link_auth.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    imports = {
+    from_imports = {
         (node.module, alias.name)
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
         for alias in node.names
     }
+    imported_roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported_roots.add(node.module.split(".", 1)[0])
+            else:
+                imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
 
-    assert ("participant_identity", "validate_subject_id") in imports
-    assert ("record_store", "validate_subject_id") not in imports
+    assert ("participant_identity", "validate_subject_id") in from_imports
+    assert "record_store" not in imported_roots
 
 
 def test_daily_signature_is_compatible_with_existing_links() -> None:

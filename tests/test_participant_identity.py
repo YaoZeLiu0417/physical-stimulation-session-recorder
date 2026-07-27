@@ -3,7 +3,7 @@ import pytest
 from participant_identity import validate_subject_id
 
 
-@pytest.mark.parametrize("subject_id", ["sub-001", "A", "user_name-2"])
+@pytest.mark.parametrize("subject_id", ["sub-001", "A", "user_name-2", "a" * 64])
 def test_validate_subject_id_accepts_exact_safe_identifiers(subject_id):
     assert validate_subject_id(subject_id) == subject_id
 
@@ -19,6 +19,8 @@ def test_validate_subject_id_accepts_exact_safe_identifiers(subject_id):
         "sub/001",
         "sub\\001",
         ".subject",
+        "_subject",
+        "-subject",
         "sub.name",
         "sub?001",
         "sub\n001",
