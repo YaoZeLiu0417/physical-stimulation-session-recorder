@@ -43,6 +43,7 @@ SHOWCASE_ARCHIVE_KEY = "showcase_synthetic_archive"
 SHOWCASE_EXPORT_ERROR_KEY = "showcase_export_error"
 SHOWCASE_LOCAL_SAVE_KEY = "showcase_export_saved_confirmed"
 SHOWCASE_DOWNLOAD_BUTTON_KEY = "showcase_download_archive"
+SHOWCASE_RETRY_BUTTON_KEY = "showcase_retry_export"
 SHOWCASE_DATA_KEYS = (
     *SYNTHETIC_RESPONSES,
     "showcase_camera_started",
@@ -51,6 +52,7 @@ SHOWCASE_DATA_KEYS = (
     SHOWCASE_EXPORT_ERROR_KEY,
     SHOWCASE_LOCAL_SAVE_KEY,
     SHOWCASE_DOWNLOAD_BUTTON_KEY,
+    SHOWCASE_RETRY_BUTTON_KEY,
 )
 RAW_WIDGET_WITH_PRIVATE_FIELDS = {
     "mode": "demo",
@@ -298,6 +300,7 @@ def _seed_download_state(app: AppTest) -> None:
     app.session_state[SHOWCASE_EXPORT_ERROR_KEY] = True
     app.session_state[SHOWCASE_LOCAL_SAVE_KEY] = True
     app.session_state[SHOWCASE_DOWNLOAD_BUTTON_KEY] = True
+    app.session_state[SHOWCASE_RETRY_BUTTON_KEY] = True
 
 
 def test_showcase_fails_closed_without_configured_password(monkeypatch):
@@ -902,8 +905,15 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
         and "/secret/path.zip" not in repr(value)
         for value in app.session_state.filtered_state.values()
     )
+    retry_button = _element_by_key(app.button, SHOWCASE_RETRY_BUTTON_KEY)
+    assert retry_button.label == "重试生成"
 
     app.run()
+
+    assert not app.exception
+    assert len(attempts) == 1
+    assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    _element_by_key(app.button, SHOWCASE_RETRY_BUTTON_KEY).click().run()
 
     assert not app.exception
     assert len(attempts) == 2
@@ -914,6 +924,69 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     } == SYNTHETIC_RESPONSES
     assert app.session_state["showcase_recorder_status"] == status
     assert len(app.get("download_button")) == 1
+    assert app.session_state["showcase_step"] == "download"
+    assert _element_by_key(app.button, "finish_download").disabled is True
+
+
+@pytest.mark.parametrize(
+    "invalid_status",
+    ("missing", "non-status", "non-terminal"),
+)
+def test_download_fails_closed_for_missing_or_invalid_recording_status(
+    monkeypatch,
+    invalid_status,
+):
+    build_calls: list[dict[str, object]] = []
+
+    def forbidden_builder(**kwargs):
+        build_calls.append(kwargs)
+        return SyntheticShowcaseArchive(
+            filename="distorted-synthetic-session.zip",
+            data=b"distorted-synthetic-zip",
+        )
+
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        forbidden_builder,
+    )
+    app = _app_with_password()
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = "download"
+    app.session_state["showcase_camera_started"] = True
+    for key, value in SYNTHETIC_RESPONSES.items():
+        app.session_state[key] = value
+    if invalid_status == "non-status":
+        app.session_state["showcase_recorder_status"] = {
+            "state": "saved",
+            "detail": "PRIVATE-RECORDING-STATUS",
+        }
+    elif invalid_status == "non-terminal":
+        app.session_state["showcase_recorder_status"] = RecorderStatus(
+            state="recording",
+            duration_seconds=3,
+        )
+
+    app.run()
+
+    assert not app.exception
+    assert build_calls == []
+    assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    assert SHOWCASE_ARCHIVE_KEY not in app.session_state
+    assert not app.get("download_button")
+    assert not [button for button in app.button if button.key == "finish_download"]
+    assert "下载文件暂时无法生成，请重试。" in _visible_text(app)
+    assert "PRIVATE-RECORDING-STATUS" not in _visible_text(app)
+    assert {
+        key: app.session_state[key] for key in SYNTHETIC_RESPONSES
+    } == SYNTHETIC_RESPONSES
+
+    _element_by_key(app.button, SHOWCASE_RETRY_BUTTON_KEY).click().run()
+
+    assert not app.exception
+    assert build_calls == []
+    assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    assert app.session_state["showcase_step"] == "download"
 
 
 @pytest.mark.parametrize("recording_state", ("skipped", "failed"))

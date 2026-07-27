@@ -25,6 +25,7 @@ SHOWCASE_ARCHIVE_KEY = "showcase_synthetic_archive"
 SHOWCASE_EXPORT_ERROR_KEY = "showcase_export_error"
 SHOWCASE_LOCAL_SAVE_KEY = "showcase_export_saved_confirmed"
 SHOWCASE_DOWNLOAD_BUTTON_KEY = "showcase_download_archive"
+SHOWCASE_RETRY_BUTTON_KEY = "showcase_retry_export"
 SHOWCASE_SESSION_KEYS = (
     *SYNTHETIC_RESPONSE_KEYS,
     "showcase_camera_started",
@@ -33,6 +34,7 @@ SHOWCASE_SESSION_KEYS = (
     SHOWCASE_EXPORT_ERROR_KEY,
     SHOWCASE_LOCAL_SAVE_KEY,
     SHOWCASE_DOWNLOAD_BUTTON_KEY,
+    SHOWCASE_RETRY_BUTTON_KEY,
 )
 
 st.set_page_config(page_title=PRODUCT_NAME, layout="centered")
@@ -159,32 +161,39 @@ def _return_to_overview() -> None:
     st.rerun()
 
 
-def _build_cached_synthetic_archive():
+def _recording_export_state() -> str:
+    status = st.session_state.get(RECORDER_STATUS_KEY)
+    if not isinstance(status, RecorderStatus):
+        raise ValueError("recording state is unavailable")
+    if status.state not in {"saved", "skipped", "failed"}:
+        raise ValueError("recording state is not final")
+    return status.state
+
+
+def _preserve_completed_ratings() -> dict[str, object]:
     completed_ratings = {
         key: st.session_state[key]
         for key in SYNTHETIC_RESPONSE_KEYS
         if key in st.session_state
     }
+    # Keep completed widget values when Streamlit cleans up off-screen sliders.
     for key, value in completed_ratings.items():
         st.session_state[key] = value
+    return completed_ratings
 
+
+def _build_cached_synthetic_archive(completed_ratings: dict[str, object]):
     cached_archive = st.session_state.get(SHOWCASE_ARCHIVE_KEY)
     if cached_archive is not None:
         return cached_archive
 
-    status = st.session_state.get(RECORDER_STATUS_KEY)
-    recording_state = (
-        status.state
-        if isinstance(status, RecorderStatus)
-        and status.state in {"saved", "skipped", "failed"}
-        else "skipped"
-    )
-    camera_smoothness = (
-        st.session_state.get("camera_smoothness")
-        if recording_state == "saved"
-        else None
-    )
     try:
+        recording_state = _recording_export_state()
+        camera_smoothness = (
+            st.session_state.get("camera_smoothness")
+            if recording_state == "saved"
+            else None
+        )
         archive = build_synthetic_showcase_zip(
             process_clarity=completed_ratings["process_clarity"],
             camera_smoothness=camera_smoothness,
@@ -205,12 +214,30 @@ def _build_cached_synthetic_archive():
     return archive
 
 
+def _retry_synthetic_export() -> None:
+    st.session_state.pop(SHOWCASE_EXPORT_ERROR_KEY, None)
+
+
+def _render_export_retry() -> None:
+    st.warning("下载文件暂时无法生成，请重试。")
+    st.button(
+        "重试生成",
+        key=SHOWCASE_RETRY_BUTTON_KEY,
+        on_click=_retry_synthetic_export,
+    )
+
+
 def _render_synthetic_download() -> None:
     st.subheader("下载合成演示数据")
     st.caption("下载文件仅包含合成演示内容，并且只会保存在本机。")
-    archive = _build_cached_synthetic_archive()
+    completed_ratings = _preserve_completed_ratings()
+    if st.session_state.get(SHOWCASE_EXPORT_ERROR_KEY) is True:
+        _render_export_retry()
+        return
+
+    archive = _build_cached_synthetic_archive(completed_ratings)
     if archive is None:
-        st.warning("下载文件暂时无法生成，请重试。")
+        _render_export_retry()
         return
 
     st.download_button(
