@@ -274,7 +274,7 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
     path_tokens = {
         token
         for part in relative.parts
-        for token in re.findall(r"[a-z0-9]+", part.casefold())
+        for token in _privacy_tokens(part)
     }
     if "recordings" in path_tokens:
         return "recordings directory"
@@ -284,9 +284,7 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
         return f"prohibited {path.suffix.casefold()} artifact"
     if path.suffix.casefold() in {".pyc", ".pyo"}:
         return None
-    filename_tokens = set(
-        re.findall(r"[a-z0-9]+", path.name.casefold())
-    )
+    filename_tokens = set(_privacy_tokens(path.name))
     if (
         "index" in filename_tokens
         and "store" in path_tokens
@@ -300,6 +298,8 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
     try:
         json_value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError):
+        if path.suffix.casefold() == ".json":
+            return "unparseable cache JSON"
         match = PARTICIPANT_DATA_BYTE_PATTERN.search(data)
         if match is not None:
             marker = match.group().decode("utf-8", errors="replace")
@@ -954,6 +954,31 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
             id="mixed-case-cache-directory",
         ),
         pytest.param(
+            "__PYCACHE__/cache.json",
+            b'{"participantId":"sub-001"}',
+            id="mixed-case-pycache-sensitive-json",
+        ),
+        pytest.param(
+            ".streamlit/participantData.json",
+            b'{"cache":"neutral"}',
+            id="camel-case-participant-artifact-name",
+        ),
+        pytest.param(
+            ".streamlit/ParticipantData.json",
+            b'{"cache":"neutral"}',
+            id="pascal-case-participant-artifact-name",
+        ),
+        pytest.param(
+            ".streamlit/truncated.json",
+            b'{"participantId":"sub-001"',
+            id="truncated-utf8-camel-json",
+        ),
+        pytest.param(
+            ".streamlit/truncated.json",
+            '{"participant_id":"sub-001"'.encode("utf-16le"),
+            id="truncated-utf16-snake-json",
+        ),
+        pytest.param(
             ".streamlit/cache.json",
             b'{"value":{"nssi_urge_now":3}}',
             id="questionnaire-field-json",
@@ -1068,6 +1093,15 @@ def test_operational_snapshot_allows_only_benign_cache_changes(tmp_path):
         cache_file = tmp_path / relative_path
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_bytes(data)
+
+    assert _operational_side_effect_snapshot(tmp_path) == before
+
+
+def test_mixed_case_pycache_allows_neutral_pyc(tmp_path):
+    before = _operational_side_effect_snapshot(tmp_path)
+    cache_file = tmp_path / "__PYCACHE__/ordinary.pyc"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_bytes(b"ordinary mixed-case bytecode cache")
 
     assert _operational_side_effect_snapshot(tmp_path) == before
 
