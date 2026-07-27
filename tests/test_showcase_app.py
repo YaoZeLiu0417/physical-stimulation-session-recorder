@@ -2,6 +2,7 @@ import ast
 import hashlib
 import re
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,9 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import browser_recorder
+import showcase_export
 from browser_recorder import RecorderStatus
+from showcase_export import SyntheticShowcaseArchive
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +39,19 @@ RECORDER_SESSION_KEYS = (
     "showcase_recorder_status",
     "showcase_session_recorder",
 )
+SHOWCASE_ARCHIVE_KEY = "showcase_synthetic_archive"
+SHOWCASE_EXPORT_ERROR_KEY = "showcase_export_error"
+SHOWCASE_LOCAL_SAVE_KEY = "showcase_export_saved_confirmed"
+SHOWCASE_DOWNLOAD_BUTTON_KEY = "showcase_download_archive"
+SHOWCASE_DATA_KEYS = (
+    *SYNTHETIC_RESPONSES,
+    "showcase_camera_started",
+    *RECORDER_SESSION_KEYS,
+    SHOWCASE_ARCHIVE_KEY,
+    SHOWCASE_EXPORT_ERROR_KEY,
+    SHOWCASE_LOCAL_SAVE_KEY,
+    SHOWCASE_DOWNLOAD_BUTTON_KEY,
+)
 RAW_WIDGET_WITH_PRIVATE_FIELDS = {
     "mode": "demo",
     "state": "saved",
@@ -58,7 +74,28 @@ PROGRESS_LABELS = (
     "1 安全进入",
     "2 会话记录",
     "3 引导反馈",
-    "4 完成确认",
+    "4 本地下载",
+    "5 完成确认",
+)
+EXPECTED_DOWNLOAD_INVENTORY = (
+    ("title", "value", PRODUCT_NAME),
+    ("caption", "value", PRODUCT_CAPTION),
+    (
+        "markdown",
+        "value",
+        '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
+    ),
+    ("subheader", "value", "下载合成演示数据"),
+    (
+        "caption",
+        "value",
+        "下载文件仅包含合成演示内容，并且只会保存在本机。",
+    ),
+    ("download_button", "value", False),
+    ("download_button", "label", "下载合成演示 ZIP"),
+    ("checkbox", "value", False),
+    ("checkbox", "label", "我已确认合成 ZIP 已保存在本机"),
+    ("button", "label", "完成演示"),
 )
 EXPECTED_CONFIRMATION_INVENTORY = (
     ("title", "value", PRODUCT_NAME),
@@ -111,19 +148,26 @@ def _visible_text(app: AppTest) -> str:
         "error",
         "success",
         "button",
+        "checkbox",
         "slider",
         "text_input",
     ):
         for element in getattr(app, collection_name):
             attributes = (
                 ("label", "help", "placeholder")
-                if collection_name in {"button", "slider", "text_input"}
+                if collection_name
+                in {"button", "checkbox", "slider", "text_input"}
                 else ("value", "label", "help", "placeholder")
             )
             for attribute in attributes:
                 value = getattr(element, attribute, None)
                 if value is not None:
                     values.append(str(value))
+    for element in app.get("download_button"):
+        for attribute in ("label", "help"):
+            value = getattr(element, attribute, None)
+            if value is not None:
+                values.append(str(value))
     return "\n".join(values)
 
 
@@ -219,6 +263,41 @@ def _capture_app(monkeypatch, status=RecorderStatus()) -> tuple[AppTest, list]:
 
     assert not app.exception
     return app, recorder_calls
+
+
+def _advance_to_download(
+    monkeypatch,
+    *,
+    status: RecorderStatus,
+    responses: dict[str, int],
+) -> AppTest:
+    app, _ = _capture_app(monkeypatch, status)
+    continue_key = (
+        "finish_capture"
+        if status.state == "saved" and status.saved_confirmed
+        else "continue_without_recording"
+    )
+    _element_by_key(app.button, continue_key).click().run()
+    for key, value in responses.items():
+        _element_by_key(app.slider, key).set_value(value)
+    app.run()
+    _element_by_key(app.button, "save_reflection").click().run()
+    assert not app.exception
+    assert app.session_state["showcase_step"] == "download"
+    return app
+
+
+def _seed_download_state(app: AppTest) -> None:
+    for key, value in SYNTHETIC_RESPONSES.items():
+        app.session_state[key] = value
+    app.session_state["showcase_camera_started"] = True
+    app.session_state[SHOWCASE_ARCHIVE_KEY] = SyntheticShowcaseArchive(
+        filename="synthetic-session.zip",
+        data=b"synthetic-zip",
+    )
+    app.session_state[SHOWCASE_EXPORT_ERROR_KEY] = True
+    app.session_state[SHOWCASE_LOCAL_SAVE_KEY] = True
+    app.session_state[SHOWCASE_DOWNLOAD_BUTTON_KEY] = True
 
 
 def test_showcase_fails_closed_without_configured_password(monkeypatch):
@@ -662,11 +741,13 @@ def test_recorder_can_return_to_overview_and_clears_recorder_state(
     app.session_state["showcase_session_recorder"] = dict(
         RAW_WIDGET_WITH_PRIVATE_FIELDS
     )
+    _seed_download_state(app)
 
     _element_by_key(app.button, "return_to_overview").click().run()
 
     assert app.session_state["showcase_step"] == "overview"
-    for key in RECORDER_SESSION_KEYS:
+    assert app.session_state["showcase_authenticated"] is True
+    for key in SHOWCASE_DATA_KEYS:
         assert key not in app.session_state
 
 
@@ -681,6 +762,7 @@ def test_restart_clears_recorder_state_without_exposing_raw_status():
     app.session_state["showcase_session_recorder"] = dict(
         RAW_WIDGET_WITH_PRIVATE_FIELDS
     )
+    _seed_download_state(app)
     app.run()
 
     assert not app.exception
@@ -691,12 +773,235 @@ def test_restart_clears_recorder_state_without_exposing_raw_status():
     _element_by_key(app.button, "restart_demo").click().run()
 
     assert app.session_state["showcase_step"] == "overview"
-    for key in RECORDER_SESSION_KEYS:
+    assert app.session_state["showcase_authenticated"] is True
+    for key in SHOWCASE_DATA_KEYS:
         assert key not in app.session_state
+
+
+def test_download_builds_once_and_uses_exact_cached_archive_contract(
+    monkeypatch,
+):
+    archive = SyntheticShowcaseArchive(
+        filename="synthetic-session-20260728-091530.zip",
+        data=b"exact-synthetic-zip-bytes",
+    )
+    build_calls: list[dict[str, object]] = []
+    download_calls: list[dict[str, object]] = []
+
+    def build_archive(**kwargs):
+        build_calls.append(kwargs)
+        return archive
+
+    def capture_download(**kwargs):
+        download_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        build_archive,
+    )
+    monkeypatch.setattr(st, "download_button", capture_download)
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+
+    app = _advance_to_download(
+        monkeypatch,
+        status=RecorderStatus(
+            state="saved",
+            duration_seconds=3,
+            camera_ready=True,
+            microphone_ready=True,
+            saved_confirmed=True,
+        ),
+        responses=dict(SYNTHETIC_RESPONSES),
+    )
+    after = datetime.now(timezone.utc).replace(microsecond=0)
+
+    assert len(build_calls) == 1
+    assert build_calls[0] == {
+        **SYNTHETIC_RESPONSES,
+        "recording_state": "saved",
+        "generated_at": build_calls[0]["generated_at"],
+    }
+    generated_at = build_calls[0]["generated_at"]
+    assert type(generated_at) is datetime
+    assert generated_at.tzinfo is timezone.utc
+    assert generated_at.microsecond == 0
+    assert before <= generated_at <= after
+    assert app.session_state[SHOWCASE_ARCHIVE_KEY] is archive
+    assert SHOWCASE_EXPORT_ERROR_KEY not in app.session_state
+    assert app.session_state["showcase_step"] == "download"
+    assert download_calls == [
+        {
+            "label": "下载合成演示 ZIP",
+            "data": archive.data,
+            "file_name": archive.filename,
+            "mime": "application/zip",
+            "key": SHOWCASE_DOWNLOAD_BUTTON_KEY,
+        }
+    ]
+    assert _element_by_key(app.button, "finish_download").disabled is True
+
+    app.run()
+
+    assert not app.exception
+    assert len(build_calls) == 1
+    assert app.session_state[SHOWCASE_ARCHIVE_KEY] is archive
+    assert app.session_state["showcase_step"] == "download"
+    assert download_calls == [download_calls[0], download_calls[0]]
+
+
+def test_download_failure_is_neutral_retryable_and_preserves_all_state(
+    monkeypatch,
+):
+    status = RecorderStatus(
+        state="saved",
+        duration_seconds=3,
+        camera_ready=True,
+        microphone_ready=True,
+        saved_confirmed=True,
+    )
+    archive = SyntheticShowcaseArchive(
+        filename="synthetic-session.zip",
+        data=b"retry-synthetic-zip",
+    )
+    attempts: list[dict[str, object]] = []
+
+    def flaky_builder(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RuntimeError("PRIVATE-EXPORT-TRACE-/secret/path.zip")
+        return archive
+
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        flaky_builder,
+    )
+    app = _advance_to_download(
+        monkeypatch,
+        status=status,
+        responses=dict(SYNTHETIC_RESPONSES),
+    )
+
+    visible = _visible_text(app)
+    assert "下载文件暂时无法生成，请重试。" in visible
+    assert "PRIVATE-EXPORT-TRACE" not in visible
+    assert "/secret/path.zip" not in visible
+    assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    assert type(app.session_state[SHOWCASE_EXPORT_ERROR_KEY]) is bool
+    assert SHOWCASE_ARCHIVE_KEY not in app.session_state
+    assert not app.get("download_button")
+    assert not [button for button in app.button if button.key == "finish_download"]
+    assert {
+        key: app.session_state[key] for key in SYNTHETIC_RESPONSES
+    } == SYNTHETIC_RESPONSES
+    assert app.session_state["showcase_recorder_status"] == status
+    assert all(
+        "PRIVATE-EXPORT-TRACE" not in repr(value)
+        and "/secret/path.zip" not in repr(value)
+        for value in app.session_state.filtered_state.values()
+    )
+
+    app.run()
+
+    assert not app.exception
+    assert len(attempts) == 2
+    assert app.session_state[SHOWCASE_ARCHIVE_KEY] is archive
+    assert SHOWCASE_EXPORT_ERROR_KEY not in app.session_state
+    assert {
+        key: app.session_state[key] for key in SYNTHETIC_RESPONSES
+    } == SYNTHETIC_RESPONSES
+    assert app.session_state["showcase_recorder_status"] == status
+    assert len(app.get("download_button")) == 1
+
+
+@pytest.mark.parametrize("recording_state", ("skipped", "failed"))
+def test_download_uses_none_camera_rating_without_saved_recording(
+    monkeypatch,
+    recording_state,
+):
+    archive = SyntheticShowcaseArchive(
+        filename="synthetic-session.zip",
+        data=b"non-camera-synthetic-zip",
+    )
+    build_calls: list[dict[str, object]] = []
+
+    def build_archive(**kwargs):
+        build_calls.append(kwargs)
+        return archive
+
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        build_archive,
+    )
+    status = RecorderStatus(
+        state=recording_state,
+        error_code="write_failed" if recording_state == "failed" else None,
+    )
+    responses = {key: SYNTHETIC_RESPONSES[key] for key in NON_CAMERA_RESPONSE_KEYS}
+
+    app = _advance_to_download(
+        monkeypatch,
+        status=status,
+        responses=responses,
+    )
+
+    assert len(build_calls) == 1
+    assert build_calls[0]["camera_smoothness"] is None
+    assert build_calls[0]["recording_state"] == recording_state
+    assert {key: build_calls[0][key] for key in NON_CAMERA_RESPONSE_KEYS} == responses
+    assert "camera_smoothness" not in app.session_state
+    assert app.session_state["showcase_recorder_status"] == status
+
+
+def test_download_inventory_is_exact_and_hides_ratings_and_filename(
+    monkeypatch,
+):
+    archive = SyntheticShowcaseArchive(
+        filename="synthetic-session-private-detail.zip",
+        data=b"inventory-synthetic-zip",
+    )
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        lambda **kwargs: archive,
+    )
+
+    app = _app_with_password()
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = "download"
+    app.session_state["showcase_recorder_status"] = RecorderStatus(
+        state="saved",
+        duration_seconds=3,
+        saved_confirmed=True,
+    )
+    app.session_state["showcase_camera_started"] = True
+    app.session_state[SHOWCASE_ARCHIVE_KEY] = archive
+    for key, value in SYNTHETIC_RESPONSES.items():
+        app.session_state[key] = value
+    app.run()
+
+    assert not app.exception
+    assert _main_content_inventory(app) == EXPECTED_DOWNLOAD_INVENTORY
+    visible = _visible_text(app)
+    assert archive.filename not in visible
+    for hidden in (*SYNTHETIC_RESPONSES, "score", "answer", "path"):
+        assert hidden.casefold() not in visible.casefold()
 
 
 def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    archive = SyntheticShowcaseArchive(
+        filename="synthetic-session.zip",
+        data=b"end-to-end-synthetic-zip",
+    )
+    monkeypatch.setattr(
+        showcase_export,
+        "build_synthetic_showcase_zip",
+        lambda **kwargs: archive,
+    )
     _recorder_spy(
         monkeypatch,
         RecorderStatus(
@@ -743,6 +1048,27 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
 
     assert not app.exception
     assert not app.success
+    assert "下载合成演示数据" in _visible_text(app)
+    _assert_progress(app, "4 本地下载")
+    assert len(app.get("download_button")) == 1
+    finish_button = _element_by_key(app.button, "finish_download")
+    assert finish_button.label == "完成演示"
+    assert finish_button.disabled is True
+    assert app.session_state["showcase_step"] == "download"
+    assert list(tmp_path.iterdir()) == []
+
+    confirmation = _element_by_key(
+        app.checkbox,
+        SHOWCASE_LOCAL_SAVE_KEY,
+    )
+    assert confirmation.label == "我已确认合成 ZIP 已保存在本机"
+    confirmation.set_value(True)
+    app.run()
+    finish_button = _element_by_key(app.button, "finish_download")
+    assert finish_button.disabled is False
+    finish_button.click().run()
+
+    assert not app.exception
     completion_panels = [
         item.value
         for item in app.markdown
@@ -752,7 +1078,7 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
         '<div class="completion-status" role="status">演示流程已完成。</div>'
     ]
     assert "隐私边界" in _visible_text(app)
-    _assert_progress(app, "4 完成确认")
+    _assert_progress(app, "5 完成确认")
     assert list(tmp_path.iterdir()) == []
 
     # AppTest 1.37.1 and 1.45.1 retain stale pre-rerun slider deltas, so this
@@ -760,9 +1086,11 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     confirmation_app = _app_with_password()
     confirmation_app.session_state["showcase_authenticated"] = True
     confirmation_app.session_state["showcase_step"] = "confirmation"
-    confirmation_app.session_state["showcase_camera_started"] = True
-    for key, value in SYNTHETIC_RESPONSES.items():
-        confirmation_app.session_state[key] = value
+    _seed_download_state(confirmation_app)
+    confirmation_app.session_state["showcase_recorder_status"] = RecorderStatus(
+        state="saved",
+        saved_confirmed=True,
+    )
     confirmation_app.run()
 
     assert (
@@ -772,7 +1100,8 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
 
     _element_by_key(confirmation_app.button, "restart_demo").click().run()
     assert confirmation_app.session_state["showcase_step"] == "overview"
-    for key in (*SYNTHETIC_RESPONSES, "showcase_camera_started"):
+    assert confirmation_app.session_state["showcase_authenticated"] is True
+    for key in SHOWCASE_DATA_KEYS:
         assert key not in confirmation_app.session_state
 
 
@@ -837,6 +1166,10 @@ def test_visible_copy_is_neutral_on_every_authenticated_step(monkeypatch):
     _element_by_key(app.button, "finish_capture").click().run()
     visible_by_step.append(_visible_text(app))
     _element_by_key(app.button, "save_reflection").click().run()
+    visible_by_step.append(_visible_text(app))
+    _element_by_key(app.checkbox, SHOWCASE_LOCAL_SAVE_KEY).set_value(True)
+    app.run()
+    _element_by_key(app.button, "finish_download").click().run()
     visible_by_step.append(_visible_text(app))
 
     for visible_text in visible_by_step:

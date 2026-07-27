@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 import streamlit as st
 
 from browser_recorder import RecorderStatus, render_browser_recorder
+from showcase_export import build_synthetic_showcase_zip
 from showcase_workflow import advance_step, password_matches
 
 
@@ -19,6 +21,19 @@ SYNTHETIC_RESPONSE_KEYS = (
 RECORDER_STATUS_KEY = "showcase_recorder_status"
 RECORDER_COMPONENT_KEY = "showcase_session_recorder"
 RECORDER_SESSION_KEYS = (RECORDER_STATUS_KEY, RECORDER_COMPONENT_KEY)
+SHOWCASE_ARCHIVE_KEY = "showcase_synthetic_archive"
+SHOWCASE_EXPORT_ERROR_KEY = "showcase_export_error"
+SHOWCASE_LOCAL_SAVE_KEY = "showcase_export_saved_confirmed"
+SHOWCASE_DOWNLOAD_BUTTON_KEY = "showcase_download_archive"
+SHOWCASE_SESSION_KEYS = (
+    *SYNTHETIC_RESPONSE_KEYS,
+    "showcase_camera_started",
+    *RECORDER_SESSION_KEYS,
+    SHOWCASE_ARCHIVE_KEY,
+    SHOWCASE_EXPORT_ERROR_KEY,
+    SHOWCASE_LOCAL_SAVE_KEY,
+    SHOWCASE_DOWNLOAD_BUTTON_KEY,
+)
 
 st.set_page_config(page_title=PRODUCT_NAME, layout="centered")
 st.markdown(
@@ -133,15 +148,89 @@ def _go(action: str) -> None:
     st.rerun()
 
 
-def _clear_recorder_state() -> None:
-    for key in RECORDER_SESSION_KEYS:
+def _clear_showcase_session_state() -> None:
+    for key in SHOWCASE_SESSION_KEYS:
         st.session_state.pop(key, None)
 
 
 def _return_to_overview() -> None:
-    _clear_recorder_state()
+    _clear_showcase_session_state()
     st.session_state["showcase_step"] = "overview"
     st.rerun()
+
+
+def _build_cached_synthetic_archive():
+    completed_ratings = {
+        key: st.session_state[key]
+        for key in SYNTHETIC_RESPONSE_KEYS
+        if key in st.session_state
+    }
+    for key, value in completed_ratings.items():
+        st.session_state[key] = value
+
+    cached_archive = st.session_state.get(SHOWCASE_ARCHIVE_KEY)
+    if cached_archive is not None:
+        return cached_archive
+
+    status = st.session_state.get(RECORDER_STATUS_KEY)
+    recording_state = (
+        status.state
+        if isinstance(status, RecorderStatus)
+        and status.state in {"saved", "skipped", "failed"}
+        else "skipped"
+    )
+    camera_smoothness = (
+        st.session_state.get("camera_smoothness")
+        if recording_state == "saved"
+        else None
+    )
+    try:
+        archive = build_synthetic_showcase_zip(
+            process_clarity=completed_ratings["process_clarity"],
+            camera_smoothness=camera_smoothness,
+            information_load=completed_ratings["information_load"],
+            workflow_willingness=completed_ratings["workflow_willingness"],
+            recording_state=recording_state,
+            generated_at=datetime.now(timezone.utc).replace(microsecond=0),
+        )
+    except Exception:
+        st.session_state.pop(SHOWCASE_ARCHIVE_KEY, None)
+        st.session_state.pop(SHOWCASE_LOCAL_SAVE_KEY, None)
+        st.session_state.pop(SHOWCASE_DOWNLOAD_BUTTON_KEY, None)
+        st.session_state[SHOWCASE_EXPORT_ERROR_KEY] = True
+        return None
+
+    st.session_state[SHOWCASE_ARCHIVE_KEY] = archive
+    st.session_state.pop(SHOWCASE_EXPORT_ERROR_KEY, None)
+    return archive
+
+
+def _render_synthetic_download() -> None:
+    st.subheader("下载合成演示数据")
+    st.caption("下载文件仅包含合成演示内容，并且只会保存在本机。")
+    archive = _build_cached_synthetic_archive()
+    if archive is None:
+        st.warning("下载文件暂时无法生成，请重试。")
+        return
+
+    st.download_button(
+        label="下载合成演示 ZIP",
+        data=archive.data,
+        file_name=archive.filename,
+        mime="application/zip",
+        key=SHOWCASE_DOWNLOAD_BUTTON_KEY,
+    )
+    saved_locally = st.checkbox(
+        "我已确认合成 ZIP 已保存在本机",
+        key=SHOWCASE_LOCAL_SAVE_KEY,
+    )
+    if st.button(
+        "完成演示",
+        type="primary",
+        key="finish_download",
+        disabled=not saved_locally,
+    ):
+        _go("finish_download")
 
 
 def _consume_recorder_status(rendered_status: object) -> RecorderStatus:
@@ -216,7 +305,8 @@ for label, state in (
     ("1 安全进入", "overview"),
     ("2 会话记录", "capture"),
     ("3 引导反馈", "reflection"),
-    ("4 完成确认", "confirmation"),
+    ("4 本地下载", "download"),
+    ("5 完成确认", "confirmation"),
 ):
     st.sidebar.markdown(f"**当前 · {label}**" if step == state else label)
 
@@ -229,7 +319,7 @@ with st.container():
     if step == "overview":
         st.subheader("准备开始本次演示")
         st.markdown(
-            '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈和完成确认。录像仅由用户保存在本机，不会上传，也不会连接外部存储。</div>',
+            '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈、本地下载和完成确认。录像仅由用户保存在本机，不会上传，也不会连接外部存储。</div>',
             unsafe_allow_html=True,
         )
         if st.button("开始演示", type="primary", key="begin_demo"):
@@ -265,6 +355,8 @@ with st.container():
         )
         if st.button("提交演示反馈", type="primary", key="save_reflection"):
             _go("save_reflection")
+    elif step == "download":
+        _render_synthetic_download()
     elif step == "confirmation":
         st.markdown(
             '<div class="completion-status" role="status">演示流程已完成。</div>',
@@ -275,10 +367,5 @@ with st.container():
             unsafe_allow_html=True,
         )
         if st.button("重新体验", key="restart_demo"):
-            for key in (
-                *SYNTHETIC_RESPONSE_KEYS,
-                "showcase_camera_started",
-                *RECORDER_SESSION_KEYS,
-            ):
-                st.session_state.pop(key, None)
+            _clear_showcase_session_state()
             _go("restart")
