@@ -235,9 +235,11 @@ def _assert_bytes_have_no_private_content(
 ) -> None:
     folded_payload = payload.lower()
     for term in terms:
-        assert term.casefold().encode("utf-8") not in folded_payload, (
-            f"{term}: {location}"
-        )
+        folded_term = term.casefold()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            assert folded_term.encode(encoding) not in folded_payload, (
+                f"{term}: {location}"
+            )
 
 
 def _xml_content_values(payload: bytes, *, location: str) -> list[str]:
@@ -267,13 +269,26 @@ def _assert_workbook_package_preflight(members: list[ZipInfo]) -> None:
     seen_names: set[str] = set()
     for member in members:
         name = member.filename
-        normalized_name = name[:-1] if member.is_dir() else name
-        parts = normalized_name.split("/")
+        _assert_text_has_no_private_content(
+            name,
+            location="workbook package member name",
+        )
+        assert not member.is_dir(), (
+            f"explicit workbook package directory is not allowed: {name}"
+        )
+        parts = name.split("/")
+        first_part = parts[0] if parts else ""
+        is_drive_qualified = (
+            len(first_part) == 2
+            and first_part[0].isalpha()
+            and first_part[1] == ":"
+        )
         has_safe_path = (
-            bool(normalized_name)
+            bool(name)
             and len(name) <= MAX_WORKBOOK_PACKAGE_MEMBER_NAME_LENGTH
             and not name.startswith("/")
             and "\\" not in name
+            and not is_drive_qualified
             and all(part not in {"", ".", ".."} for part in parts)
         )
         assert has_safe_path, f"unsafe workbook package member path: {name}"
@@ -282,9 +297,6 @@ def _assert_workbook_package_preflight(members: list[ZipInfo]) -> None:
             f"duplicate workbook package member path: {name}"
         )
         seen_names.add(folded_name)
-        assert not member.is_dir() or member.file_size == 0, (
-            f"workbook package directory contains data: {name}"
-        )
         assert not member.flag_bits & 0x1, (
             f"encrypted workbook package member is not allowed: {name}"
         )
@@ -338,12 +350,6 @@ def _assert_archive_has_no_private_content(
         package_members = workbook_package.infolist()
         _assert_workbook_package_preflight(package_members)
         for member in package_members:
-            if member.is_dir():
-                continue
-            _assert_text_has_no_private_content(
-                member.filename,
-                location="workbook package member name",
-            )
             payload = workbook_package.read(member)
             _assert_bytes_have_no_private_content(
                 payload,
@@ -927,3 +933,87 @@ def test_privacy_gate_decodes_utf16_xml_before_scanning() -> None:
 
     with pytest.raises(AssertionError, match=private_term):
         _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_drive_qualified_workbook_member_path() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {"C:/private.bin": b"safe"},
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="member path"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_private_directory_name_is_scanned_before_directory_rejection() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(workbook_bytes, {"sicq/": b""}),
+    )
+
+    with pytest.raises(AssertionError, match="sicq"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_safe_explicit_directory_entry() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(workbook_bytes, {"customXml/": b""}),
+    )
+
+    with pytest.raises(AssertionError, match="directory"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_non_xml_binary_scanner_rejects_utf16_forbidden_signatures(
+    encoding: str,
+) -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {"customXml/private.bin": "sicq".encode(encoding)},
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="sicq"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_non_xml_binary_scanner_accepts_unrelated_binary_payload() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {"customXml/random.bin": bytes(range(256))},
+        ),
+    )
+
+    _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_workbook_preflight_directly_rejects_backslash_member_name() -> None:
+    member = ZipInfo("safe.bin")
+    member.filename = "customXml\\private.bin"
+
+    with pytest.raises(AssertionError, match="member path"):
+        _assert_workbook_package_preflight([member])
