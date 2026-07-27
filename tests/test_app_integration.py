@@ -100,6 +100,61 @@ def _local_runtime_closure(entry_path: Path) -> dict[str, ast.Module]:
     return closure
 
 
+def _operational_closure_violations(closure: dict[str, ast.Module]) -> set[str]:
+    imported_roots = {
+        alias.name.split(".", 1)[0]
+        for tree in closure.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".", 1)[0]
+        for tree in closure.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    prohibited_imports = {
+        "requests",
+        "toml",
+        "dotenv",
+        "streamlit_webrtc",
+        "aiortc",
+        "av",
+    }
+    normalized_source = "\n".join(
+        ast.unparse(tree).casefold() for tree in closure.values()
+    )
+    prohibited_fragments = (
+        "upload",
+        "baidu",
+        "oauth",
+        "refresh_token",
+        "client_secret",
+        "remote_path",
+        "historical recording",
+        "history",
+        "recordings",
+        "recordings_dir",
+        "rec_dir",
+        "save_dir",
+        "cleanup",
+        "local_cleanup",
+        "ffmpeg",
+        "st.video",
+        ".flv",
+        ".mp4",
+        "transcod",
+    )
+    return {
+        *(f"import:{module}" for module in prohibited_imports & imported_roots),
+        *(
+            f"source:{fragment}"
+            for fragment in prohibited_fragments
+            if fragment in normalized_source
+        ),
+    }
+
+
 def _record(*, visit: str = "daily", day: int = 6) -> dict[str, object]:
     return create_session_record(
         "sub-001",
@@ -709,45 +764,41 @@ def test_app_source_has_no_server_media_storage_upload_or_history_runtime():
 
 def test_operational_import_closure_has_no_server_upload_or_history_capability():
     closure = _local_runtime_closure(APP_PATH)
-    assert {"record_store", "upload_workflow", "bd_init"}.isdisjoint(closure)
-
-    imported_roots = {
-        alias.name.split(".", 1)[0]
-        for tree in closure.values()
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    } | {
-        node.module.split(".", 1)[0]
-        for tree in closure.values()
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module
+    assert set(closure) == {
+        "app",
+        "app_workflow",
+        "browser_recorder",
+        "link_auth",
+        "local_export_bundle",
+        "local_recording_workflow",
+        "participant_identity",
+        "questionnaire_export",
+        "questionnaire_scoring",
+        "questionnaire_specs",
+        "questionnaire_ui",
+        "session_record_workflow",
     }
-    assert {
-        "requests",
-        "toml",
-        "dotenv",
-        "streamlit_webrtc",
-        "aiortc",
-        "av",
-    }.isdisjoint(imported_roots)
+    assert {"record_store", "upload_workflow", "bd_init"}.isdisjoint(closure)
+    assert not _operational_closure_violations(closure)
 
-    closure_source = "\n".join(ast.unparse(tree).casefold() for tree in closure.values())
-    forbidden_fragments = (
-        "upload",
-        "baidu",
-        "oauth",
-        "refresh_token",
-        "client_secret",
-        "remote_path",
-        "historical recording",
-        "recordings_dir",
-        "local_cleanup",
-        ".flv",
-        ".mp4",
-        "transcod",
-    )
-    assert all(fragment not in closure_source for fragment in forbidden_fragments)
+
+@pytest.mark.parametrize(
+    ("fragment", "synthetic_source"),
+    (
+        ("history", "HiStOrY = []"),
+        ("recordings", "ReCoRdInGs = []"),
+        ("rec_dir", "ReC_DiR = 'server'"),
+        ("save_dir", "SaVe_DiR = 'server'"),
+        ("cleanup", "def ClEaNuP(): pass"),
+        ("ffmpeg", "FfMpEg = object()"),
+        ("st.video", "st.ViDeO(b'media')"),
+    ),
+)
+def test_operational_closure_scanner_rejects_generic_server_media_aliases(
+    fragment, synthetic_source
+):
+    closure = {"synthetic": ast.parse(synthetic_source)}
+    assert f"source:{fragment}" in _operational_closure_violations(closure)
 
 
 def test_obsolete_operational_modules_are_absent_and_unreferenced():
