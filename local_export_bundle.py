@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 import json
 import math
+import re
 import unicodedata
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -14,7 +15,6 @@ _MAX_JSON_DEPTH = 64
 _MAX_CONTAINER_ITEMS = 100_000
 _MAX_TOTAL_VALUES = 1_000_000
 _MAX_EXCEL_TEXT_LENGTH = 32_767
-_MAX_EXACT_EXCEL_INTEGER = (1 << 53) - 1
 _FIXED_ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _FIXED_WORKBOOK_TIMESTAMP = datetime(2000, 1, 1)
 _MIN_EXCEL_DATE = date(1900, 1, 1)
@@ -28,6 +28,7 @@ _MIN_EXCEL_TIMEDELTA = -_MAX_EXCEL_TIMEDELTA
 _ALLOWED_FILENAME_PREFIXES = frozenset({"session", "synthetic-session"})
 _FORBIDDEN_SHEET_CHARACTERS = frozenset("[]:*?/\\")
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
+_OOXML_ESCAPE_PATTERN = re.compile(r"_x[0-9a-f]{4}_", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,49 @@ def _validate_unicode_text(value: str, *, context: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError(f"{context} must contain valid Unicode text") from exc
+    if any(
+        ord(character) < 32 and character not in {"\t", "\n"}
+        for character in value
+    ) or any(character in {"\ufffe", "\uffff"} for character in value):
+        raise ValueError(
+            f"{context} contains text that Excel XML cannot represent losslessly"
+        )
+    if _OOXML_ESCAPE_PATTERN.search(value) is not None:
+        raise ValueError(f"{context} contains an ambiguous OOXML escape token")
+
+
+def _validate_excel_number(value: object, *, context: str) -> int | float:
+    if type(value) not in {int, float}:
+        raise TypeError(f"{context} contains an unsupported numeric type")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{context} numbers must be finite")
+    try:
+        serialized = f"{value:.16G}"
+        try:
+            round_tripped: int | float = int(serialized)
+        except ValueError:
+            round_tripped = float(serialized)
+    except (OverflowError, ValueError):
+        raise ValueError(
+            f"{context} cannot survive the Excel numeric round-trip"
+        ) from None
+
+    type_changed = type(round_tripped) is not type(value)
+    value_changed = round_tripped != value
+    became_non_finite = isinstance(round_tripped, float) and not math.isfinite(
+        round_tripped
+    )
+    zero_sign_changed = (
+        isinstance(value, float)
+        and value == 0
+        and isinstance(round_tripped, float)
+        and math.copysign(1.0, round_tripped) != math.copysign(1.0, value)
+    )
+    if type_changed or value_changed or became_non_finite or zero_sign_changed:
+        raise ValueError(
+            f"{context} cannot survive the Excel numeric round-trip"
+        )
+    return value
 
 
 def _enter_container(
@@ -89,11 +133,9 @@ def _copy_json_value(
         _validate_unicode_text(value, context=context)
         return value
     if isinstance(value, int):
-        return value
+        return _validate_excel_number(value, context=context)
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"{context} numbers must be finite")
-        return value
+        return _validate_excel_number(value, context=context)
     if isinstance(value, Mapping):
         identifier = _enter_container(
             value,
@@ -391,10 +433,7 @@ def _write_cell(
     elif isinstance(value, bool):
         result = worksheet.write_boolean(row, column, value, cell_format)
     elif isinstance(value, int):
-        if abs(value) <= _MAX_EXACT_EXCEL_INTEGER:
-            result = worksheet.write_number(row, column, value, cell_format)
-        else:
-            result = worksheet.write_string(row, column, str(value), cell_format)
+        result = worksheet.write_number(row, column, value, cell_format)
     elif isinstance(value, float):
         result = worksheet.write_number(row, column, value, cell_format)
     elif isinstance(value, datetime):

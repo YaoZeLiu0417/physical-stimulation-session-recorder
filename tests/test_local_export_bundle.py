@@ -104,6 +104,121 @@ def test_json_is_canonical_utf8_and_preserves_raw_values() -> None:
     assert b"\\u4e2d" not in encoded
 
 
+def test_allowed_xml_text_round_trips_in_snapshot_headers_and_cells() -> None:
+    snapshot = {
+        "tab\tand-newline\n": "XML <tag> & text 😀",
+        "not-an-escape": "_xNOT4_ and _x123_",
+    }
+    sheets = {
+        "Text": [
+            {
+                "header\tline\n": "XML <tag> & text 😀",
+                "literal": "_xNOT4_ and _x123_",
+            }
+        ]
+    }
+
+    bundle = _build_bundle(snapshot=snapshot, sheets=sheets)
+    parsed_json, _ = _read_bundle(bundle)
+    worksheet = _load_workbook(bundle)["Text"]
+
+    assert parsed_json == snapshot
+    assert [cell.value for cell in worksheet[1]] == list(sheets["Text"][0])
+    assert [cell.value for cell in worksheet[2]] == list(sheets["Text"][0].values())
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "nul\x00value",
+        "control\x01value",
+        "control\x08value",
+        "control\x0bvalue",
+        "carriage\rreturn",
+        "control\x0evalue",
+        "control\x1fvalue",
+        "noncharacter\ufffe",
+        "noncharacter\uffff",
+    ],
+)
+def test_excel_xml_unrepresentable_text_is_rejected_before_workbook_creation(
+    text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="Excel|XML"):
+        _build_bundle(sheets={"Text": [{"value": text}]})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "_x0000_",
+        "_X0000_",
+        "_xaBcD_",
+        "prefix_x0041_suffix",
+        "_xFFFF_",
+    ],
+)
+def test_ambiguous_ooxml_escape_tokens_are_rejected_before_workbook_creation(
+    text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="OOXML"):
+        _build_bundle(sheets={"Text": [{"value": text}]})
+
+
+@pytest.mark.parametrize(
+    ("location", "text"),
+    [
+        ("snapshot_key", "bad\x00key"),
+        ("snapshot_value", "bad\rvalue"),
+        ("snapshot_value", "_XfFfE_"),
+        ("sheet_name", "bad\ufffename"),
+        ("header", "bad_x0041_header"),
+        ("cell", "bad\uffffvalue"),
+    ],
+)
+def test_lossy_text_is_rejected_at_every_export_text_boundary(
+    location: str,
+    text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot: dict[str, object] = {"key": "value"}
+    sheets: dict[str, list[dict[str, object]]] = {
+        "Text": [{"key": "value"}]
+    }
+    if location == "snapshot_key":
+        snapshot = {text: "value"}
+    elif location == "snapshot_value":
+        snapshot = {"key": text}
+    elif location == "sheet_name":
+        sheets = {text: [{"key": "value"}]}
+    elif location == "header":
+        sheets = {"Text": [{text: "value"}]}
+    elif location == "cell":
+        sheets = {"Text": [{"key": text}]}
+    else:
+        raise AssertionError(f"unknown test location: {location}")
+
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="Excel|XML|OOXML"):
+        _build_bundle(snapshot=snapshot, sheets=sheets)
+
+
 def test_generation_is_binary_deterministic_for_equal_canonical_inputs() -> None:
     snapshot_a = {"z": 3, "a": {"right": False, "left": 0}}
     snapshot_b = {"a": {"left": 0, "right": False}, "z": 3}
@@ -246,6 +361,75 @@ def test_workbook_writes_approved_date_like_cells_as_typed_values() -> None:
     assert worksheet["B2"].value == datetime(2026, 7, 27, 10, 30)
     assert worksheet["C2"].value == time(10, 30, 15)
     assert worksheet["D2"].value == timedelta(hours=1, minutes=2, seconds=3)
+
+
+def test_lossless_numeric_boundaries_round_trip_with_exact_python_types() -> None:
+    values = {
+        "false": False,
+        "true": True,
+        "zero_int": 0,
+        "positive_int_boundary": 2**53,
+        "negative_int_boundary": -(2**53),
+        "fraction": 1.5,
+        "precise_fraction": 1.54466296693274,
+        "scientific_float": 1e16,
+        "smallest_subnormal": float.fromhex("0x0.0000000000001p-1022"),
+    }
+
+    worksheet = _load_workbook(
+        _build_bundle(snapshot={"values": values}, sheets={"Numbers": [values]})
+    )["Numbers"]
+
+    actual = [cell.value for cell in worksheet[2]]
+    assert actual == list(values.values())
+    assert [type(value) for value in actual] == [
+        bool,
+        bool,
+        int,
+        int,
+        int,
+        float,
+        float,
+        float,
+        float,
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        2**53 + 1,
+        -(2**53 + 1),
+        10_000_000_000_000_000,
+        10**100,
+        0.0,
+        -0.0,
+        1.0,
+        1.5446629669327405,
+        float.fromhex("0x1.0000000000000p-1022"),
+        float.fromhex("0x1.fffffffffffffp+1023"),
+    ],
+)
+@pytest.mark.parametrize("location", ["snapshot", "sheet"])
+def test_lossy_numeric_values_are_rejected_before_workbook_creation(
+    value: object,
+    location: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot: dict[str, object] = {"value": value} if location == "snapshot" else {}
+    sheets = (
+        {"Numbers": [{"value": value}]}
+        if location == "sheet"
+        else {"Numbers": []}
+    )
+
+    def fail_workbook(*args: object, **kwargs: object) -> object:
+        raise AssertionError("workbook creation must not be reached")
+
+    monkeypatch.setattr(local_export_bundle.xlsxwriter, "Workbook", fail_workbook)
+
+    with pytest.raises(ValueError, match="Excel numeric round-trip"):
+        _build_bundle(snapshot=snapshot, sheets=sheets)
 
 
 def test_excel_date_and_datetime_boundaries_round_trip_exactly() -> None:
