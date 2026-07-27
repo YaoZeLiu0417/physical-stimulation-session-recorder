@@ -1,3 +1,4 @@
+import ast
 import base64
 import hashlib
 import hmac
@@ -14,6 +15,20 @@ from link_auth import (
     verify_subject_link,
 )
 from make_links import build_subject_link
+
+
+def test_link_auth_imports_participant_validation_from_pure_module() -> None:
+    source_path = Path(__file__).parent.parent / "link_auth.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    imports = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert ("participant_identity", "validate_subject_id") in imports
+    assert ("record_store", "validate_subject_id") not in imports
 
 
 def test_daily_signature_is_compatible_with_existing_links() -> None:

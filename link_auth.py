@@ -6,7 +6,7 @@ import hmac
 from dataclasses import dataclass
 from typing import Any, MutableMapping
 
-from record_store import validate_subject_id
+from participant_identity import validate_subject_id
 
 
 ALLOWED_VISITS = frozenset({"daily", "V1", "V3", "V4", "V5", "V6"})

@@ -36,13 +36,16 @@ def _cross_process_get_or_create(root, ready, start, results):
         results.put(("error", repr(exc)))
 
 
-def test_validate_subject_id_accepts_safe_identifier_and_trims_whitespace():
-    assert validate_subject_id(" sub-001 ") == "sub-001"
+def test_validate_subject_id_accepts_safe_identifier():
+    assert validate_subject_id("sub-001") == "sub-001"
 
 
 @pytest.mark.parametrize(
     "subject_id",
-    ["../other", "sub/001", "sub\\001", "", "   ", "a" * 65, ".sub", "sub.name", "sub?001"],
+    [
+        "../other", "sub/001", "sub\\001", "", "   ", " sub-001", "sub-001 ",
+        "a" * 65, ".sub", "sub.name", "sub?001",
+    ],
 )
 def test_validate_subject_id_rejects_unsafe_identifiers(subject_id):
     with pytest.raises(ValueError):

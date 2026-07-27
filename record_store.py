@@ -11,8 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from participant_identity import validate_subject_id
 
-SUBJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -47,15 +47,6 @@ _INDEX_VERSION = 1
 _COMPLETION_STATUSES = {"draft", "complete"}
 _UPLOAD_STATUSES = {"pending", "uploaded", "failed"}
 _LIFECYCLES = {"draft", "complete", "uploaded"}
-
-
-def validate_subject_id(subject_id: str) -> str:
-    if not isinstance(subject_id, str):
-        raise ValueError("受试者编号仅允许字母、数字、下划线和连字符，长度为 1-64 个字符。")
-    safe_subject_id = subject_id.strip()
-    if not SUBJECT_ID_RE.fullmatch(safe_subject_id):
-        raise ValueError("受试者编号仅允许字母、数字、下划线和连字符，长度为 1-64 个字符。")
-    return safe_subject_id
 
 
 def validate_record_id(record_id: str, subject_id: str, date_key: str) -> str:
