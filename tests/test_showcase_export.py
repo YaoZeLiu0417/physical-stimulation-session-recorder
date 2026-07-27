@@ -9,6 +9,7 @@ from zipfile import ZipFile
 import openpyxl
 import pytest
 
+import showcase_export
 from showcase_export import SyntheticShowcaseArchive, build_synthetic_showcase_zip
 
 
@@ -42,6 +43,25 @@ class _HostileTimezone(tzinfo):
 
     def dst(self, value: datetime | None) -> timedelta | None:
         return None
+
+
+class _MutableTimezone(tzinfo):
+    def __init__(self) -> None:
+        self.utcoffset_calls = 0
+
+    def utcoffset(self, value: datetime | None) -> timedelta | None:
+        self.utcoffset_calls += 1
+        if self.utcoffset_calls == 1:
+            return timedelta(0)
+        return timedelta(hours=9)
+
+    def dst(self, value: datetime | None) -> timedelta | None:
+        return None
+
+
+class _HostileDatetime(datetime):
+    def isoformat(self, *args: object, **kwargs: object) -> str:
+        raise RuntimeError("PRIVATE_DATETIME_ABC123")
 
 
 def _build_archive(
@@ -172,7 +192,9 @@ def test_non_saved_recording_may_retain_an_explicit_camera_rating(
         "item_id": "demo_camera_smoothness",
         "value": 0,
     }
-    assert _sheet_rows(workbook["Responses"])[1] == snapshot["ratings"][1]  # type: ignore[index]
+    assert _sheet_rows(workbook["Responses"])[1] == (
+        snapshot["ratings"][1]  # type: ignore[index]
+    )
 
 
 @pytest.mark.parametrize(
@@ -277,6 +299,59 @@ def test_generation_time_timezone_failure_does_not_expose_exception_chain() -> N
         _build_archive(generated_at=generated_at)
 
     assert "PRIVATE_GENERATION_TIMEZONE_7F3A" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_mutable_timezone_is_replaced_with_a_trusted_plain_utc_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mutable_timezone = _MutableTimezone()
+    generated_at = datetime(
+        2026,
+        7,
+        28,
+        9,
+        15,
+        30,
+        tzinfo=mutable_timezone,
+    )
+    observed: dict[str, object] = {}
+    real_builder = showcase_export.build_local_export_bundle
+
+    def inspect_bundle(**kwargs: object) -> object:
+        observed["exported_at"] = kwargs["exported_at"]
+        return real_builder(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(showcase_export, "build_local_export_bundle", inspect_bundle)
+
+    archive = _build_archive(generated_at=generated_at)
+    snapshot, _ = _read_archive(archive)
+    trusted_generated_at = observed["exported_at"]
+
+    assert mutable_timezone.utcoffset_calls == 1
+    assert trusted_generated_at is not generated_at
+    assert type(trusted_generated_at) is datetime
+    assert trusted_generated_at.tzinfo is timezone.utc  # type: ignore[union-attr]
+    assert trusted_generated_at.utcoffset() == timedelta(0)  # type: ignore[union-attr]
+    assert snapshot["generated_at_utc"] == "2026-07-28T09:15:30Z"
+
+
+def test_datetime_subclass_is_rejected_without_calling_hostile_isoformat() -> None:
+    generated_at = _HostileDatetime(
+        2026,
+        7,
+        28,
+        9,
+        15,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    with pytest.raises(ValueError, match="generated_at") as error:
+        _build_archive(generated_at=generated_at)
+
+    assert "PRIVATE_DATETIME_ABC123" not in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
 

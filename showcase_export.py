@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from local_export_bundle import build_local_export_bundle
 
@@ -23,9 +23,11 @@ def _validate_rating(name: str, value: object) -> int:
     return value
 
 
-def _validate_generated_at(generated_at: datetime) -> None:
+def _trusted_generated_at(generated_at: datetime) -> datetime:
     if not isinstance(generated_at, datetime):
         raise TypeError("generated_at must be a datetime")
+    if type(generated_at) is not datetime:
+        raise ValueError("generated_at must be a plain datetime")
     if generated_at.tzinfo is None:
         raise ValueError("generated_at must be timezone-aware UTC")
     offset_failed = False
@@ -42,6 +44,16 @@ def _validate_generated_at(generated_at: datetime) -> None:
         raise ValueError("generated_at must be timezone-aware UTC")
     if generated_at.microsecond != 0:
         raise ValueError("generated_at must use second precision")
+    return datetime(
+        generated_at.year,
+        generated_at.month,
+        generated_at.day,
+        generated_at.hour,
+        generated_at.minute,
+        generated_at.second,
+        generated_at.microsecond,
+        tzinfo=timezone.utc,
+    )
 
 
 def build_synthetic_showcase_zip(
@@ -77,11 +89,11 @@ def build_synthetic_showcase_zip(
     validated_workflow_willingness = _validate_rating(
         "workflow_willingness", workflow_willingness
     )
-    _validate_generated_at(generated_at)
+    trusted_generated_at = _trusted_generated_at(generated_at)
 
-    generated_at_utc = generated_at.isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
-    )
+    generated_at_utc = trusted_generated_at.isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
     ratings: list[dict[str, object]] = [
         {
             "item_id": "demo_process_clarity",
@@ -128,7 +140,7 @@ def build_synthetic_showcase_zip(
     bundle = build_local_export_bundle(
         snapshot=snapshot,
         sheets=sheets,
-        exported_at=generated_at,
+        exported_at=trusted_generated_at,
         filename_prefix="synthetic-session",
     )
     return SyntheticShowcaseArchive(
