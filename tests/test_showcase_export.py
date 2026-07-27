@@ -5,7 +5,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ElementTree
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import openpyxl
 import pytest
@@ -44,6 +44,9 @@ SAFE_IMPORT_ROOTS = {
     "datetime",
     "local_export_bundle",
 }
+MAX_WORKBOOK_PACKAGE_MEMBERS = 128
+MAX_WORKBOOK_PACKAGE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_WORKBOOK_PACKAGE_MEMBER_NAME_LENGTH = 256
 
 
 class _HostileTimezone(tzinfo):
@@ -167,18 +170,39 @@ def _replace_archive_member(
     return SyntheticShowcaseArchive(filename=archive.filename, data=output.getvalue())
 
 
-def _add_workbook_xml_payload(
+def _add_workbook_payloads(
     workbook_bytes: bytes,
-    member_name: str,
-    payload: bytes,
+    payloads: dict[str, bytes],
 ) -> bytes:
     output = BytesIO()
     with ZipFile(BytesIO(workbook_bytes), "r") as source:
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as target:
             for member in source.infolist():
                 target.writestr(member, source.read(member.filename))
-            target.writestr(member_name, payload)
+            for member_name, payload in payloads.items():
+                target.writestr(member_name, payload)
     return output.getvalue()
+
+
+def _guard_against_workbook_member_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    real_read = ZipFile.read
+    member_reads: list[str] = []
+
+    def guarded_read(
+        zip_file: ZipFile,
+        name: object,
+        password: bytes | None = None,
+    ) -> bytes:
+        member_name = getattr(name, "filename", str(name))
+        member_reads.append(member_name)
+        if len(member_reads) > len(ZIP_MEMBERS):
+            raise AssertionError("workbook member read before package preflight")
+        return real_read(zip_file, name, password)
+
+    monkeypatch.setattr(ZipFile, "read", guarded_read)
+    return member_reads
 
 
 def _assert_source_imports_are_isolated(source: str) -> None:
@@ -232,6 +256,54 @@ def _xml_content_values(payload: bytes, *, location: str) -> list[str]:
     return values
 
 
+def _assert_workbook_package_preflight(members: list[ZipInfo]) -> None:
+    assert len(members) <= MAX_WORKBOOK_PACKAGE_MEMBERS, (
+        "workbook package member count exceeds limit"
+    )
+    assert sum(member.file_size for member in members) <= (
+        MAX_WORKBOOK_PACKAGE_UNCOMPRESSED_BYTES
+    ), "workbook package aggregate size exceeds limit"
+
+    seen_names: set[str] = set()
+    for member in members:
+        name = member.filename
+        normalized_name = name[:-1] if member.is_dir() else name
+        parts = normalized_name.split("/")
+        has_safe_path = (
+            bool(normalized_name)
+            and len(name) <= MAX_WORKBOOK_PACKAGE_MEMBER_NAME_LENGTH
+            and not name.startswith("/")
+            and "\\" not in name
+            and all(part not in {"", ".", ".."} for part in parts)
+        )
+        assert has_safe_path, f"unsafe workbook package member path: {name}"
+        folded_name = name.casefold()
+        assert folded_name not in seen_names, (
+            f"duplicate workbook package member path: {name}"
+        )
+        seen_names.add(folded_name)
+        assert not member.is_dir() or member.file_size == 0, (
+            f"workbook package directory contains data: {name}"
+        )
+        assert not member.flag_bits & 0x1, (
+            f"encrypted workbook package member is not allowed: {name}"
+        )
+
+
+def _decode_workbook_xml(payload: bytes, *, location: str) -> str:
+    encoding = (
+        "utf-16"
+        if payload.startswith((b"\xff\xfe", b"\xfe\xff"))
+        else "utf-8-sig"
+    )
+    try:
+        return payload.decode(encoding)
+    except UnicodeDecodeError:
+        raise AssertionError(
+            f"workbook XML payload has unsupported encoding: {location}"
+        ) from None
+
+
 def _assert_archive_has_no_private_content(
     archive: SyntheticShowcaseArchive,
 ) -> None:
@@ -263,10 +335,10 @@ def _assert_archive_has_no_private_content(
     )
 
     with ZipFile(BytesIO(workbook_bytes), "r") as workbook_package:
-        for member in workbook_package.infolist():
-            if member.is_dir() or not member.filename.casefold().endswith(
-                (".xml", ".rels")
-            ):
+        package_members = workbook_package.infolist()
+        _assert_workbook_package_preflight(package_members)
+        for member in package_members:
+            if member.is_dir():
                 continue
             _assert_text_has_no_private_content(
                 member.filename,
@@ -276,14 +348,18 @@ def _assert_archive_has_no_private_content(
             _assert_bytes_have_no_private_content(
                 payload,
                 location=member.filename,
-                terms=OOXML_RAW_PROHIBITED_TERMS,
+                terms=(
+                    OOXML_RAW_PROHIBITED_TERMS
+                    if member.filename.casefold().endswith((".xml", ".rels"))
+                    else PROHIBITED_CONTENT_TERMS
+                ),
             )
-            try:
-                package_text = payload.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                raise AssertionError(
-                    f"workbook text payload is not UTF-8: {member.filename}"
-                ) from None
+            if not member.filename.casefold().endswith((".xml", ".rels")):
+                continue
+            package_text = _decode_workbook_xml(
+                payload,
+                location=member.filename,
+            )
             _assert_text_has_no_private_content(
                 package_text,
                 location=member.filename,
@@ -695,10 +771,14 @@ def test_privacy_gate_rejects_private_term_in_workbook_metadata() -> None:
 def test_privacy_gate_rejects_private_term_in_non_cell_xml_payload() -> None:
     archive = _build_archive()
     workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
-    mutated_workbook = _add_workbook_xml_payload(
+    mutated_workbook = _add_workbook_payloads(
         workbook_bytes,
-        "customXml/item1.xml",
-        b'<?xml version="1.0" encoding="UTF-8"?><private>fasm</private>',
+        {
+            "customXml/item1.xml": (
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b"<private>fasm</private>"
+            )
+        },
     )
     mutated_archive = _replace_archive_member(
         archive,
@@ -707,4 +787,143 @@ def test_privacy_gate_rejects_private_term_in_non_cell_xml_payload() -> None:
     )
 
     with pytest.raises(AssertionError, match="fasm"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_private_term_in_non_xml_package_payload() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_workbook = _add_workbook_payloads(
+        workbook_bytes,
+        {"customXml/private.bin": b"sicq"},
+    )
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        mutated_workbook,
+    )
+
+    with pytest.raises(AssertionError, match="sicq"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_workbook_member_count_limit_fails_before_member_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    extra_members = {
+        f"customXml/filler-{index}.bin": b""
+        for index in range(MAX_WORKBOOK_PACKAGE_MEMBERS + 1)
+    }
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(workbook_bytes, extra_members),
+    )
+    member_reads = _guard_against_workbook_member_reads(monkeypatch)
+
+    with pytest.raises(AssertionError, match="member count"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+    assert member_reads == ZIP_MEMBERS
+
+
+def test_workbook_aggregate_size_limit_fails_before_member_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {
+                "customXml/large.bin": b"x"
+                * (MAX_WORKBOOK_PACKAGE_UNCOMPRESSED_BYTES + 1)
+            },
+        ),
+    )
+    member_reads = _guard_against_workbook_member_reads(monkeypatch)
+
+    with pytest.raises(AssertionError, match="aggregate size"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+    assert member_reads == ZIP_MEMBERS
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "/absolute/private.bin",
+        "../private.bin",
+        "customXml/../private.bin",
+    ],
+)
+def test_privacy_gate_rejects_unsafe_workbook_member_path(
+    member_name: str,
+) -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(workbook_bytes, {member_name: b"safe"}),
+    )
+
+    with pytest.raises(AssertionError, match="member path"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_nonempty_workbook_directory_entry() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(workbook_bytes, {"customXml/": b"not-empty"}),
+    )
+
+    with pytest.raises(AssertionError, match="directory"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_decodes_xml_entities_before_scanning() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    entity_xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b"<private>&#x73;&#x69;&#x63;&#x71;</private>"
+    )
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {"customXml/entity.xml": entity_xml},
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="sicq"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_decodes_utf16_xml_before_scanning() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    private_term = "\u81ea\u6740"
+    utf16_xml = (
+        f'<?xml version="1.0" encoding="UTF-16"?><private>{private_term}</private>'
+    ).encode("utf-16")
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        _add_workbook_payloads(
+            workbook_bytes,
+            {"customXml/utf16.xml": utf16_xml},
+        ),
+    )
+
+    with pytest.raises(AssertionError, match=private_term):
         _assert_archive_has_no_private_content(mutated_archive)
