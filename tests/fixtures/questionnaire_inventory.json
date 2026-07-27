@@ -1,0 +1,2240 @@
+{
+  "daily": {
+    "conditional": {
+      "item_order": [
+        "nssi_thought_frequency_24h",
+        "nssi_thought_intensity_24h",
+        "nssi_cut_count_24h",
+        "nssi_burn_count_24h",
+        "nssi_scratch_count_24h",
+        "nssi_bite_count_24h",
+        "nssi_hit_object_count_24h",
+        "nssi_hit_self_count_24h",
+        "nssi_other_description_24h",
+        "nssi_other_count_24h",
+        "nssi_medical_care_24h",
+        "nssi_motives_24h",
+        "nssi_trigger_24h",
+        "nssi_coping_24h",
+        "suicide_thought_frequency_24h"
+      ],
+      "items": [
+        {
+          "id": "nssi_thought_frequency_24h",
+          "kind": "slider",
+          "labels": {
+            "high": "几乎一直",
+            "low": "只有一次"
+          },
+          "options": [],
+          "prompt": "过去 24 小时，这些想法出现得有多频繁？",
+          "range": {
+            "maximum": 4,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_thought_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_thought_intensity_24h",
+          "kind": "slider",
+          "labels": {
+            "high": "极强",
+            "low": "很弱"
+          },
+          "options": [],
+          "prompt": "过去 24 小时，这些想法最强时有多强烈？",
+          "range": {
+            "maximum": 10,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_thought_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_cut_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "割伤皮肤的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_burn_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "烧伤或烫伤皮肤的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_scratch_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "严重抓挠至留下伤痕或流血的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_bite_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "咬伤自己至皮肤破损的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_hit_object_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "撞击头部或其他身体部位至出现瘀伤的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_hit_self_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "捶打自己至出现瘀伤的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_other_description_24h",
+          "kind": "text",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "其他 NSSI 行为",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": false,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_other_count_24h",
+          "kind": "integer",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "其他 NSSI 行为的实际次数",
+          "range": {
+            "maximum": null,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_medical_care_24h",
+          "kind": "boolean",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "是否因本次行为需要医疗处理？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": true,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_motives_24h",
+          "kind": "multiselect",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [
+            "为了逃避上学、工作或其他活动",
+            "为了缓解麻木感或空虚感",
+            "为了引起注意",
+            "为了有一些感觉，哪怕是疼痛",
+            "为了逃避自己不想做的讨厌事",
+            "为了获得别人的回应，哪怕是负面回应",
+            "为了从父母或朋友那里获得更多的关注",
+            "为了避免跟人待在一起",
+            "为了惩罚自己",
+            "为了逃避惩罚或承担后果",
+            "为了停止不好的感受",
+            "为了让他人知道自己有多绝望",
+            "为了让父母理解或注意自己",
+            "为了获得帮助",
+            "为了放松"
+          ],
+          "prompt": "这次行为与哪些原因有关？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": false,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_trigger_24h",
+          "kind": "text",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "触发情境",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": false,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "nssi_coping_24h",
+          "kind": "text",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "你采用了哪些应对方式？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": false,
+          "show_if": [
+            "nssi_behavior_present_24h",
+            true
+          ]
+        },
+        {
+          "id": "suicide_thought_frequency_24h",
+          "kind": "slider",
+          "labels": {
+            "high": "几乎一直",
+            "low": "只有一次"
+          },
+          "options": [],
+          "prompt": "过去 24 小时，自杀想法出现得有多频繁？",
+          "range": {
+            "maximum": 4,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": [
+            "suicide_thought_present_24h",
+            true
+          ]
+        }
+      ]
+    },
+    "core": {
+      "item_order": [
+        "nssi_thought_present_24h",
+        "nssi_behavior_present_24h",
+        "suicide_thought_present_24h",
+        "nssi_urge_now",
+        "nssi_resistance_confidence_now"
+      ],
+      "items": [
+        {
+          "id": "nssi_thought_present_24h",
+          "kind": "boolean",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "过去 24 小时，是否出现过不想死但想故意伤害自己的想法？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": true,
+          "show_if": null
+        },
+        {
+          "id": "nssi_behavior_present_24h",
+          "kind": "boolean",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "过去 24 小时，是否发生过不想死但故意伤害自己的行为？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": true,
+          "show_if": null
+        },
+        {
+          "id": "suicide_thought_present_24h",
+          "kind": "boolean",
+          "labels": {
+            "high": "",
+            "low": ""
+          },
+          "options": [],
+          "prompt": "过去 24 小时，是否出现过自杀想法？",
+          "range": {
+            "maximum": null,
+            "minimum": null
+          },
+          "required": true,
+          "show_if": null
+        },
+        {
+          "id": "nssi_urge_now",
+          "kind": "slider",
+          "labels": {
+            "high": "极强",
+            "low": "没有冲动"
+          },
+          "options": [],
+          "prompt": "此时此刻，你想要伤害自己的冲动有多强烈？",
+          "range": {
+            "maximum": 10,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": null
+        },
+        {
+          "id": "nssi_resistance_confidence_now",
+          "kind": "slider",
+          "labels": {
+            "high": "非常有信心",
+            "low": "一点信心也没有"
+          },
+          "options": [],
+          "prompt": "此时此刻，你对自己能抵抗住自伤冲动有多大信心？",
+          "range": {
+            "maximum": 7,
+            "minimum": 0
+          },
+          "required": true,
+          "show_if": null
+        }
+      ]
+    },
+    "protocol_item_order": [
+      "nssi_thought_present_24h",
+      "nssi_thought_frequency_24h",
+      "nssi_thought_intensity_24h",
+      "nssi_behavior_present_24h",
+      "nssi_cut_count_24h",
+      "nssi_burn_count_24h",
+      "nssi_scratch_count_24h",
+      "nssi_bite_count_24h",
+      "nssi_hit_object_count_24h",
+      "nssi_hit_self_count_24h",
+      "nssi_other_description_24h",
+      "nssi_other_count_24h",
+      "nssi_medical_care_24h",
+      "nssi_motives_24h",
+      "nssi_trigger_24h",
+      "nssi_coping_24h",
+      "suicide_thought_present_24h",
+      "suicide_thought_frequency_24h",
+      "nssi_urge_now",
+      "nssi_resistance_confidence_now"
+    ]
+  },
+  "formal": {
+    "instrument_order": [
+      "dshi_lifetime",
+      "dshi_12m",
+      "fasm",
+      "nssi_ideation",
+      "nssi_impulse",
+      "nssi_future",
+      "nssi_stop",
+      "sicq",
+      "readiness",
+      "siss",
+      "pss"
+    ],
+    "instruments": [
+      {
+        "id": "dshi_lifetime",
+        "item_order": [
+          "dshi_lifetime_1",
+          "dshi_lifetime_2",
+          "dshi_lifetime_3",
+          "dshi_lifetime_4",
+          "dshi_lifetime_5",
+          "dshi_lifetime_6"
+        ],
+        "items": [
+          {
+            "id": "dshi_lifetime_1",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用玻璃、小刀等划伤自己的皮肤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_lifetime_2",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用烟头、打火机或其他东西烧伤或烫伤自己的皮肤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_lifetime_3",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意猛烈抓挠自己，达到留下伤痕或流血的程度",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_lifetime_4",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意咬自己以致皮肤破损",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_lifetime_5",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用头撞击某物，以致出现瘀伤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_lifetime_6",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意捶打自己以致出现瘀伤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "故意自伤量表-青少年版（终生）",
+        "time_window": "从有记忆到目前"
+      },
+      {
+        "id": "dshi_12m",
+        "item_order": [
+          "dshi_12m_1",
+          "dshi_12m_2",
+          "dshi_12m_3",
+          "dshi_12m_4",
+          "dshi_12m_5",
+          "dshi_12m_6"
+        ],
+        "items": [
+          {
+            "id": "dshi_12m_1",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用玻璃、小刀等划伤自己的皮肤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_12m_2",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用烟头、打火机或其他东西烧伤或烫伤自己的皮肤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_12m_3",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意猛烈抓挠自己，达到留下伤痕或流血的程度",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_12m_4",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意咬自己以致皮肤破损",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_12m_5",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意用头撞击某物，以致出现瘀伤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "dshi_12m_6",
+            "kind": "slider",
+            "labels": {
+              "high": "做过超过10次",
+              "low": "我从未这样做过"
+            },
+            "options": [],
+            "prompt": "故意捶打自己以致出现瘀伤",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "故意自伤量表-青少年版（过去一年）",
+        "time_window": "过去一年"
+      },
+      {
+        "id": "fasm",
+        "item_order": [
+          "fasm_1",
+          "fasm_2",
+          "fasm_3",
+          "fasm_4",
+          "fasm_5",
+          "fasm_6",
+          "fasm_7",
+          "fasm_8",
+          "fasm_9",
+          "fasm_10",
+          "fasm_11",
+          "fasm_12",
+          "fasm_13",
+          "fasm_14",
+          "fasm_15"
+        ],
+        "items": [
+          {
+            "id": "fasm_1",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了逃避上学、工作或其他活动",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_2",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了缓解麻木感或空虚感",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_3",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了引起注意",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_4",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了有一些感觉，哪怕是疼痛",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_5",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了逃避自己不想做的讨厌事",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_6",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了获得别人的回应，哪怕是负面回应",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_7",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了从父母或朋友那里获得更多的关注",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_8",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了避免跟人待在一起",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_9",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了惩罚自己",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_10",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了逃避惩罚或承担后果",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_11",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了停止不好的感受",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_12",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了让他人知道自己有多绝望",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_13",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了让父母理解或注意自己",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_14",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了获得帮助",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "fasm_15",
+            "kind": "slider",
+            "labels": {
+              "high": "经常",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "为了放松",
+            "range": {
+              "maximum": 3,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "中文版自伤功能评估量表",
+        "time_window": "根据已报告的自伤行为"
+      },
+      {
+        "id": "nssi_ideation",
+        "item_order": [
+          "nssi_ideation_6m_present",
+          "nssi_ideation_6m_frequency",
+          "nssi_ideation_6m_intensity",
+          "nssi_ideation_1m_present",
+          "nssi_ideation_1m_frequency",
+          "nssi_ideation_1m_intensity"
+        ],
+        "items": [
+          {
+            "id": "nssi_ideation_6m_present",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "过去六个月中，是否有过想故意伤害自己但并不想死的想法？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "nssi_ideation_6m_frequency",
+            "kind": "slider",
+            "labels": {
+              "high": "几乎每天",
+              "low": "1月1次"
+            },
+            "options": [],
+            "prompt": "过去六个月中，自伤想法出现的频率",
+            "range": {
+              "maximum": 6,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": [
+              "nssi_ideation_6m_present",
+              true
+            ]
+          },
+          {
+            "id": "nssi_ideation_6m_intensity",
+            "kind": "slider",
+            "labels": {
+              "high": "很强",
+              "low": "很弱"
+            },
+            "options": [],
+            "prompt": "过去六个月中，自伤想法的强度",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": [
+              "nssi_ideation_6m_present",
+              true
+            ]
+          },
+          {
+            "id": "nssi_ideation_1m_present",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "过去一个月中，是否有过自伤想法？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "nssi_ideation_1m_frequency",
+            "kind": "slider",
+            "labels": {
+              "high": "很多",
+              "low": "只有1次/很少"
+            },
+            "options": [],
+            "prompt": "过去一个月中，自伤想法出现的频率",
+            "range": {
+              "maximum": 6,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": [
+              "nssi_ideation_1m_present",
+              true
+            ]
+          },
+          {
+            "id": "nssi_ideation_1m_intensity",
+            "kind": "slider",
+            "labels": {
+              "high": "很强",
+              "low": "很弱"
+            },
+            "options": [],
+            "prompt": "过去一个月中，自伤想法的强度",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": [
+              "nssi_ideation_1m_present",
+              true
+            ]
+          }
+        ],
+        "label": "自伤意念",
+        "time_window": "过去六个月及过去一个月"
+      },
+      {
+        "id": "nssi_impulse",
+        "item_order": [
+          "nssi_impulse_time",
+          "nssi_impulse_resistance"
+        ],
+        "items": [
+          {
+            "id": "nssi_impulse_time",
+            "kind": "slider",
+            "labels": {
+              "high": "几乎所有时间",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "过去一周里，你多长时间想过伤害自己？",
+            "range": {
+              "maximum": 100,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "nssi_impulse_resistance",
+            "kind": "slider",
+            "labels": {
+              "high": "无法抵制",
+              "low": "完全不难"
+            },
+            "options": [],
+            "prompt": "过去一周里，抵制伤害自己有多难？",
+            "range": {
+              "maximum": 7,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "自伤冲动",
+        "time_window": "过去一周"
+      },
+      {
+        "id": "nssi_future",
+        "item_order": [
+          "nssi_future_likelihood"
+        ],
+        "items": [
+          {
+            "id": "nssi_future_likelihood",
+            "kind": "slider",
+            "labels": {
+              "high": "极其",
+              "low": "完全不会"
+            },
+            "options": [],
+            "prompt": "你认为未来发生 NSSI 的可能性有多大？",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "未来 NSSI 可能性",
+        "time_window": "当前"
+      },
+      {
+        "id": "nssi_stop",
+        "item_order": [
+          "nssi_stop_desire"
+        ],
+        "items": [
+          {
+            "id": "nssi_stop_desire",
+            "kind": "slider",
+            "labels": {
+              "high": "我绝对想停止",
+              "low": "我根本不想停止"
+            },
+            "options": [],
+            "prompt": "你有多想停止 NSSI？",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "停止未来 NSSI 的愿望",
+        "time_window": "当前"
+      },
+      {
+        "id": "sicq",
+        "item_order": [
+          "sicq_1",
+          "sicq_2",
+          "sicq_3",
+          "sicq_4",
+          "sicq_5",
+          "sicq_6",
+          "sicq_7"
+        ],
+        "items": [
+          {
+            "id": "sicq_1",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "不管我今天过得好还是不好，我都会想自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_2",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "有些时候，我满脑子都是自伤的欲望。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_3",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "只要一想到自伤，我就会渴望它。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_4",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "我经常花时间计划下一次什么时候可以自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_5",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "心情好的时候，我经常想自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_6",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "即使事情进展顺利，我也很难控制自伤的冲动。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_7",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "即使我有能力，也很容易放弃自伤的机会。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "自伤渴望问卷",
+        "time_window": "当前"
+      },
+      {
+        "id": "readiness",
+        "item_order": [
+          "readiness_1",
+          "readiness_2",
+          "readiness_3"
+        ],
+        "items": [
+          {
+            "id": "readiness_1",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "采取措施停止自我伤害对我来说很重要。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "readiness_2",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "我已经准备好采取措施停止自我伤害。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "readiness_3",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "我相信我可以采取措施停止自我伤害。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "准备改变自伤",
+        "time_window": "当前"
+      },
+      {
+        "id": "siss",
+        "item_order": [
+          "siss_1",
+          "siss_2",
+          "siss_3",
+          "siss_4",
+          "siss_5",
+          "siss_6",
+          "siss_7",
+          "siss_8",
+          "siss_9",
+          "siss_10",
+          "siss_11",
+          "siss_12",
+          "siss_13"
+        ],
+        "items": [
+          {
+            "id": "siss_1",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是寻求关注的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_2",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是变化无常的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_3",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是自寻烦恼的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_4",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是疯狂的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_5",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是不值得被爱的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_6",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我认为我是软弱的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_7",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是不负责任的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_8",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是不完美的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_9",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是有控制欲的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_10",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是有自杀倾向的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_11",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是不理智的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_12",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是不堪重负的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "siss_13",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "因为我曾经自伤，所以我是自私的人。",
+            "range": {
+              "maximum": 5,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "自伤耻感量表",
+        "time_window": "当前"
+      },
+      {
+        "id": "pss",
+        "item_order": [
+          "pss_1",
+          "pss_2",
+          "pss_3",
+          "pss_4",
+          "pss_5"
+        ],
+        "items": [
+          {
+            "id": "pss_1",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "你有没有觉得生活不值得过？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "pss_2",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "你有没有希望自己死掉，例如睡觉时希望自己醒不过来？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "pss_3",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "你有没有想过结束自己的生命，即使你真的不打算这样做？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "pss_4",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "你是否已经到了真正考虑结束自己的生命或为如何结束生命制定计划的地步？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "pss_5",
+            "kind": "boolean",
+            "labels": {
+              "high": "",
+              "low": ""
+            },
+            "options": [],
+            "prompt": "你有没有试图结束自己的生命？",
+            "range": {
+              "maximum": null,
+              "minimum": null
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "Paykel 自杀量表",
+        "time_window": "过去一年"
+      }
+    ],
+    "visit_order": [
+      "V1",
+      "V3",
+      "V4",
+      "V5",
+      "V6"
+    ],
+    "visits": [
+      {
+        "instrument_order": [
+          "dshi_lifetime",
+          "dshi_12m",
+          "fasm",
+          "nssi_ideation",
+          "nssi_impulse",
+          "nssi_future",
+          "nssi_stop",
+          "sicq",
+          "readiness",
+          "siss",
+          "pss"
+        ],
+        "visit": "V1"
+      },
+      {
+        "instrument_order": [
+          "dshi_lifetime",
+          "dshi_12m",
+          "fasm",
+          "nssi_ideation",
+          "nssi_impulse",
+          "nssi_future",
+          "nssi_stop",
+          "sicq",
+          "readiness",
+          "siss",
+          "pss"
+        ],
+        "visit": "V3"
+      },
+      {
+        "instrument_order": [
+          "dshi_lifetime",
+          "dshi_12m",
+          "nssi_ideation",
+          "nssi_impulse",
+          "nssi_future",
+          "nssi_stop",
+          "sicq",
+          "readiness",
+          "siss",
+          "pss"
+        ],
+        "visit": "V4"
+      },
+      {
+        "instrument_order": [
+          "dshi_lifetime",
+          "dshi_12m",
+          "nssi_ideation",
+          "nssi_impulse",
+          "nssi_future",
+          "nssi_stop",
+          "sicq",
+          "readiness",
+          "siss",
+          "pss"
+        ],
+        "visit": "V5"
+      },
+      {
+        "instrument_order": [
+          "dshi_lifetime",
+          "dshi_12m",
+          "fasm",
+          "nssi_ideation",
+          "nssi_impulse",
+          "nssi_future",
+          "nssi_stop",
+          "sicq",
+          "readiness",
+          "siss",
+          "pss"
+        ],
+        "visit": "V6"
+      }
+    ]
+  },
+  "scoring_inputs": {
+    "daily": {
+      "count_input_ids": [
+        "nssi_cut_count_24h",
+        "nssi_burn_count_24h",
+        "nssi_scratch_count_24h",
+        "nssi_bite_count_24h",
+        "nssi_hit_object_count_24h",
+        "nssi_hit_self_count_24h",
+        "nssi_other_count_24h"
+      ],
+      "input_ids": [
+        "nssi_thought_present_24h",
+        "nssi_behavior_present_24h",
+        "nssi_cut_count_24h",
+        "nssi_burn_count_24h",
+        "nssi_scratch_count_24h",
+        "nssi_bite_count_24h",
+        "nssi_hit_object_count_24h",
+        "nssi_hit_self_count_24h",
+        "nssi_other_count_24h",
+        "suicide_thought_present_24h",
+        "nssi_urge_now",
+        "nssi_resistance_confidence_now"
+      ]
+    },
+    "formal": [
+      {
+        "input_ids": [
+          "dshi_lifetime_1",
+          "dshi_lifetime_2",
+          "dshi_lifetime_3",
+          "dshi_lifetime_4",
+          "dshi_lifetime_5",
+          "dshi_lifetime_6"
+        ],
+        "instrument_id": "dshi_lifetime"
+      },
+      {
+        "input_ids": [
+          "dshi_12m_1",
+          "dshi_12m_2",
+          "dshi_12m_3",
+          "dshi_12m_4",
+          "dshi_12m_5",
+          "dshi_12m_6"
+        ],
+        "instrument_id": "dshi_12m"
+      },
+      {
+        "input_ids": [
+          "fasm_1",
+          "fasm_2",
+          "fasm_3",
+          "fasm_4",
+          "fasm_5",
+          "fasm_6",
+          "fasm_7",
+          "fasm_8",
+          "fasm_9",
+          "fasm_10",
+          "fasm_11",
+          "fasm_12",
+          "fasm_13",
+          "fasm_14",
+          "fasm_15"
+        ],
+        "instrument_id": "fasm"
+      },
+      {
+        "input_ids": [
+          "nssi_ideation_6m_present",
+          "nssi_ideation_6m_frequency",
+          "nssi_ideation_6m_intensity",
+          "nssi_ideation_1m_present",
+          "nssi_ideation_1m_frequency",
+          "nssi_ideation_1m_intensity"
+        ],
+        "instrument_id": "nssi_ideation"
+      },
+      {
+        "input_ids": [
+          "nssi_impulse_time",
+          "nssi_impulse_resistance"
+        ],
+        "instrument_id": "nssi_impulse"
+      },
+      {
+        "input_ids": [
+          "nssi_future_likelihood"
+        ],
+        "instrument_id": "nssi_future"
+      },
+      {
+        "input_ids": [
+          "nssi_stop_desire"
+        ],
+        "instrument_id": "nssi_stop"
+      },
+      {
+        "input_ids": [
+          "sicq_1",
+          "sicq_2",
+          "sicq_3",
+          "sicq_4",
+          "sicq_5",
+          "sicq_6",
+          "sicq_7"
+        ],
+        "instrument_id": "sicq"
+      },
+      {
+        "input_ids": [
+          "readiness_1",
+          "readiness_2",
+          "readiness_3"
+        ],
+        "instrument_id": "readiness"
+      },
+      {
+        "input_ids": [
+          "siss_1",
+          "siss_2",
+          "siss_3",
+          "siss_4",
+          "siss_5",
+          "siss_6",
+          "siss_7",
+          "siss_8",
+          "siss_9",
+          "siss_10",
+          "siss_11",
+          "siss_12",
+          "siss_13"
+        ],
+        "instrument_id": "siss"
+      },
+      {
+        "input_ids": [
+          "pss_1",
+          "pss_2",
+          "pss_3",
+          "pss_4",
+          "pss_5"
+        ],
+        "instrument_id": "pss"
+      }
+    ],
+    "sicq_reverse_scored_raw_input_id": "sicq_7",
+    "weekly": [
+      {
+        "input_ids": [
+          "sicq_1",
+          "sicq_2",
+          "sicq_3",
+          "sicq_4",
+          "sicq_5",
+          "sicq_6",
+          "sicq_7"
+        ],
+        "instrument_id": "sicq_weekly"
+      }
+    ]
+  },
+  "source_sha256": {
+    "questionnaire_scoring.py": "862bf47c075b627e69e423cfc4d638348b27d0b8fb58801d157b9954ee0c6faa",
+    "questionnaire_specs.py": "f1abd37ee57ae6c7f8bd98a65820dc143bd157407839d4a0597924f0cc8ba0e2",
+    "questionnaire_ui.py": "106397e5badda3df9aa523d0055b4c961b604988d488bd224358830d97a2aadf"
+  },
+  "support_trigger_ids": {
+    "daily": [
+      "suicide_thought_present_24h"
+    ],
+    "formal": [
+      "pss_1",
+      "pss_2",
+      "pss_3",
+      "pss_4",
+      "pss_5"
+    ]
+  },
+  "weekly": {
+    "instrument_order": [
+      "nssi_impulse_weekly",
+      "nssi_future_weekly",
+      "nssi_stop_weekly",
+      "sicq_weekly",
+      "readiness_weekly"
+    ],
+    "instruments": [
+      {
+        "id": "nssi_impulse_weekly",
+        "item_order": [
+          "nssi_impulse_time",
+          "nssi_impulse_resistance"
+        ],
+        "items": [
+          {
+            "id": "nssi_impulse_time",
+            "kind": "slider",
+            "labels": {
+              "high": "几乎所有时间",
+              "low": "从不"
+            },
+            "options": [],
+            "prompt": "过去一周里，你多长时间想过伤害自己？",
+            "range": {
+              "maximum": 100,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "nssi_impulse_resistance",
+            "kind": "slider",
+            "labels": {
+              "high": "无法抵制",
+              "low": "完全不难"
+            },
+            "options": [],
+            "prompt": "过去一周里，抵制伤害自己有多难？",
+            "range": {
+              "maximum": 7,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "自伤冲动",
+        "time_window": "过去一周"
+      },
+      {
+        "id": "nssi_future_weekly",
+        "item_order": [
+          "nssi_future_likelihood"
+        ],
+        "items": [
+          {
+            "id": "nssi_future_likelihood",
+            "kind": "slider",
+            "labels": {
+              "high": "极其",
+              "low": "完全不会"
+            },
+            "options": [],
+            "prompt": "你认为未来发生 NSSI 的可能性有多大？",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "未来 NSSI 可能性",
+        "time_window": "当前"
+      },
+      {
+        "id": "nssi_stop_weekly",
+        "item_order": [
+          "nssi_stop_desire"
+        ],
+        "items": [
+          {
+            "id": "nssi_stop_desire",
+            "kind": "slider",
+            "labels": {
+              "high": "我绝对想停止",
+              "low": "我根本不想停止"
+            },
+            "options": [],
+            "prompt": "你有多想停止 NSSI？",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "停止未来 NSSI 的愿望",
+        "time_window": "当前"
+      },
+      {
+        "id": "sicq_weekly",
+        "item_order": [
+          "sicq_1",
+          "sicq_2",
+          "sicq_3",
+          "sicq_4",
+          "sicq_5",
+          "sicq_6",
+          "sicq_7"
+        ],
+        "items": [
+          {
+            "id": "sicq_1",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "不管我今天过得好还是不好，我都会想自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_2",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "有些时候，我满脑子都是自伤的欲望。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_3",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "只要一想到自伤，我就会渴望它。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_4",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "我经常花时间计划下一次什么时候可以自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_5",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "心情好的时候，我经常想自伤。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_6",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "即使事情进展顺利，我也很难控制自伤的冲动。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "sicq_7",
+            "kind": "slider",
+            "labels": {
+              "high": "非常同意",
+              "low": "非常不同意"
+            },
+            "options": [],
+            "prompt": "即使我有能力，也很容易放弃自伤的机会。",
+            "range": {
+              "maximum": 4,
+              "minimum": 0
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "自伤渴望问卷",
+        "time_window": "当前"
+      },
+      {
+        "id": "readiness_weekly",
+        "item_order": [
+          "readiness_importance",
+          "readiness_ready",
+          "readiness_confidence"
+        ],
+        "items": [
+          {
+            "id": "readiness_importance",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "采取措施停止自我伤害对我来说很重要。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "readiness_ready",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "我已经准备好采取措施停止自我伤害。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          },
+          {
+            "id": "readiness_confidence",
+            "kind": "slider",
+            "labels": {
+              "high": "完全符合",
+              "low": "完全不符合"
+            },
+            "options": [],
+            "prompt": "我相信我可以采取措施停止自我伤害。",
+            "range": {
+              "maximum": 10,
+              "minimum": 1
+            },
+            "required": true,
+            "show_if": null
+          }
+        ],
+        "label": "准备改变自伤",
+        "time_window": "当前"
+      }
+    ],
+    "schedule_days": [
+      7,
+      14,
+      21,
+      28
+    ]
+  }
+}
