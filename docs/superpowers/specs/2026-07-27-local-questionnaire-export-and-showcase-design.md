@@ -66,6 +66,19 @@ The private participant flow is:
 9. Show a privacy-safe completion confirmation and clear questionnaire/export
    session state.
 
+One signed participant link represents one visit. The generated ZIP contains
+only that current visit; every configured visit type remains supported, but
+separate historical sessions are not aggregated into one archive.
+
+The existing explicit continue-without-recording path remains eligible for the
+questionnaire and local export. In that case, the export contains only the
+sanitized `skipped` or `failed` recording outcome.
+
+All completion and export timestamps are timezone-aware UTC values serialized
+to second precision. Finishing clears sensitive questionnaire, recorder, and
+export state while preserving the authenticated link lock and one
+non-sensitive completion marker.
+
 Closing or refreshing the page before download loses the current questionnaire
 session. The page must state this before questionnaire entry and again before
 final download.
