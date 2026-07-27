@@ -9,12 +9,19 @@ from showcase_workflow import DemoTransitionError, advance_step, password_matche
 ASCII_PASSWORD = "demo-password"
 ASCII_DIGEST = hashlib.sha256(ASCII_PASSWORD.encode("utf-8")).hexdigest()
 
-KNOWN_STATES = ("overview", "capture", "reflection", "confirmation")
-KNOWN_ACTIONS = ("begin", "finish_capture", "save_reflection", "restart")
+KNOWN_STATES = ("overview", "capture", "reflection", "download", "confirmation")
+KNOWN_ACTIONS = (
+    "begin",
+    "finish_capture",
+    "save_reflection",
+    "finish_download",
+    "restart",
+)
 EXPECTED_TRANSITIONS = {
     ("overview", "begin"): "capture",
     ("capture", "finish_capture"): "reflection",
-    ("reflection", "save_reflection"): "confirmation",
+    ("reflection", "save_reflection"): "download",
+    ("download", "finish_download"): "confirmation",
     ("confirmation", "restart"): "overview",
 }
 

@@ -11,7 +11,8 @@ class DemoTransitionError(ValueError):
 TRANSITIONS = {
     ("overview", "begin"): "capture",
     ("capture", "finish_capture"): "reflection",
-    ("reflection", "save_reflection"): "confirmation",
+    ("reflection", "save_reflection"): "download",
+    ("download", "finish_download"): "confirmation",
     ("confirmation", "restart"): "overview",
 }
 
