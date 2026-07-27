@@ -121,6 +121,7 @@ def _signed_app(
     subject_id: str = "sub-001",
     render_questionnaire=None,
     build_export=None,
+    initial_state: dict[str, object] | None = None,
 ) -> tuple[AppTest, list[tuple[str, str]]]:
     recorder_calls: list[tuple[str, str]] = []
 
@@ -157,6 +158,8 @@ def _signed_app(
         visit,
     )
     app.query_params["visit"] = visit
+    for state_key, value in (initial_state or {}).items():
+        app.session_state[state_key] = copy.deepcopy(value)
     app.run()
     return app, recorder_calls
 
@@ -491,6 +494,27 @@ def test_context_mismatch_clears_owned_state_and_recreates_exact_record(monkeypa
     assert app.session_state["visit"] == "daily"
 
 
+def test_malformed_cached_export_clears_local_save_acknowledgement(monkeypatch):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(mode="long", state="recording"),
+    )
+    app.session_state["operational_export_bundle"] = object()
+    app.session_state["operational_saved_locally"] = True
+
+    app.run()
+
+    assert not app.exception
+    assert "operational_export_bundle" not in app.session_state
+    assert "operational_saved_locally" not in app.session_state
+    assert len(recorder_calls) == 2
+    assert _element_by_label(
+        app.number_input,
+        "昨夜睡眠（小时）",
+    ).value == 7.0
+    assert not app.get("download_button")
+
+
 def test_recording_blocks_questionnaire_and_uses_neutral_component_key(monkeypatch):
     questionnaire_calls = []
 
@@ -547,8 +571,13 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
     assert "刷新或关闭页面" in visible
 
 
-def test_saved_recording_gate_survives_plain_component_rerun(monkeypatch):
-    statuses = [_saved_status(), RecorderStatus(mode="long")]
+def test_accepted_saved_recording_locks_component_phase_on_questionnaire_rerun(
+    monkeypatch,
+):
+    statuses = [
+        _saved_status(),
+        RecorderStatus(mode="long", state="recording"),
+    ]
     questionnaire_calls = []
 
     def next_status():
@@ -558,17 +587,19 @@ def test_saved_recording_gate_survives_plain_component_rerun(monkeypatch):
         questionnaire_calls.append(kwargs)
         return kwargs["answers"], False
 
-    app, _ = _signed_app(
+    app, recorder_calls = _signed_app(
         monkeypatch,
         status=next_status,
         render_questionnaire=incomplete_questionnaire,
     )
     stored = copy.deepcopy(app.session_state["operational_record"]["recording"])
+    assert len(recorder_calls) == 1
 
     app.run()
 
     assert not app.exception
-    assert statuses == []
+    assert len(statuses) == 1
+    assert len(recorder_calls) == 1
     assert len(questionnaire_calls) == 2
     assert app.session_state["operational_record"]["recording"] == stored
 
@@ -614,6 +645,7 @@ def test_one_shot_terminal_recording_survives_idle_confirmation_rerun(
     statuses = [
         RecorderStatus(mode="long", state=terminal_state),
         RecorderStatus(mode="long"),
+        RecorderStatus(mode="long", state="recording"),
     ]
     questionnaire_calls = []
 
@@ -647,13 +679,23 @@ def test_one_shot_terminal_recording_survives_idle_confirmation_rerun(
     confirmation.check().run()
 
     assert not app.exception
-    assert statuses == []
+    assert len(statuses) == 1
     assert len(recorder_calls) == 2
     assert len(questionnaire_calls) == 1
     assert app.session_state["operational_record"]["recording"] == (
         _terminal_metadata(terminal_state)
     )
     assert pending_key not in app.session_state
+
+    app.run()
+
+    assert not app.exception
+    assert len(statuses) == 1
+    assert len(recorder_calls) == 2
+    assert len(questionnaire_calls) == 2
+    assert app.session_state["operational_record"]["recording"] == (
+        _terminal_metadata(terminal_state)
+    )
 
 
 @pytest.mark.parametrize("terminal_state", ["skipped", "failed"])
@@ -863,6 +905,109 @@ def test_complete_questionnaire_builds_and_caches_one_export_from_a_snapshot(
     assert len(app.get("download_button")) == 1
 
 
+def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
+    monkeypatch,
+):
+    questionnaire_calls: list[dict[str, object]] = []
+    export_snapshots: list[dict[str, object]] = []
+    downloads: list[dict[str, object]] = []
+    bundle = LocalExportBundle(
+        filename="session-20260724-080910.zip",
+        mime_type="application/zip",
+        data=b"frozen-exact-download",
+    )
+
+    def render_with_answer_probe(**kwargs):
+        questionnaire_calls.append(kwargs)
+        answers = _minimal_daily_answers()
+        state_keys = questionnaire_ui.questionnaire_state_keys(
+            kwargs["state_namespace"],
+            kwargs["visit"],
+        )
+        answer_key = state_keys.widget("nssi_urge_now")
+
+        def save_changed_answer():
+            changed_answers = dict(answers)
+            changed_answers["nssi_urge_now"] = int(
+                st.session_state[answer_key]
+            )
+            kwargs["save_draft"](changed_answers, set(changed_answers))
+
+        st.slider(
+            "answer mutation probe",
+            0,
+            10,
+            value=0,
+            key=answer_key,
+            on_change=save_changed_answer,
+        )
+        kwargs["save_draft"](answers, set(answers))
+        return answers, True
+
+    def build_export(record, *, visit, exported_at):
+        export_snapshots.append(record)
+        return bundle
+
+    def capture_download(**kwargs):
+        downloads.append(kwargs)
+        return False
+
+    monkeypatch.setattr(st, "download_button", capture_download)
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=_saved_status(),
+        render_questionnaire=render_with_answer_probe,
+        build_export=build_export,
+    )
+    frozen_record = copy.deepcopy(app.session_state["operational_record"])
+    sleep_control = _element_by_label(
+        app.number_input,
+        "昨夜睡眠（小时）",
+    )
+    answer_control = _element_by_label(app.slider, "answer mutation probe")
+    assert frozen_record["daily_context"]["sleep_hours"] == 7.0
+    assert export_snapshots[0]["daily_context"]["sleep_hours"] == 7.0
+
+    sleep_control.set_value(8.0)
+    answer_control.set_value(9)
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["operational_record"] == frozen_record
+    assert export_snapshots[0]["daily_context"]["sleep_hours"] == 7.0
+    assert len(export_snapshots) == 1
+    assert len(recorder_calls) == 1
+    assert len(questionnaire_calls) == 1
+    assert not [
+        item
+        for item in app.number_input
+        if item.label == "昨夜睡眠（小时）"
+    ]
+    assert not [
+        item for item in app.slider if item.label == "answer mutation probe"
+    ]
+    assert not app.text_area
+    assert not app.multiselect
+    assert downloads == [
+        {
+            "label": "下载问卷记录（JSON + Excel）",
+            "data": b"frozen-exact-download",
+            "file_name": "session-20260724-080910.zip",
+            "mime": "application/zip",
+        },
+        {
+            "label": "下载问卷记录（JSON + Excel）",
+            "data": b"frozen-exact-download",
+            "file_name": "session-20260724-080910.zip",
+            "mime": "application/zip",
+        },
+    ]
+    assert _element_by_label(
+        app.checkbox,
+        "我确认问卷 ZIP 已保存到本地",
+    ).value is False
+
+
 def test_download_button_receives_exact_bundle_bytes_name_and_mime(monkeypatch):
     captured = []
     bundle = LocalExportBundle(
@@ -1021,6 +1166,79 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
     assert app.session_state["auth_source"] == "admin"
     assert app.session_state["operational_complete"] is True
     assert _visible_app_text(app).strip().endswith("本次会话已完成。")
+
+
+def test_admin_completion_does_not_short_circuit_valid_signed_request(monkeypatch):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        subject_id="sub-002",
+        status=RecorderStatus(mode="long", state="recording"),
+        initial_state={
+            "authed": True,
+            "auth_source": "admin",
+            "operational_complete": True,
+        },
+    )
+
+    assert not app.exception
+    assert app.session_state["auth_source"] == "signed_link"
+    assert app.session_state["subject_id"] == "sub-002"
+    assert "operational_complete" not in app.session_state
+    assert app.session_state["operational_record"]["subject_id"] == "sub-002"
+    assert len(recorder_calls) == 1
+
+
+def test_signed_completion_is_cleared_before_admin_login():
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.secrets["APP_PASSWORD_SHA256"] = hashlib.sha256(
+        b"admin-password"
+    ).hexdigest()
+    app.session_state["authed"] = True
+    app.session_state["auth_source"] = "signed_link"
+    app.session_state["subject_id"] = "sub-001"
+    app.session_state["visit"] = "daily"
+    app.session_state["operational_complete"] = True
+
+    app.run()
+
+    assert not app.exception
+    assert "operational_complete" not in app.session_state
+    _element_by_label(app.text_input, "访问密码").set_value("admin-password")
+    _element_by_label(app.button, "登录").click().run()
+    assert not app.exception
+    assert app.session_state["auth_source"] == "admin"
+    assert "operational_complete" not in app.session_state
+    assert _element_by_label(app.button, "确认日期")
+
+
+@pytest.mark.parametrize(
+    ("target_subject", "target_visit"),
+    [("sub-002", "daily"), ("sub-001", "V1")],
+)
+def test_signed_completion_is_scoped_to_verified_subject_and_visit(
+    monkeypatch,
+    target_subject,
+    target_visit,
+):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        subject_id=target_subject,
+        visit=target_visit,
+        status=RecorderStatus(mode="long", state="recording"),
+        initial_state={
+            "authed": True,
+            "auth_source": "signed_link",
+            "subject_id": "sub-001",
+            "visit": "daily",
+            "operational_complete": True,
+        },
+    )
+
+    assert not app.exception
+    assert "operational_complete" not in app.session_state
+    assert app.session_state["operational_record"]["subject_id"] == target_subject
+    assert app.session_state["operational_record"]["visit"] == target_visit
+    assert len(recorder_calls) == 1
 
 
 def test_visible_titles_and_generated_timestamps_are_neutral_and_utc_aware():

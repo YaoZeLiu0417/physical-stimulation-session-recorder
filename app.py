@@ -26,6 +26,7 @@ from link_auth import (
     reconcile_link_auth_state,
     verify_subject_link,
 )
+from local_export_bundle import LocalExportBundle
 from local_recording_workflow import (
     local_recording_metadata,
     recording_gate_satisfied,
@@ -130,6 +131,7 @@ def verify_link_params() -> tuple[VerifiedLink | None, str, bool]:
     return verified, "", attempted
 
 
+previous_auth_source = st.session_state.get("auth_source")
 previous_signed_context = (
     st.session_state.get("subject_id"),
     st.session_state.get("visit"),
@@ -140,12 +142,18 @@ invalid_signed_link = reconcile_link_auth_state(
     verified_link,
     signed_link_attempted=signed_link_attempted,
 )
-if (
+current_auth_source = st.session_state.get("auth_source")
+auth_role_changed = (
+    previous_auth_source in {"admin", "signed_link"}
+    and previous_auth_source != current_auth_source
+)
+signed_identity_changed = (
     verified_link is not None
-    and previous_signed_context != (None, None)
+    and previous_auth_source == "signed_link"
     and previous_signed_context
     != (verified_link.subject_id, verified_link.visit)
-):
+)
+if auth_role_changed or signed_identity_changed:
     st.session_state.pop(_COMPLETE_KEY, None)
     st.session_state.pop("participant_identifier", None)
 
@@ -198,6 +206,27 @@ def _finish_current_session() -> None:
         st.session_state.pop("subject_id", None)
         st.session_state.pop("visit", None)
     st.session_state[_COMPLETE_KEY] = True
+
+
+def _render_export_finalization(bundle: LocalExportBundle) -> None:
+    st.warning("下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。")
+    st.download_button(
+        label="下载问卷记录（JSON + Excel）",
+        data=bundle.data,
+        file_name=bundle.filename,
+        mime="application/zip",
+    )
+    saved_locally = st.checkbox(
+        "我确认问卷 ZIP 已保存到本地",
+        key=_SAVED_LOCALLY_KEY,
+    )
+    st.button(
+        "完成本次会话",
+        type="primary",
+        disabled=not saved_locally,
+        on_click=_finish_current_session,
+        key="operational_finish",
+    )
 
 
 def _show_support_message() -> None:
@@ -346,6 +375,17 @@ if not session_record_matches(
     )
     st.session_state[_RECORD_KEY] = record
 
+cached_bundle = st.session_state.get(_EXPORT_KEY)
+if cached_bundle is not None and not isinstance(
+    cached_bundle,
+    LocalExportBundle,
+):
+    st.session_state.pop(_EXPORT_KEY, None)
+    st.session_state.pop(_SAVED_LOCALLY_KEY, None)
+elif isinstance(cached_bundle, LocalExportBundle):
+    _render_export_finalization(cached_bundle)
+    st.stop()
+
 session_token = str(record["record_id"]).rsplit("_", 1)[-1]
 stored_context = record.get("daily_context", {})
 if not isinstance(stored_context, dict):
@@ -472,64 +512,70 @@ daily_context = {
 record["daily_context"] = copy.deepcopy(daily_context)
 
 st.subheader("② 本地录制")
-recorder_key = f"operational_recorder::{session_token}"
-recorder_status = render_browser_recorder(
-    key=recorder_key,
-    initial_mode="long",
-)
 pending_terminal_key = f"operational_recorder::pending::{session_token}"
 continue_without_key = f"operational_recording_continue::{session_token}"
-terminal_status = None
-if recorder_status.state in {"skipped", "failed"}:
-    terminal_status = recorder_status
-    st.session_state[pending_terminal_key] = local_recording_metadata(
-        recorder_status
+stored_status = _stored_recorder_status(record.get("recording"))
+stored_continue = (
+    stored_status is not None
+    and stored_status.state in {"skipped", "failed"}
+)
+recording_locked = (
+    stored_status is not None
+    and recording_gate_satisfied(stored_status, stored_continue)
+)
+recording_phase_complete = recording_locked
+if recording_locked:
+    gate_status = stored_status
+    st.session_state.pop(pending_terminal_key, None)
+    st.session_state.pop(continue_without_key, None)
+else:
+    recorder_key = f"operational_recorder::{session_token}"
+    recorder_status = render_browser_recorder(
+        key=recorder_key,
+        initial_mode="long",
     )
-elif recorder_status.state == "idle":
-    pending_status = _stored_recorder_status(
-        st.session_state.get(pending_terminal_key)
-    )
-    if (
-        pending_status is not None
-        and pending_status.state in {"skipped", "failed"}
-        and pending_status.mode == recorder_status.mode
-        and st.session_state.get(continue_without_key) is True
-    ):
-        terminal_status = pending_status
+    terminal_status = None
+    if recorder_status.state in {"skipped", "failed"}:
+        terminal_status = recorder_status
+        st.session_state[pending_terminal_key] = local_recording_metadata(
+            recorder_status
+        )
+    elif recorder_status.state == "idle":
+        pending_status = _stored_recorder_status(
+            st.session_state.get(pending_terminal_key)
+        )
+        if (
+            pending_status is not None
+            and pending_status.state in {"skipped", "failed"}
+            and pending_status.mode == recorder_status.mode
+            and st.session_state.get(continue_without_key) is True
+        ):
+            terminal_status = pending_status
+        else:
+            st.session_state.pop(pending_terminal_key, None)
+            st.session_state.pop(continue_without_key, None)
     else:
         st.session_state.pop(pending_terminal_key, None)
         st.session_state.pop(continue_without_key, None)
-else:
-    st.session_state.pop(pending_terminal_key, None)
-    st.session_state.pop(continue_without_key, None)
 
-gate_status = terminal_status or recorder_status
-continue_without_recording = False
-if terminal_status is not None:
-    continue_without_recording = st.checkbox(
-        "我确认继续填写问卷，不保存本次录制",
-        key=continue_without_key,
-    )
-
-recording_continuation_satisfied = recording_gate_satisfied(
-    gate_status,
-    continue_without_recording,
-)
-if not recording_continuation_satisfied:
-    stored_status = _stored_recorder_status(record.get("recording"))
-    if stored_status is not None:
-        stored_continue = stored_status.state in {"skipped", "failed"}
-        recording_continuation_satisfied = recording_gate_satisfied(
-            stored_status,
-            stored_continue,
+    gate_status = terminal_status or recorder_status
+    continue_without_recording = False
+    if terminal_status is not None:
+        continue_without_recording = st.checkbox(
+            "我确认继续填写问卷，不保存本次录制",
+            key=continue_without_key,
         )
-        if recording_continuation_satisfied:
-            gate_status = stored_status
-if not recording_continuation_satisfied:
+
+    recording_phase_complete = recording_gate_satisfied(
+        gate_status,
+        continue_without_recording,
+    )
+if not recording_phase_complete:
     st.info("请先完成本地录制保存，或在无法录制时明确确认继续。")
     st.stop()
-st.session_state.pop(pending_terminal_key, None)
-record["recording"] = local_recording_metadata(gate_status)
+if not recording_locked:
+    st.session_state.pop(pending_terminal_key, None)
+    record["recording"] = local_recording_metadata(gate_status)
 
 st.warning("进入问卷后请勿刷新或关闭页面，否则当前问卷内容将丢失。")
 state_namespace = f"operational_questionnaire::{session_token}"
@@ -544,6 +590,8 @@ def save_questionnaire_draft(
     updated_answers: dict[str, Any],
     answered_field_ids: set[str],
 ) -> None:
+    if isinstance(st.session_state.get(_EXPORT_KEY), LocalExportBundle):
+        return
     current_step = int(st.session_state.get(state_keys.step, 0))
     if visit == "daily":
         persist_daily_questionnaire(
@@ -624,6 +672,8 @@ if bundle is None:
             visit=visit,
             exported_at=_utc_now(),
         )
+        if not isinstance(bundle, LocalExportBundle):
+            raise TypeError("export builder returned an invalid bundle")
     except Exception:
         st.session_state[_EXPORT_ERROR_KEY] = True
         st.error("下载文件暂时无法生成，请重试。")
@@ -634,21 +684,4 @@ if bundle is None:
     st.session_state[_EXPORT_KEY] = bundle
     st.session_state.pop(_EXPORT_ERROR_KEY, None)
 
-st.warning("下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。")
-st.download_button(
-    label="下载问卷记录（JSON + Excel）",
-    data=bundle.data,
-    file_name=bundle.filename,
-    mime="application/zip",
-)
-saved_locally = st.checkbox(
-    "我确认问卷 ZIP 已保存到本地",
-    key=_SAVED_LOCALLY_KEY,
-)
-st.button(
-    "完成本次会话",
-    type="primary",
-    disabled=not saved_locally,
-    on_click=_finish_current_session,
-    key="operational_finish",
-)
+_render_export_finalization(bundle)
