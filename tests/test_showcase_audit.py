@@ -5,12 +5,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from showcase_audit import audit_showcase
+from showcase_audit import FORBIDDEN_TERMS, audit_showcase
 
 
 APP_URL = "https://physical-stimulation-session-recorder.streamlit.app"
 SVG_URL = "http://www.w3.org/2000/svg"
 REPARSE_POINT = 0x400
+EXPECTED_FORBIDDEN_TERMS = (
+    "tavns",
+    "nssi",
+    "sicq",
+    "dshi",
+    "fasm",
+    "自伤",
+    "自杀",
+    "量表",
+    "问卷",
+    "评分规则",
+)
 
 
 def _write_safe_tree(root: Path) -> None:
@@ -107,20 +119,13 @@ def test_reports_every_missing_allowlisted_file(tmp_path: Path) -> None:
     assert "missing-file: assets/session-recorder-preview.svg" in findings
 
 
+def test_forbidden_term_inventory_matches_canonical_contract() -> None:
+    assert FORBIDDEN_TERMS == EXPECTED_FORBIDDEN_TERMS
+
+
 @pytest.mark.parametrize(
     "term",
-    [
-        "TaVnS",
-        "NSSI",
-        "SiCq",
-        "DSHI",
-        "FaSm",
-        "\u81ea\u4f24",
-        "\u81ea\u6740",
-        "\u91cf\u8868",
-        "\u95ee\u5377",
-        "\u8bc4\u5206\u89c4\u5219",
-    ],
+    tuple(term.swapcase() for term in FORBIDDEN_TERMS),
 )
 def test_forbidden_terms_are_case_insensitive(tmp_path: Path, term: str) -> None:
     _write_safe_tree(tmp_path)

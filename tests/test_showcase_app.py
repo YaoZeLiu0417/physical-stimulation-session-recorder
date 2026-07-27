@@ -12,6 +12,7 @@ from streamlit.testing.v1 import AppTest
 import browser_recorder
 import showcase_export
 from browser_recorder import RecorderStatus
+from showcase_audit import FORBIDDEN_TERMS
 from showcase_export import SyntheticShowcaseArchive
 
 
@@ -79,7 +80,31 @@ PROGRESS_LABELS = (
     "4 本地下载",
     "5 完成确认",
 )
-EXPECTED_DOWNLOAD_INVENTORY = (
+PROGRESS_STATES = (
+    "overview",
+    "capture",
+    "reflection",
+    "download",
+    "confirmation",
+)
+EXPECTED_SIDEBAR_INVENTORIES = {
+    "access": ((), ()),
+    **{
+        state: (
+            ("SESSION PROGRESS",),
+            tuple(
+                f"**当前 · {label}**" if state == label_state else label
+                for label, label_state in zip(
+                    PROGRESS_LABELS,
+                    PROGRESS_STATES,
+                    strict=True,
+                )
+            ),
+        )
+        for state in PROGRESS_STATES
+    },
+}
+AUTHENTICATED_INVENTORY_PREFIX = (
     ("title", "value", PRODUCT_NAME),
     ("caption", "value", PRODUCT_CAPTION),
     (
@@ -87,6 +112,83 @@ EXPECTED_DOWNLOAD_INVENTORY = (
         "value",
         '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
     ),
+)
+EXPECTED_ACCESS_INVENTORY = (
+    ("title", "value", PRODUCT_NAME),
+    ("caption", "value", PRODUCT_CAPTION),
+    ("text_input", "label", "访问密码"),
+    ("button", "label", "进入演示"),
+)
+EXPECTED_OVERVIEW_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "准备开始本次演示"),
+    (
+        "markdown",
+        "value",
+        '<div class="demo-note">本受控合成演示展示安全进入、会话记录、引导反馈、本地下载和完成确认。'
+        "录像仅由用户保存在本机，不会上传，也不会连接外部存储。</div>",
+    ),
+    ("button", "label", "开始演示"),
+)
+EXPECTED_CAPTURE_SAVED_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "本机录制"),
+    (
+        "caption",
+        "value",
+        "视频和声音仅保存在本机，不会上传。请勿录入可识别身份的信息。",
+    ),
+    ("button", "label", "返回流程概览"),
+    ("info", "value", "录像已保存在本机，可以继续后续流程。"),
+    ("button", "label", "继续后续流程"),
+)
+EXPECTED_CAPTURE_NO_RECORDING_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "本机录制"),
+    (
+        "caption",
+        "value",
+        "视频和声音仅保存在本机，不会上传。请勿录入可识别身份的信息。",
+    ),
+    ("button", "label", "返回流程概览"),
+    (
+        "warning",
+        "value",
+        "本次未完成录像。如需继续，请明确选择无录像继续。",
+    ),
+    ("button", "label", "无录像继续"),
+)
+EXPECTED_REFLECTION_SAVED_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "演示反馈"),
+    (
+        "caption",
+        "value",
+        "以下为通用合成反馈，不对应任何研究测量内容或评分规则。",
+    ),
+    ("slider", "value", 2),
+    ("slider", "label", "本次演示流程有多清晰？"),
+    ("slider", "value", 2),
+    ("slider", "label", "摄像头交互有多顺畅？"),
+    ("slider", "value", 2),
+    ("slider", "label", "界面的信息量有多合适？"),
+    ("slider", "value", 2),
+    ("slider", "label", "你愿意继续使用这一流程吗？"),
+    ("button", "label", "提交演示反馈"),
+)
+EXPECTED_REFLECTION_NO_RECORDING_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "演示反馈"),
+    (
+        "caption",
+        "value",
+        "以下为通用合成反馈，不对应任何研究测量内容或评分规则。",
+    ),
+    ("slider", "value", 2),
+    ("slider", "label", "本次演示流程有多清晰？"),
+    ("caption", "value", CAMERA_FEEDBACK_SKIPPED_CAPTION),
+    ("slider", "value", 2),
+    ("slider", "label", "界面的信息量有多合适？"),
+    ("slider", "value", 2),
+    ("slider", "label", "你愿意继续使用这一流程吗？"),
+    ("button", "label", "提交演示反馈"),
+)
+EXPECTED_DOWNLOAD_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     ("subheader", "value", "下载合成演示数据"),
     (
         "caption",
@@ -99,14 +201,7 @@ EXPECTED_DOWNLOAD_INVENTORY = (
     ("checkbox", "label", "我已确认合成 ZIP 已保存在本机"),
     ("button", "label", "完成演示"),
 )
-EXPECTED_CONFIRMATION_INVENTORY = (
-    ("title", "value", PRODUCT_NAME),
-    ("caption", "value", PRODUCT_CAPTION),
-    (
-        "markdown",
-        "value",
-        '<p class="demo-kicker">CONTROLLED DEMONSTRATION</p>',
-    ),
+EXPECTED_CONFIRMATION_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     (
         "markdown",
         "value",
@@ -122,6 +217,102 @@ EXPECTED_CONFIRMATION_INVENTORY = (
     ),
     ("button", "label", "重新体验"),
 )
+VISIBLE_FORBIDDEN_TERMS = tuple(
+    term for term in FORBIDDEN_TERMS if term != "评分规则"
+) + (
+    "questionnaire",
+    "score",
+    "answer",
+    "risk",
+    "threshold",
+    "media",
+    "blob",
+    "participant id",
+    "participant_id",
+    "subject id",
+    "subject_id",
+    "path",
+    "filename",
+    "device label",
+    "upload status",
+    "upload_status",
+    "recording_state",
+    "showcase_recorder_status",
+    "showcase_synthetic_archive",
+    "showcase_export_error",
+    "error_code",
+    "write_failed",
+    "twi" + "lio",
+    "i" + "ce",
+)
+SOURCE_FORBIDDEN_TERMS = tuple(
+    term for term in FORBIDDEN_TERMS if term != "评分规则"
+) + (
+    "questionnaire",
+    "score",
+    "risk",
+    "threshold",
+    "participant_id",
+    "participantid",
+    "subject_id",
+    "recording_path",
+    "file_path",
+    "upload_status",
+)
+EXPECTED_SHOWCASE_SOURCE_IMPORTS = {
+    "__future__",
+    "browser_recorder",
+    "datetime",
+    "os",
+    "showcase_export",
+    "showcase_workflow",
+    "streamlit",
+}
+EXPECTED_SHOWCASE_CALL_INVENTORY = {
+    "RecorderStatus",
+    "ValueError",
+    "_build_cached_synthetic_archive",
+    "_clear_showcase_session_state",
+    "_consume_recorder_status",
+    "_go",
+    "_preserve_completed_ratings",
+    "_recording_export_state",
+    "_render_export_retry",
+    "_render_local_recorder",
+    "_render_synthetic_download",
+    "_require_access",
+    "_return_to_overview",
+    "_secret",
+    "advance_step",
+    "build_synthetic_showcase_zip",
+    "button",
+    "caption",
+    "checkbox",
+    "container",
+    "download_button",
+    "error",
+    "get",
+    "getenv",
+    "info",
+    "isinstance",
+    "items",
+    "markdown",
+    "now",
+    "password_matches",
+    "pop",
+    "render_browser_recorder",
+    "replace",
+    "rerun",
+    "set_page_config",
+    "setdefault",
+    "slider",
+    "stop",
+    "str",
+    "subheader",
+    "text_input",
+    "title",
+    "warning",
+}
 
 
 def _app_with_password(app_path: Path = APP) -> AppTest:
@@ -301,6 +492,64 @@ def _seed_download_state(app: AppTest) -> None:
     app.session_state[SHOWCASE_LOCAL_SAVE_KEY] = True
     app.session_state[SHOWCASE_DOWNLOAD_BUTTON_KEY] = True
     app.session_state[SHOWCASE_RETRY_BUTTON_KEY] = True
+
+
+def _fresh_inventory_app(
+    monkeypatch,
+    *,
+    step: str,
+    recording_state: str | None,
+) -> AppTest:
+    app = _app_with_password()
+    if step == "access":
+        return app.run()
+
+    app.session_state["showcase_authenticated"] = True
+    app.session_state["showcase_step"] = step
+    if recording_state is None:
+        return app.run()
+
+    saved = recording_state == "saved"
+    status = RecorderStatus(
+        state=recording_state,
+        duration_seconds=3 if saved else 0,
+        camera_ready=saved,
+        microphone_ready=saved,
+        saved_confirmed=saved,
+        error_code="write_failed" if recording_state == "failed" else None,
+    )
+    app.session_state["showcase_recorder_status"] = status
+    if step == "capture":
+        _recorder_spy(monkeypatch, status)
+    if saved:
+        app.session_state["showcase_camera_started"] = True
+    if step in {"download", "confirmation"}:
+        app.session_state[SHOWCASE_ARCHIVE_KEY] = SyntheticShowcaseArchive(
+            filename="synthetic-session-private-detail.zip",
+            data=b"inventory-synthetic-zip",
+        )
+        for key, value in SYNTHETIC_RESPONSES.items():
+            if key != "camera_smoothness" or saved:
+                app.session_state[key] = value
+    return app.run()
+
+
+def _assert_showcase_only_inventory(
+    app: AppTest,
+    *,
+    step: str,
+    expected_inventory: tuple[tuple[str, str, object], ...],
+) -> None:
+    visible_text = _visible_text(app)
+    folded_text = visible_text.casefold()
+    for term in VISIBLE_FORBIDDEN_TERMS:
+        assert term.casefold() not in folded_text, term
+    assert _main_content_inventory(app) == expected_inventory
+    sidebar_inventory = (
+        tuple(element.value for element in app.sidebar.caption),
+        tuple(element.value for element in app.sidebar.markdown),
+    )
+    assert sidebar_inventory == EXPECTED_SIDEBAR_INVENTORIES[step]
 
 
 def test_showcase_fails_closed_without_configured_password(monkeypatch):
@@ -1029,39 +1278,67 @@ def test_download_uses_none_camera_rating_without_saved_recording(
     assert app.session_state["showcase_recorder_status"] == status
 
 
-def test_download_inventory_is_exact_and_hides_ratings_and_filename(
+@pytest.mark.parametrize(
+    ("step", "recording_state", "expected_inventory"),
+    (
+        ("access", None, EXPECTED_ACCESS_INVENTORY),
+        ("overview", None, EXPECTED_OVERVIEW_INVENTORY),
+        ("capture", "saved", EXPECTED_CAPTURE_SAVED_INVENTORY),
+        ("capture", "skipped", EXPECTED_CAPTURE_NO_RECORDING_INVENTORY),
+        ("capture", "failed", EXPECTED_CAPTURE_NO_RECORDING_INVENTORY),
+        ("reflection", "saved", EXPECTED_REFLECTION_SAVED_INVENTORY),
+        (
+            "reflection",
+            "skipped",
+            EXPECTED_REFLECTION_NO_RECORDING_INVENTORY,
+        ),
+        (
+            "reflection",
+            "failed",
+            EXPECTED_REFLECTION_NO_RECORDING_INVENTORY,
+        ),
+        ("download", "saved", EXPECTED_DOWNLOAD_INVENTORY),
+        ("download", "skipped", EXPECTED_DOWNLOAD_INVENTORY),
+        ("download", "failed", EXPECTED_DOWNLOAD_INVENTORY),
+        ("confirmation", "saved", EXPECTED_CONFIRMATION_INVENTORY),
+        ("confirmation", "skipped", EXPECTED_CONFIRMATION_INVENTORY),
+        ("confirmation", "failed", EXPECTED_CONFIRMATION_INVENTORY),
+    ),
+    ids=(
+        "access",
+        "overview",
+        "capture-saved",
+        "capture-skipped",
+        "capture-failed",
+        "reflection-saved",
+        "reflection-skipped",
+        "reflection-failed",
+        "download-saved",
+        "download-skipped",
+        "download-failed",
+        "confirmation-saved",
+        "confirmation-skipped",
+        "confirmation-failed",
+    ),
+)
+def test_visible_copy_and_main_inventory_are_exact_for_every_terminal_branch(
     monkeypatch,
+    step,
+    recording_state,
+    expected_inventory,
 ):
-    archive = SyntheticShowcaseArchive(
-        filename="synthetic-session-private-detail.zip",
-        data=b"inventory-synthetic-zip",
+    app = _fresh_inventory_app(
+        monkeypatch,
+        step=step,
+        recording_state=recording_state,
     )
-    monkeypatch.setattr(
-        showcase_export,
-        "build_synthetic_showcase_zip",
-        lambda **kwargs: archive,
-    )
-
-    app = _app_with_password()
-    app.session_state["showcase_authenticated"] = True
-    app.session_state["showcase_step"] = "download"
-    app.session_state["showcase_recorder_status"] = RecorderStatus(
-        state="saved",
-        duration_seconds=3,
-        saved_confirmed=True,
-    )
-    app.session_state["showcase_camera_started"] = True
-    app.session_state[SHOWCASE_ARCHIVE_KEY] = archive
-    for key, value in SYNTHETIC_RESPONSES.items():
-        app.session_state[key] = value
-    app.run()
 
     assert not app.exception
-    assert _main_content_inventory(app) == EXPECTED_DOWNLOAD_INVENTORY
-    visible = _visible_text(app)
-    assert archive.filename not in visible
-    for hidden in (*SYNTHETIC_RESPONSES, "score", "answer", "path"):
-        assert hidden.casefold() not in visible.casefold()
+    _assert_showcase_only_inventory(
+        app,
+        step=step,
+        expected_inventory=expected_inventory,
+    )
 
 
 def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch):
@@ -1166,11 +1443,6 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     )
     confirmation_app.run()
 
-    assert (
-        _main_content_inventory(confirmation_app)
-        == EXPECTED_CONFIRMATION_INVENTORY
-    )
-
     _element_by_key(confirmation_app.button, "restart_demo").click().run()
     assert confirmation_app.session_state["showcase_step"] == "overview"
     assert confirmation_app.session_state["showcase_authenticated"] is True
@@ -1220,50 +1492,27 @@ def test_confirmation_inventory_rejects_unknown_and_style_smuggled_output(
     assert unexpectedly_allowed == []
 
 
-def test_visible_copy_is_neutral_on_every_authenticated_step(monkeypatch):
-    _recorder_spy(
-        monkeypatch,
-        RecorderStatus(
-            state="saved",
-            duration_seconds=3,
-            camera_ready=True,
-            microphone_ready=True,
-            saved_confirmed=True,
-        ),
+def test_inventory_gate_rejects_canonical_forbidden_copy_drift(tmp_path):
+    source = APP.read_text(encoding="utf-8")
+    access_anchor = "st.caption(PRODUCT_CAPTION)\n_require_access()\n"
+    mutated_source = source.replace(
+        access_anchor,
+        'st.caption(PRODUCT_CAPTION)\nst.caption("NSSI private label")\n'
+        "_require_access()\n",
+        1,
     )
-    app = _authenticate(_app_with_password())
-    visible_by_step = [_visible_text(app)]
+    assert mutated_source != source
+    mutated_path = tmp_path / "mutated_showcase_access.py"
+    mutated_path.write_text(mutated_source, encoding="utf-8")
+    mutated_app = _app_with_password(mutated_path).run()
 
-    _element_by_key(app.button, "begin_demo").click().run()
-    visible_by_step.append(_visible_text(app))
-    _element_by_key(app.button, "finish_capture").click().run()
-    visible_by_step.append(_visible_text(app))
-    _element_by_key(app.button, "save_reflection").click().run()
-    visible_by_step.append(_visible_text(app))
-    _element_by_key(app.checkbox, SHOWCASE_LOCAL_SAVE_KEY).set_value(True)
-    app.run()
-    _element_by_key(app.button, "finish_download").click().run()
-    visible_by_step.append(_visible_text(app))
-
-    for visible_text in visible_by_step:
-        assert PRODUCT_NAME in visible_text
-        assert PRODUCT_CAPTION in visible_text
-        folded = visible_text.casefold()
-        for forbidden in (
-            "tavns",
-            "nssi",
-            "score",
-            "answer",
-            "threshold",
-            "media",
-            "blob",
-            "path",
-            "filename",
-            "device label",
-            "twi" + "lio",
-            "i" + "ce",
-        ):
-            assert forbidden not in folded
+    assert not mutated_app.exception
+    with pytest.raises(AssertionError, match="nssi"):
+        _assert_showcase_only_inventory(
+            mutated_app,
+            step="access",
+            expected_inventory=EXPECTED_ACCESS_INVENTORY,
+        )
 
 
 def test_showcase_has_no_probe_split_or_legacy_media_hooks():
@@ -1286,6 +1535,9 @@ def test_showcase_has_no_probe_split_or_legacy_media_hooks():
 def test_showcase_source_has_no_private_or_io_capabilities():
     source = APP.read_text(encoding="utf-8")
     tree = ast.parse(source)
+    folded_source = source.casefold()
+    for term in SOURCE_FORBIDDEN_TERMS:
+        assert term.casefold() not in folded_source, term
     imported_modules = {
         alias.name
         for node in ast.walk(tree)
@@ -1296,6 +1548,7 @@ def test_showcase_source_has_no_private_or_io_capabilities():
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
     }
+    assert imported_modules == EXPECTED_SHOWCASE_SOURCE_IMPORTS
     prohibited_import_fragments = (
         "questionnaire",
         "upload",
@@ -1335,6 +1588,7 @@ def test_showcase_source_has_no_private_or_io_capabilities():
         if isinstance(node, ast.Call)
         and isinstance(node.func, (ast.Name, ast.Attribute))
     }
+    assert call_names == EXPECTED_SHOWCASE_CALL_INVENTORY
     assert prohibited_calls.isdisjoint(call_names)
     assert not any("upload" in name.casefold() for name in call_names)
     assert "http://" not in source.casefold()
