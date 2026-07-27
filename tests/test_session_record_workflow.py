@@ -2,6 +2,7 @@ import ast
 from collections.abc import Iterator, Mapping, MutableMapping
 from copy import deepcopy
 from datetime import date, datetime, timezone
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 import session_record_workflow
 from session_record_workflow import (
     DAILY_CONTEXT_DEFAULTS,
+    build_daily_field_status,
+    build_formal_field_status,
     clear_owned_session_state,
     create_session_record,
     mark_questionnaire_visit_complete,
@@ -25,7 +28,11 @@ from questionnaire_specs import (
     VISIT_INSTRUMENT_IDS,
     WEEKLY_INSTRUMENTS,
 )
-from questionnaire_ui import formal_flow
+from questionnaire_ui import (
+    build_field_status as ui_build_field_status,
+    build_formal_field_status as ui_build_formal_field_status,
+    formal_flow,
+)
 
 
 WORKFLOW_SOURCE = Path(__file__).resolve().parents[1] / "session_record_workflow.py"
@@ -943,6 +950,278 @@ def test_daily_context_allowlists_keys_and_recursively_scrubs_non_raw_data() -> 
             "unknown_context",
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("day", "field_id", "value"),
+    [
+        (6, "nssi_urge_now", 0.5),
+        (6, "nssi_urge_now", float("nan")),
+        (6, "nssi_urge_now", float("inf")),
+        (6, "nssi_urge_now", -1),
+        (6, "nssi_urge_now", 11),
+        (7, "sicq_1", 0.5),
+        (7, "sicq_1", float("nan")),
+        (7, "sicq_1", float("inf")),
+        (7, "sicq_1", -1),
+        (7, "sicq_1", 5),
+    ],
+)
+def test_daily_and_weekly_sliders_reject_non_integer_or_out_of_range_values(
+    day: int, field_id: str, value: object
+) -> None:
+    record = _session_record(day=day)
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError, match="answers are invalid"):
+        persist_daily_questionnaire(
+            record,
+            {field_id: value},
+            {field_id},
+            current_step=0,
+        )
+
+    assert record == before
+
+
+@pytest.mark.parametrize("value", [1.5, float("nan"), float("inf"), 0, 6])
+def test_formal_sliders_reject_non_integer_or_out_of_range_values(
+    value: object,
+) -> None:
+    record = _session_record(visit="V1")
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError, match="answers are invalid"):
+        persist_formal_questionnaire(
+            record,
+            "V1",
+            {"dshi_lifetime_1": value},
+            {"dshi_lifetime_1"},
+            current_step=0,
+        )
+
+    assert record == before
+
+
+@pytest.mark.parametrize(
+    ("section", "field_id", "value"),
+    [
+        ("daily_core", "nssi_thought_present_24h", "false"),
+        ("daily_core", "nssi_urge_now", 0.5),
+        ("daily_core", "nssi_urge_now", float("nan")),
+        ("daily_core", "nssi_urge_now", float("inf")),
+        ("daily_core", "nssi_urge_now", -1),
+        ("conditional_details", "nssi_motives_24h", ()),
+        ("conditional_details", "nssi_motives_24h", [1]),
+    ],
+)
+def test_daily_answer_restoration_fails_closed_for_corrupted_values(
+    section: str, field_id: str, value: object
+) -> None:
+    record = _session_record(day=6)
+    record["daily_core"]["nssi_behavior_present_24h"] = True
+    record[section][field_id] = value
+
+    assert questionnaire_answers(record, "daily") == {}
+
+
+@pytest.mark.parametrize(
+    ("field_id", "value"),
+    [
+        ("pss_1", 1),
+        ("dshi_lifetime_1", 1.5),
+        ("dshi_lifetime_1", float("nan")),
+        ("dshi_lifetime_1", float("inf")),
+        ("dshi_lifetime_1", 0),
+        ("dshi_lifetime_1", 6),
+    ],
+)
+def test_formal_answer_restoration_fails_closed_for_corrupted_values(
+    field_id: str, value: object
+) -> None:
+    record = _session_record(visit="V1")
+    record["formal_visits"]["V1"] = {"raw_answers": {field_id: value}}
+
+    assert questionnaire_answers(record, "V1") == {}
+
+
+def test_public_daily_status_matches_locked_ui_helper_exhaustively() -> None:
+    daily_ids = {
+        question.id for question in (*DAILY_CORE, *DAILY_CONDITIONAL)
+    }
+    weekly_ids = {
+        question.id
+        for instrument in WEEKLY_INSTRUMENTS
+        for question in instrument.questions
+    }
+    for day, thought, behavior, suicide in product(
+        (6, 7), (False, True), (False, True), (False, True)
+    ):
+        answers = {
+            "nssi_thought_present_24h": thought,
+            "nssi_behavior_present_24h": behavior,
+            "suicide_thought_present_24h": suicide,
+        }
+        answered = daily_ids | weekly_ids
+        assert build_daily_field_status(answers, answered, day) == (
+            ui_build_field_status(answers, answered, day)
+        )
+
+
+@pytest.mark.parametrize("visit", tuple(VISIT_INSTRUMENT_IDS))
+def test_public_formal_status_matches_locked_ui_helper_exhaustively(
+    visit: str,
+) -> None:
+    questions = [
+        question
+        for instrument_id in VISIT_INSTRUMENT_IDS[visit]
+        for question in FORMAL_INSTRUMENTS[instrument_id].questions
+    ]
+    controller_ids = tuple(
+        dict.fromkeys(
+            question.show_if[0]
+            for question in questions
+            if question.show_if is not None
+        )
+    )
+    answered = {question.id for question in questions}
+    for controller_values in product((False, True), repeat=len(controller_ids)):
+        answers = dict(zip(controller_ids, controller_values, strict=True))
+        assert build_formal_field_status(visit, answers, answered) == (
+            ui_build_formal_field_status(visit, answers, answered)
+        )
+
+
+_NON_RAW_TEST_KEYS = (
+    "score",
+    "scored_answers",
+    "derived",
+    "derived_metrics",
+    "risk",
+    "risk_level",
+    "safety",
+    "safety_signals",
+    "classification",
+    "threshold",
+    "thresholds",
+)
+
+
+def _hostile_nested_payload() -> dict[str, object]:
+    return {
+        "kept": "raw",
+        **{
+            key: {"nested": {"score": 99}}
+            for key in _NON_RAW_TEST_KEYS
+        },
+    }
+
+
+def _record_with_hostile_retained_sections() -> dict[str, object]:
+    record = _session_record(day=7)
+    hostile = _hostile_nested_payload()
+    record["daily_context"] = {
+        "sleep_hours": 7.0,
+        "tags": [deepcopy(hostile)],
+    }
+    record["daily_core"] = {
+        "nssi_urge_now": 0,
+        "legacy_payload": deepcopy(hostile),
+    }
+    record["conditional_details"] = {
+        "nssi_trigger_24h": "kept",
+        "legacy_payload": deepcopy(hostile),
+    }
+    record["weekly_extension"] = {
+        "sicq_1": 0,
+        "legacy_payload": deepcopy(hostile),
+    }
+    record["formal_visits"] = {
+        "V3": {
+            "raw_answers": {"pss_1": False},
+            "legacy_payload": deepcopy(hostile),
+        }
+    }
+    record["field_status"] = {
+        "V3": {
+            "pss_1": "answered",
+            "legacy_payload": deepcopy(hostile),
+        }
+    }
+    record["recording"] = {
+        "status": "saved",
+        "legacy_payload": deepcopy(hostile),
+    }
+    record.update({key: deepcopy(hostile) for key in _NON_RAW_TEST_KEYS})
+    return record
+
+
+def _mutate_daily(record: dict[str, object]) -> None:
+    persist_daily_questionnaire(
+        record,
+        {"nssi_urge_now": 0},
+        {"nssi_urge_now"},
+        current_step=0,
+    )
+
+
+def _mutate_formal(record: dict[str, object]) -> None:
+    persist_formal_questionnaire(
+        record,
+        "V1",
+        {"pss_1": False},
+        {"pss_1"},
+        current_step=0,
+    )
+
+
+def _mutate_completion(record: dict[str, object]) -> None:
+    mark_questionnaire_visit_complete(
+        record,
+        "daily",
+        completed_at_iso="2026-07-24T08:10:11Z",
+    )
+
+
+@pytest.mark.parametrize(
+    "mutator", [_mutate_daily, _mutate_formal, _mutate_completion]
+)
+def test_public_mutators_scrub_every_retained_exportable_section(mutator) -> None:
+    record = _record_with_hostile_retained_sections()
+
+    mutator(record)
+
+    for section in (
+        "daily_context",
+        "daily_core",
+        "conditional_details",
+        "weekly_extension",
+        "formal_visits",
+        "field_status",
+        "recording",
+    ):
+        serialized = repr(record[section])
+        assert all(key not in serialized for key in _NON_RAW_TEST_KEYS)
+    assert record["daily_context"]["sleep_hours"] == 7.0
+    assert record["recording"]["status"] == "saved"
+    assert record["formal_visits"]["V3"]["raw_answers"] == {"pss_1": False}
+    assert set(record).isdisjoint(_NON_RAW_TEST_KEYS)
+
+
+@pytest.mark.parametrize(
+    "mutator", [_mutate_daily, _mutate_formal, _mutate_completion]
+)
+def test_public_mutators_fail_atomically_when_retained_state_cannot_be_copied(
+    mutator,
+) -> None:
+    record = _session_record(day=7)
+    record["recording"] = {"status": "saved", "bad": ("invalid",)}
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError, match="record is invalid"):
+        mutator(record)
+
+    assert record == before
 
 
 def test_daily_negative_branch_removes_stale_hidden_answers() -> None:

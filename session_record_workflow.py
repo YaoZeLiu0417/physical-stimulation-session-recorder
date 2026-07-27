@@ -58,7 +58,7 @@ _SESSION_RECORD_KEYS = {
     "created_at_iso",
     "updated_at_iso",
 }
-_MUTABLE_SECTION_KEYS = {
+_RETAINED_RAW_SECTION_KEYS = (
     "daily_context",
     "daily_core",
     "conditional_details",
@@ -66,7 +66,8 @@ _MUTABLE_SECTION_KEYS = {
     "formal_visits",
     "field_status",
     "recording",
-}
+)
+_MUTABLE_SECTION_KEYS = frozenset(_RETAINED_RAW_SECTION_KEYS)
 _COMPLETION_KEYS = {
     "status",
     "answered_field_ids",
@@ -88,10 +89,12 @@ _TIMESTAMPED_QUESTIONNAIRE_VISIT_KEYS = frozenset({
 _PROTECTED_SESSION_KEYS = {"authed", "auth_source", "subject_id", "visit"}
 _RAW_ONLY_REMOVED_KEYS = frozenset({
     "classification",
+    "derived",
     "derived_metrics",
     "hidden_classification",
     "risk",
     "risk_level",
+    "safety",
     "safety_signals",
     "score",
     "scored_answers",
@@ -423,9 +426,7 @@ def _question_value_is_valid(question: QuestionSpec, value: object) -> bool:
     if question.kind == "boolean":
         return type(value) is bool
     if question.kind in {"slider", "integer"}:
-        if type(value) not in {int, float}:
-            return False
-        if question.kind == "integer" and type(value) is not int:
+        if type(value) is not int:
             return False
         return (
             (question.min_value is None or value >= question.min_value)
@@ -453,7 +454,7 @@ def _daily_questions(intervention_day: int) -> tuple[QuestionSpec, ...]:
     return (*DAILY_CORE, *DAILY_CONDITIONAL, *weekly)
 
 
-def _daily_field_status(
+def build_daily_field_status(
     answers: Mapping[str, object],
     answered_field_ids: set[str],
     intervention_day: int,
@@ -487,7 +488,7 @@ def _formal_questions(visit: str) -> tuple[QuestionSpec, ...]:
     )
 
 
-def _formal_field_status(
+def build_formal_field_status(
     visit: str,
     answers: Mapping[str, object],
     answered_field_ids: set[str],
@@ -563,6 +564,53 @@ def _raw_payload_copy(value: object) -> object:
     raise ValueError("record is invalid")
 
 
+def _canonical_daily_context(
+    context: Mapping[str, object], *, error_message: str
+) -> dict[str, object]:
+    try:
+        return {
+            key: _raw_payload_copy(context[key])
+            for key in DAILY_CONTEXT_DEFAULTS
+            if key in context
+        }
+    except ValueError as error:
+        raise ValueError(error_message) from error
+
+
+def _canonical_retained_sections(
+    record: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    sections: dict[str, dict[str, object]] = {}
+    for key in _RETAINED_RAW_SECTION_KEYS:
+        source = record.get(key)
+        if (
+            key == "daily_context"
+            and source is None
+            and record.get("schema_version") == 4
+        ):
+            source = {}
+        if not isinstance(source, Mapping):
+            raise ValueError("record is invalid")
+        if key == "daily_context":
+            sections[key] = _canonical_daily_context(
+                source, error_message="record is invalid"
+            )
+            continue
+        copied = _raw_payload_copy(source)
+        if not isinstance(copied, dict):
+            raise ValueError("record is invalid")
+        sections[key] = copied
+    return sections
+
+
+def _assign_retained_sections(
+    record: dict[str, object],
+    sections: Mapping[str, dict[str, object]],
+) -> None:
+    for key in _RETAINED_RAW_SECTION_KEYS:
+        record[key] = sections[key]
+
+
 def questionnaire_answers(
     record: Mapping[str, object], visit: str
 ) -> dict[str, object]:
@@ -589,7 +637,15 @@ def questionnaire_answers(
                         if isinstance(field_id, str) and field_id in allowed_ids
                     }
                 )
-            statuses = _daily_field_status(restored, set(restored), day)
+            question_by_id = {
+                question.id: question for question in _daily_questions(day)
+            }
+            if any(
+                not _question_value_is_valid(question_by_id[field_id], value)
+                for field_id, value in restored.items()
+            ):
+                return {}
+            statuses = build_daily_field_status(restored, set(restored), day)
             return {
                 field_id: value
                 for field_id, value in restored.items()
@@ -611,7 +667,17 @@ def questionnaire_answers(
             for field_id, value in raw_answers.items()
             if isinstance(field_id, str) and field_id in allowed_ids
         }
-        statuses = _formal_field_status(safe_visit, restored, set(restored))
+        question_by_id = {
+            question.id: question for question in _formal_questions(safe_visit)
+        }
+        if any(
+            not _question_value_is_valid(question_by_id[field_id], value)
+            for field_id, value in restored.items()
+        ):
+            return {}
+        statuses = build_formal_field_status(
+            safe_visit, restored, set(restored)
+        )
         return {
             field_id: value
             for field_id, value in restored.items()
@@ -674,6 +740,7 @@ def mark_questionnaire_visit_complete(
     if completed_at < created_at or completed_at < updated_at:
         raise ValueError("timestamp chronology is invalid")
 
+    sections = _canonical_retained_sections(safe_record)
     completion = _completion_copy(safe_record)
     questionnaire_visits = completion["questionnaire_visits"]
     assert isinstance(questionnaire_visits, dict)
@@ -684,6 +751,7 @@ def mark_questionnaire_visit_complete(
     }
     completion["status"] = "complete"
 
+    _assign_retained_sections(safe_record, sections)
     safe_record["completion"] = completion
     safe_record["updated_at_iso"] = completed_at_iso
     _remove_non_raw_sections(safe_record)
@@ -710,43 +778,39 @@ def persist_daily_questionnaire(
     day = safe_record["intervention_day"]
     assert isinstance(day, int)
     questions = _daily_questions(day)
-    statuses = _daily_field_status(safe_answers, safe_answered_ids, day)
+    statuses = build_daily_field_status(safe_answers, safe_answered_ids, day)
     filtered = _answered_values(questions, safe_answers, statuses)
+    sections = _canonical_retained_sections(safe_record)
     completion = _completion_copy(safe_record)
     _store_questionnaire_progress(completion, "daily", filtered, safe_step)
-    field_status = dict(safe_record["field_status"])
+    field_status = sections["field_status"]
     field_status["daily"] = statuses
-    formal_visits = _raw_payload_copy(safe_record["formal_visits"])
-    assert isinstance(formal_visits, dict)
     context = (
-        {
-            key: _raw_payload_copy(daily_context[key])
-            for key in DAILY_CONTEXT_DEFAULTS
-            if key in daily_context
-        }
+        _canonical_daily_context(
+            daily_context, error_message="daily context is invalid"
+        )
         if daily_context is not None
-        else None
+        else sections["daily_context"]
     )
 
-    if context is not None:
-        safe_record["daily_context"] = context
-    safe_record["daily_core"] = {
+    sections["daily_context"] = context
+    sections["daily_core"] = {
         field_id: value
         for field_id, value in filtered.items()
         if field_id in _DAILY_CORE_IDS
     }
-    safe_record["conditional_details"] = {
+    sections["conditional_details"] = {
         field_id: value
         for field_id, value in filtered.items()
         if field_id in _DAILY_CONDITIONAL_IDS
     }
-    safe_record["weekly_extension"] = {
+    sections["weekly_extension"] = {
         field_id: value
         for field_id, value in filtered.items()
         if field_id in _WEEKLY_IDS
     }
-    safe_record["formal_visits"] = formal_visits
-    safe_record["field_status"] = field_status
+    sections["field_status"] = field_status
+    _assign_retained_sections(safe_record, sections)
     safe_record["completion"] = completion
     _remove_non_raw_sections(safe_record)
     return dict(filtered)
@@ -770,10 +834,11 @@ def persist_formal_questionnaire(
         raise ValueError("record is invalid")
 
     questions = _formal_questions(safe_visit)
-    statuses = _formal_field_status(
+    statuses = build_formal_field_status(
         safe_visit, safe_answers, safe_answered_ids
     )
     filtered = _answered_values(questions, safe_answers, statuses)
+    sections = _canonical_retained_sections(safe_record)
     instruments: dict[str, dict[str, object]] = {}
     for instrument_id in VISIT_INSTRUMENT_IDS[safe_visit]:
         spec = FORMAL_INSTRUMENTS[instrument_id]
@@ -802,8 +867,7 @@ def persist_formal_questionnaire(
             "complete": answered_required == required_active_ids,
         }
 
-    formal_visits = _raw_payload_copy(safe_record["formal_visits"])
-    assert isinstance(formal_visits, dict)
+    formal_visits = sections["formal_visits"]
     formal_visits[safe_visit] = {
         "raw_answers": dict(filtered),
         "instruments": instruments,
@@ -811,15 +875,16 @@ def persist_formal_questionnaire(
             payload["complete"] is True for payload in instruments.values()
         ),
     }
-    field_status = dict(safe_record["field_status"])
+    field_status = sections["field_status"]
     field_status[safe_visit] = statuses
     completion = _completion_copy(safe_record)
     _store_questionnaire_progress(
         completion, safe_visit, filtered, safe_step
     )
 
-    safe_record["formal_visits"] = formal_visits
-    safe_record["field_status"] = field_status
+    sections["formal_visits"] = formal_visits
+    sections["field_status"] = field_status
+    _assign_retained_sections(safe_record, sections)
     safe_record["completion"] = completion
     _remove_non_raw_sections(safe_record)
     return dict(filtered)

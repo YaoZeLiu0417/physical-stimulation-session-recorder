@@ -21,8 +21,8 @@ from record_store import (
 )
 from session_record_workflow import (
     DAILY_CONTEXT_DEFAULTS,
-    _daily_field_status,
-    _formal_field_status,
+    build_daily_field_status,
+    build_formal_field_status,
     mark_questionnaire_visit_complete as _mark_questionnaire_visit_complete,
     persist_daily_questionnaire,
     persist_formal_questionnaire,
@@ -515,7 +515,7 @@ def support_needed(
     intervention_day: int,
 ) -> bool:
     if visit == "daily":
-        statuses = _daily_field_status(
+        statuses = build_daily_field_status(
             answers, set(answered_field_ids), intervention_day
         )
         return (
@@ -523,7 +523,9 @@ def support_needed(
             and answers.get("suicide_thought_present_24h") is True
         )
 
-    statuses = _formal_field_status(visit, answers, set(answered_field_ids))
+    statuses = build_formal_field_status(
+        visit, answers, set(answered_field_ids)
+    )
     return any(
         field_id.startswith("pss_")
         and status == "answered"
