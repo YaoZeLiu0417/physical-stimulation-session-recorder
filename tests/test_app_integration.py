@@ -656,6 +656,54 @@ def test_one_shot_terminal_recording_survives_idle_confirmation_rerun(
     assert pending_key not in app.session_state
 
 
+@pytest.mark.parametrize("terminal_state", ["skipped", "failed"])
+def test_unconfirmed_terminal_then_idle_is_treated_as_recorder_reset(
+    monkeypatch,
+    terminal_state,
+):
+    statuses = [
+        RecorderStatus(mode="long", state=terminal_state),
+        RecorderStatus(mode="long"),
+    ]
+    questionnaire_calls = []
+
+    def incomplete_questionnaire(**kwargs):
+        questionnaire_calls.append(kwargs)
+        return kwargs["answers"], False
+
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=lambda: statuses.pop(0),
+        render_questionnaire=incomplete_questionnaire,
+    )
+    pending_key = next(
+        str(key)
+        for key in app.session_state.filtered_state
+        if str(key).startswith("operational_recorder::pending::")
+    )
+    confirmation_key = next(
+        str(key)
+        for key in app.session_state.filtered_state
+        if str(key).startswith("operational_recording_continue::")
+    )
+    assert app.session_state[confirmation_key] is False
+
+    app.run()
+
+    assert not app.exception
+    assert statuses == []
+    assert len(recorder_calls) == 2
+    assert questionnaire_calls == []
+    assert app.session_state["operational_record"]["recording"] == {}
+    assert pending_key not in app.session_state
+    assert confirmation_key not in app.session_state
+    assert not [
+        checkbox
+        for checkbox in app.checkbox
+        if checkbox.label == "我确认继续填写问卷，不保存本次录制"
+    ]
+
+
 def test_pending_terminal_is_cleared_when_new_recording_activity_arrives(
     monkeypatch,
 ):

@@ -478,6 +478,7 @@ recorder_status = render_browser_recorder(
     initial_mode="long",
 )
 pending_terminal_key = f"operational_recorder::pending::{session_token}"
+continue_without_key = f"operational_recording_continue::{session_token}"
 terminal_status = None
 if recorder_status.state in {"skipped", "failed"}:
     terminal_status = recorder_status
@@ -492,19 +493,22 @@ elif recorder_status.state == "idle":
         pending_status is not None
         and pending_status.state in {"skipped", "failed"}
         and pending_status.mode == recorder_status.mode
+        and st.session_state.get(continue_without_key) is True
     ):
         terminal_status = pending_status
     else:
         st.session_state.pop(pending_terminal_key, None)
+        st.session_state.pop(continue_without_key, None)
 else:
     st.session_state.pop(pending_terminal_key, None)
+    st.session_state.pop(continue_without_key, None)
 
 gate_status = terminal_status or recorder_status
 continue_without_recording = False
 if terminal_status is not None:
     continue_without_recording = st.checkbox(
         "我确认继续填写问卷，不保存本次录制",
-        key=f"operational_recording_continue::{session_token}",
+        key=continue_without_key,
     )
 
 recording_continuation_satisfied = recording_gate_satisfied(
