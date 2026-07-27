@@ -124,6 +124,30 @@ PARTICIPANT_DATA_IDENTIFIERS = frozenset(
         "weekly_extension",
     }
 )
+PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS = frozenset(
+    {
+        "camera_ready",
+        "completed_at_iso",
+        "daily_context",
+        "display_value",
+        "duration_seconds",
+        "export_schema_version",
+        "exported_at_iso",
+        "field_status",
+        "instrument_id",
+        "instrument_status",
+        "instrument_version",
+        "intervention_day",
+        "microphone_ready",
+        "question_kind",
+        "question_text",
+        "raw_value",
+        "record_date",
+        "recording",
+        "saved_confirmed",
+        "visit_status",
+    }
+)
 QUESTIONNAIRE_FIELD_IDS = frozenset(
     question.id
     for question in (
@@ -144,7 +168,9 @@ QUESTIONNAIRE_FIELD_IDS = frozenset(
 PARTICIPANT_DATA_BYTE_MARKERS = tuple(
     (marker, marker.encode("utf-8"))
     for marker in sorted(
-        PARTICIPANT_DATA_IDENTIFIERS | QUESTIONNAIRE_FIELD_IDS
+        PARTICIPANT_DATA_IDENTIFIERS
+        | PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS
+        | QUESTIONNAIRE_FIELD_IDS
     )
 )
 
@@ -711,6 +737,16 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
             ".streamlit/cache.json",
             b'{"value":{"nssi_urge_now":3}}',
             id="questionnaire-field-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"daily_context":{"sleep_hours":7,"narrative":"private"}}',
+            id="daily-context-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.json",
+            b'{"recording":{"duration_seconds":60,"saved_confirmed":true}}',
+            id="recording-json",
         ),
         pytest.param(
             ".streamlit/cache.bin",
