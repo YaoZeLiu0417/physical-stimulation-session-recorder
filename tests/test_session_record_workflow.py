@@ -56,6 +56,58 @@ MUTABLE_SECTION_KEYS = {
     "recording",
 }
 PROTECTED_SESSION_KEYS = {"authed", "auth_source", "subject_id", "visit"}
+PROHIBITED_RECORD_KEYS = {
+    "safety_signals",
+    "derived_metrics",
+    "upload",
+    "local_cleanup",
+    "path",
+    "filename",
+    "file_name",
+    "media",
+    "media_bytes",
+    "server_storage",
+}
+
+
+def _literal_record_keys(tree: ast.AST) -> set[str]:
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys.update(
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            keys.add(node.slice.value)
+        elif (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id.endswith("_KEYS")
+                for target in node.targets
+            )
+            and isinstance(node.value, (ast.List, ast.Set, ast.Tuple))
+        ):
+            keys.update(
+                item.value
+                for item in node.value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"get", "pop", "setdefault"}
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            keys.add(node.args[0].value)
+    return keys
 
 
 def test_create_session_record_returns_exact_session_only_schema() -> None:
@@ -410,6 +462,42 @@ def test_session_record_matches_requires_utc_second_precision_timestamps(
     assert session_record_matches(record, **VALID_CONTEXT) is False
 
 
+@pytest.mark.parametrize(
+    ("created_at_iso", "updated_at_iso"),
+    [
+        ("2026-07-24T08:09:10Z", "2026-07-24T08:09:09+00:00"),
+        ("2026-07-24T08:09:10+00:00", "2026-07-24T08:09:09Z"),
+    ],
+)
+def test_session_record_matches_rejects_update_before_creation(
+    created_at_iso: str,
+    updated_at_iso: str,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["created_at_iso"] = created_at_iso
+    record["updated_at_iso"] = updated_at_iso
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    ("created_at_iso", "updated_at_iso"),
+    [
+        ("2026-07-24T08:09:10Z", "2026-07-24T08:09:10+00:00"),
+        ("2026-07-24T08:09:10+00:00", "2026-07-24T08:09:11Z"),
+    ],
+)
+def test_session_record_matches_accepts_equal_or_later_update(
+    created_at_iso: str,
+    updated_at_iso: str,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["created_at_iso"] = created_at_iso
+    record["updated_at_iso"] = updated_at_iso
+
+    assert session_record_matches(record, **VALID_CONTEXT) is True
+
+
 @pytest.mark.parametrize("completion", [None, False, [], "mapping"])
 def test_session_record_matches_rejects_malformed_completion(
     completion: object,
@@ -453,6 +541,116 @@ def test_session_record_matches_rejects_malformed_completion_containers(
     record["completion"][nested_key] = malformed
 
     assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    ("nested_key", "value"),
+    [
+        ("answered_field_ids", ["field"]),
+        ("current_step", 0),
+        ("questionnaire_visits", {"status": "complete", "revision": 1}),
+    ],
+)
+def test_session_record_matches_rejects_unknown_completion_visit_keys(
+    nested_key: str,
+    value: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"][nested_key] = {"V2": value}
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "answered_field_ids",
+    [
+        None,
+        False,
+        "nssi_urge",
+        b"nssi_urge",
+        {"nssi_urge"},
+        {"field": "nssi_urge"},
+        [1],
+        ("nssi_urge", False),
+    ],
+)
+def test_session_record_matches_rejects_invalid_answered_field_id_sequences(
+    answered_field_ids: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"]["answered_field_ids"] = {
+        "daily": answered_field_ids
+    }
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("current_step", [False, True, -1, 1.0, "1", None])
+def test_session_record_matches_rejects_invalid_current_steps(
+    current_step: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"]["current_step"] = {"daily": current_step}
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "questionnaire_visit",
+    [
+        None,
+        False,
+        [],
+        {},
+        {"status": "draft", "revision": 1},
+        {"status": "complete", "revision": False},
+        {"status": "complete", "revision": 0},
+        {"status": "complete", "revision": 2},
+        {
+            "status": "complete",
+            "revision": 1,
+            "completed_at_iso": "2026-07-24T08:09:10",
+        },
+        {"status": "complete", "revision": 1, "extra": True},
+        {
+            "status": "complete",
+            "revision": 1,
+            "completed_at_iso": "2026-07-24T08:09:10Z",
+            "extra": True,
+        },
+    ],
+)
+def test_session_record_matches_rejects_invalid_questionnaire_visit_metadata(
+    questionnaire_visit: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"]["questionnaire_visits"] = {
+        "daily": questionnaire_visit
+    }
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+def test_session_record_matches_accepts_legacy_and_timestamped_visit_metadata() -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"] = {
+        "status": "in_progress",
+        "answered_field_ids": {
+            "daily": ["nssi_urge"],
+            "V1": ("pss_1", "pss_2"),
+        },
+        "current_step": {"daily": 0, "V1": 2},
+        "questionnaire_visits": {
+            "daily": {"status": "complete", "revision": 1},
+            "V1": {
+                "status": "complete",
+                "revision": 1,
+                "completed_at_iso": "2026-07-24T08:09:10+00:00",
+            },
+        },
+    }
+
+    assert session_record_matches(record, **VALID_CONTEXT) is True
 
 
 @pytest.mark.parametrize("status", [None, False, "", "finished"])
@@ -741,17 +939,30 @@ def test_session_record_workflow_has_only_pure_validation_dependencies() -> None
     )
 
 
-def test_session_record_workflow_has_no_external_capability_calls_or_source() -> None:
+def test_session_record_workflow_has_no_external_capability_calls_or_keys() -> None:
     source = WORKFLOW_SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    forbidden_names = {
+    forbidden_identifiers = {
         "DailyRecordStore",
         "Path",
+        "file_name",
+        "filename",
+        "filesystem",
+        "localStorage",
+        "media",
+        "media_bytes",
+        "network",
         "open",
+        "path",
+        "pathlib",
         "requests",
+        "server_storage",
+        "sessionStorage",
         "socket",
         "streamlit",
         "tempfile",
+        "upload",
+        "uploads",
     }
     referenced_names = {
         node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
@@ -759,28 +970,44 @@ def test_session_record_workflow_has_no_external_capability_calls_or_source() ->
     referenced_attributes = {
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     }
-    normalized_source = source.lower()
-
-    assert referenced_names.isdisjoint(forbidden_names)
-    assert referenced_attributes.isdisjoint(forbidden_names)
-    assert all(
-        fragment not in normalized_source
-        for fragment in (
-            "dailyrecordstore",
-            "filename",
-            "file_name",
-            "filesystem",
-            "media",
-            "media_bytes",
-            "network",
-            "path",
-            "pathlib",
-            "requests",
-            "server_storage",
-            "socket",
-            "storage",
-            "streamlit",
-            "tempfile",
-            "upload",
-        )
+    called_identifiers = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    called_identifiers.update(
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     )
+    prohibited_calls = {
+        "connect",
+        "open",
+        "read_bytes",
+        "read_text",
+        "recv",
+        "send",
+        "upload_file",
+        "urlopen",
+        "write_bytes",
+        "write_text",
+    }
+
+    assert referenced_names.isdisjoint(forbidden_identifiers)
+    assert referenced_attributes.isdisjoint(forbidden_identifiers)
+    assert called_identifiers.isdisjoint(prohibited_calls)
+    assert _literal_record_keys(tree).isdisjoint(PROHIBITED_RECORD_KEYS)
+
+
+def test_capability_ast_is_precise_about_identifiers_and_record_keys() -> None:
+    tree = ast.parse(
+        'recording_storage = {"storage": "browser_local"}\n'
+        'path_status = "local"\n'
+        'forged = {"upload": {}}  # pathlib, open, media, network\n'
+    )
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    record_keys = _literal_record_keys(tree)
+
+    assert names == {"recording_storage", "path_status", "forged"}
+    assert record_keys == {"storage", "upload"}
+    assert record_keys & PROHIBITED_RECORD_KEYS == {"upload"}

@@ -1,5 +1,5 @@
 import re
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from datetime import date, datetime, timedelta
 
 import participant_identity
@@ -57,6 +57,12 @@ _COMPLETION_MAPPING_KEYS = {
     "questionnaire_visits",
 }
 _COMPLETION_STATUSES = {"draft", "in_progress", "complete"}
+_QUESTIONNAIRE_VISIT_KEYS = frozenset({"status", "revision"})
+_TIMESTAMPED_QUESTIONNAIRE_VISIT_KEYS = frozenset({
+    "status",
+    "revision",
+    "completed_at_iso",
+})
 _PROTECTED_SESSION_KEYS = {"authed", "auth_source", "subject_id", "visit"}
 
 
@@ -76,7 +82,7 @@ def _validated_context(
     return safe_subject_id, record_date, intervention_day, visit
 
 
-def _validate_timestamp(now_iso: str) -> None:
+def _validate_timestamp(now_iso: str) -> datetime:
     if not isinstance(now_iso, str) or _UTC_SECOND_ISO_RE.fullmatch(now_iso) is None:
         raise ValueError("timestamp is invalid")
     try:
@@ -85,6 +91,60 @@ def _validate_timestamp(now_iso: str) -> None:
         raise ValueError("timestamp is invalid") from error
     if parsed.utcoffset() != timedelta(0) or parsed.microsecond != 0:
         raise ValueError("timestamp is invalid")
+    return parsed
+
+
+def _has_only_allowed_visits(values: Mapping[object, object]) -> bool:
+    return all(
+        isinstance(visit, str) and visit in _ALLOWED_VISITS for visit in values
+    )
+
+
+def _completion_metadata_is_valid(
+    completion: Mapping[str, object],
+    revision: int,
+) -> bool:
+    answered_field_ids = completion["answered_field_ids"]
+    current_step = completion["current_step"]
+    questionnaire_visits = completion["questionnaire_visits"]
+    if not all(
+        _has_only_allowed_visits(values)
+        for values in (answered_field_ids, current_step, questionnaire_visits)
+    ):
+        return False
+
+    if any(
+        isinstance(field_ids, (str, bytes, bytearray))
+        or not isinstance(field_ids, Sequence)
+        or any(not isinstance(field_id, str) for field_id in field_ids)
+        for field_ids in answered_field_ids.values()
+    ):
+        return False
+    if any(
+        type(step) is not int or step < 0 for step in current_step.values()
+    ):
+        return False
+
+    for metadata in questionnaire_visits.values():
+        if not isinstance(metadata, Mapping):
+            return False
+        metadata_keys = set(metadata)
+        if metadata_keys not in (
+            _QUESTIONNAIRE_VISIT_KEYS,
+            _TIMESTAMPED_QUESTIONNAIRE_VISIT_KEYS,
+        ):
+            return False
+        metadata_revision = metadata["revision"]
+        if (
+            metadata["status"] != "complete"
+            or type(metadata_revision) is not int
+            or metadata_revision <= 0
+            or metadata_revision != revision
+        ):
+            return False
+        if "completed_at_iso" in metadata:
+            _validate_timestamp(metadata["completed_at_iso"])
+    return True
 
 
 def _record_structure_is_valid(
@@ -128,10 +188,12 @@ def _record_structure_is_valid(
         for key in _COMPLETION_MAPPING_KEYS
     ):
         return False
+    if not _completion_metadata_is_valid(completion, record["revision"]):
+        return False
 
-    _validate_timestamp(record["created_at_iso"])
-    _validate_timestamp(record["updated_at_iso"])
-    return True
+    created_at = _validate_timestamp(record["created_at_iso"])
+    updated_at = _validate_timestamp(record["updated_at_iso"])
+    return updated_at >= created_at
 
 
 def create_session_record(
