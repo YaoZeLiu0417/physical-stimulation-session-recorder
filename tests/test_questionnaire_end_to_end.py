@@ -120,7 +120,6 @@ PARTICIPANT_DATA_IDENTIFIERS = frozenset(
         "participant_id",
         "questionnaire_answers",
         "record_id",
-        "responses",
         "subject_id",
         "weekly_extension",
     }
@@ -150,6 +149,16 @@ PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS = frozenset(
     }
 )
 DAILY_CONTEXT_FIELD_IDS = frozenset(DAILY_CONTEXT_DEFAULTS)
+DAILY_CONTEXT_SIGNATURE_FIELD_IDS = frozenset(
+    {
+        "coping_effect_1to5",
+        "mood_1to9",
+        "pain_0to10",
+        "sleep_hours",
+        "stress_1to9",
+    }
+)
+NSSI_DAILY_CONTEXT_FIELD_IDS = frozenset({"nssi_urge_0to10"})
 QUESTIONNAIRE_FIELD_IDS = frozenset(
     question.id
     for question in (
@@ -169,7 +178,7 @@ QUESTIONNAIRE_FIELD_IDS = frozenset(
 )
 PARTICIPANT_DATA_MARKERS = frozenset(
     PARTICIPANT_DATA_IDENTIFIERS
-    | DAILY_CONTEXT_FIELD_IDS
+    | NSSI_DAILY_CONTEXT_FIELD_IDS
     | PARTICIPANT_EXPORT_STRUCTURE_IDENTIFIERS
     | QUESTIONNAIRE_FIELD_IDS
 )
@@ -189,6 +198,13 @@ PARTICIPANT_DATA_BYTE_PATTERN = re.compile(
 
 def _json_participant_marker(value) -> str | None:
     if isinstance(value, dict):
+        normalized_keys = {str(key).casefold() for key in value}
+        context_keys = normalized_keys & DAILY_CONTEXT_FIELD_IDS
+        if (
+            len(context_keys) >= 2
+            and context_keys & DAILY_CONTEXT_SIGNATURE_FIELD_IDS
+        ):
+            return "daily-context-section"
         for key, item in value.items():
             normalized_key = str(key).casefold()
             if normalized_key in PARTICIPANT_DATA_MARKERS:
@@ -810,6 +826,11 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
             id="daily-context-section-json",
         ),
         pytest.param(
+            ".streamlit/cache.json",
+            b'{"nssi_urge_0to10":4}',
+            id="nssi-context-field-json",
+        ),
+        pytest.param(
             ".streamlit/cache.bin",
             b"binary-prefix participant_id binary-suffix",
             id="extension-independent-participant-data",
@@ -895,6 +916,27 @@ def test_operational_snapshot_allows_only_benign_cache_changes(tmp_path):
         cache_file = tmp_path / relative_path
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_bytes(data)
+
+    assert _operational_side_effect_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "diagnostics",
+    (
+        {"tags": ["streamlit", "cache"], "enabled": True},
+        {"exercise": "scheduled maintenance", "enabled": True},
+        {"responses": 0, "latency_ms": 12},
+    ),
+    ids=("tags", "exercise", "responses"),
+)
+def test_common_diagnostics_json_is_not_participant_data(tmp_path, diagnostics):
+    before = _operational_side_effect_snapshot(tmp_path)
+    cache_file = tmp_path / ".streamlit/cache.json"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(
+        json.dumps(diagnostics, sort_keys=True),
+        encoding="utf-8",
+    )
 
     assert _operational_side_effect_snapshot(tmp_path) == before
 
