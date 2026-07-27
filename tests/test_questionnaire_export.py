@@ -254,6 +254,51 @@ class _ExplodingSequence(Sequence[str]):
         return len(self._source)
 
 
+class _SwitchingMapping(Mapping[str, object]):
+    def __init__(
+        self,
+        source: Mapping[str, object],
+        *,
+        key: str,
+        later_value: object,
+        safe_reads: int,
+    ) -> None:
+        self._source = source
+        self._key = key
+        self._later_value = later_value
+        self._safe_reads = safe_reads
+        self._reads = 0
+
+    def __getitem__(self, key: str) -> object:
+        if key == self._key:
+            self._reads += 1
+            if self._reads > self._safe_reads:
+                return self._later_value
+        return self._source[key]
+
+    def __iter__(self):
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+
+class _EqualitySpoof(str):
+    def __new__(cls, visible_value: str, accepted_value: str):
+        instance = super().__new__(cls, visible_value)
+        instance.accepted_value = accepted_value
+        return instance
+
+    def __eq__(self, other: object) -> bool:
+        return other == self.accepted_value
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    def __hash__(self) -> int:
+        return hash(self.accepted_value)
+
+
 def test_day_one_negative_branch_builds_canonical_frozen_snapshot() -> None:
     record = _completed_record()
 
@@ -1026,6 +1071,158 @@ def test_safe_unicode_newline_and_tab_remain_valid_export_text() -> None:
     assert response.display_value == safe_text
     assert dict(snapshot.daily_context)["narrative"] == safe_text
     assert dict(snapshot.daily_context)["tags"] == (safe_text,)
+
+
+@pytest.mark.parametrize(
+    ("field", "safe_value"),
+    (
+        ("storage", "browser_local"),
+        ("status", "saved"),
+        ("mode", "long"),
+    ),
+)
+def test_stateful_recording_mapping_is_materialized_once_for_real_zip(
+    field: str, safe_value: str
+) -> None:
+    sentinel = f"PRIVATE_DEVICE_PATH_SENTINEL_{field}_91ba"
+    record = _completed_record()
+    record["recording"] = _SwitchingMapping(
+        record["recording"],
+        key=field,
+        later_value=sentinel,
+        safe_reads=2,
+    )
+
+    bundle, names, parsed_json, workbook = _bundle_parts(record, visit="daily")
+
+    assert parsed_json["recording"][field] == safe_value
+    rendered = json.dumps(parsed_json, ensure_ascii=False)
+    workbook_values = "\n".join(
+        str(cell.value)
+        for worksheet in workbook.worksheets
+        for row in worksheet.iter_rows()
+        for cell in row
+        if cell.value is not None
+    )
+    assert sentinel not in "\n".join([bundle.filename, *names, rendered, workbook_values])
+
+
+@pytest.mark.parametrize(
+    ("day", "visit", "version_key", "instrument_id"),
+    (
+        (1, "daily", "daily_nssi_ema", "daily_nssi_ema"),
+        (7, "daily", "weekly_nssi", "nssi_impulse_weekly"),
+        (1, "V1", "formal_nssi_crf", "dshi_lifetime"),
+    ),
+)
+def test_stateful_instrument_versions_are_materialized_once_for_real_zip(
+    day: int, visit: str, version_key: str, instrument_id: str
+) -> None:
+    sentinel = f"PRIVATE_VERSION_SENTINEL_{version_key}_64af"
+    record = _completed_record(day=day, visit=visit)
+    record["instrument_versions"] = _SwitchingMapping(
+        record["instrument_versions"],
+        key=version_key,
+        later_value=sentinel,
+        safe_reads=1,
+    )
+
+    _, _, parsed_json, _ = _bundle_parts(record, visit=visit)
+
+    versions = {
+        response["instrument_version"]
+        for response in parsed_json["responses"]
+        if response["instrument_id"] == instrument_id
+    }
+    assert versions == {"1.0"}
+    assert sentinel not in json.dumps(parsed_json, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    ("field", "accepted"),
+    (
+        ("storage", "browser_local"),
+        ("status", "saved"),
+        ("mode", "long"),
+    ),
+)
+def test_equality_spoofed_recording_enums_fail_before_bundle(
+    field: str, accepted: str, monkeypatch
+) -> None:
+    sentinel = f"INVALID_{field.upper()}_SENTINEL_a810"
+    record = _completed_record()
+    record["recording"][field] = _EqualitySpoof(sentinel, accepted)
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$") as captured:
+        build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
+    _assert_no_sentinel_in_exception(captured.value, sentinel)
+
+
+def test_accepted_string_subclasses_are_flattened_in_frozen_snapshot() -> None:
+    record = _completed_record(positive=True)
+    raw_text = _EqualitySpoof("raw narrative", "raw narrative")
+    context_text = _EqualitySpoof("context narrative", "context narrative")
+    tag = _EqualitySpoof("home", "home")
+    motive = _EqualitySpoof(
+        DAILY_CONDITIONAL[11].options[0], DAILY_CONDITIONAL[11].options[0]
+    )
+    record["conditional_details"]["nssi_other_description_24h"] = raw_text
+    record["conditional_details"]["nssi_motives_24h"] = [motive]
+    record["daily_context"]["narrative"] = context_text
+    record["daily_context"]["tags"] = [tag]
+
+    snapshot = build_participant_snapshot(
+        record,
+        visit="daily",
+        exported_at_iso=EXPORTED_AT_ISO,
+    )
+
+    responses = {response.field_id: response for response in snapshot.responses}
+    assert type(responses["nssi_other_description_24h"].raw_value) is str
+    assert type(responses["nssi_other_description_24h"].display_value) is str
+    motives = responses["nssi_motives_24h"].raw_value
+    assert type(motives) is tuple
+    assert all(type(item) is str for item in motives)
+    context = dict(snapshot.daily_context)
+    assert type(context["narrative"]) is str
+    assert type(context["tags"]) is tuple
+    assert all(type(item) is str for item in context["tags"])
+
+
+def test_formal_payload_version_mismatch_fails_neutrally_before_bundle(
+    monkeypatch,
+) -> None:
+    record = _completed_record(visit="V1")
+    record["formal_visits"]["V1"]["instruments"]["dshi_lifetime"][
+        "instrument_version"
+    ] = "2.0"
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_export(
+            record,
+            visit="V1",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
 
 
 def test_export_source_has_no_scoring_or_external_capabilities() -> None:

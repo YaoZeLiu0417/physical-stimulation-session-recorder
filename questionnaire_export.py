@@ -4,7 +4,6 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import math
 import re
-from typing import cast
 
 from local_export_bundle import LocalExportBundle, build_local_export_bundle
 from questionnaire_specs import (
@@ -131,6 +130,11 @@ _NEUTRAL_ERROR_MESSAGES = frozenset(
 _FORMAL_VERSION_KEY = "formal_nssi_crf"
 _DAILY_VERSION_KEY = "daily_nssi_ema"
 _WEEKLY_VERSION_KEY = "weekly_nssi"
+_INSTRUMENT_VERSION_KEYS = (
+    _DAILY_VERSION_KEY,
+    _WEEKLY_VERSION_KEY,
+    _FORMAL_VERSION_KEY,
+)
 
 
 def _invalid_record() -> ValueError:
@@ -138,22 +142,27 @@ def _invalid_record() -> ValueError:
 
 
 def _export_text(value: str) -> str:
+    if not isinstance(value, str):
+        raise _invalid_record()
+    safe_value = str.__str__(value)
     try:
-        value.encode("utf-8")
+        safe_value.encode("utf-8")
     except UnicodeEncodeError:
         raise _invalid_record() from None
-    rendered_length = len(value) + int(value.startswith(_FORMULA_PREFIXES))
+    rendered_length = len(safe_value) + int(
+        safe_value.startswith(_FORMULA_PREFIXES)
+    )
     if (
         rendered_length > _MAX_EXCEL_TEXT_LENGTH
         or any(
             ord(character) < 32 and character not in {"\t", "\n"}
-            for character in value
+            for character in safe_value
         )
-        or any(character in {"\ufffe", "\uffff"} for character in value)
-        or _OOXML_ESCAPE_RE.search(value) is not None
+        or any(character in {"\ufffe", "\uffff"} for character in safe_value)
+        or _OOXML_ESCAPE_RE.search(safe_value) is not None
     ):
         raise _invalid_record()
-    return value
+    return safe_value
 
 
 def _export_number(value: object) -> int | float:
@@ -261,6 +270,272 @@ def _visit_mapping(
     return values
 
 
+def _required_item(source: Mapping[str, object], key: str) -> object:
+    try:
+        return source[key]
+    except (KeyError, TypeError):
+        raise _invalid_record() from None
+
+
+def _optional_item(
+    source: Mapping[str, object], key: str
+) -> tuple[bool, object]:
+    try:
+        return True, source[key]
+    except KeyError:
+        return False, None
+
+
+def _plain_string(value: object) -> object:
+    return str.__str__(value) if isinstance(value, str) else value
+
+
+def _projection_questions(
+    *, visit: str, intervention_day: object
+) -> tuple[QuestionSpec, ...]:
+    if visit == "daily":
+        weekly = (
+            tuple(
+                question
+                for instrument in WEEKLY_INSTRUMENTS
+                for question in instrument.questions
+            )
+            if type(intervention_day) is int
+            and weekly_due(intervention_day)
+            else ()
+        )
+        return (*DAILY_CORE, *DAILY_CONDITIONAL, *weekly)
+    return tuple(
+        question
+        for instrument_id in VISIT_INSTRUMENT_IDS[visit]
+        for question in FORMAL_INSTRUMENTS[instrument_id].questions
+    )
+
+
+def _project_answers(
+    source: object, questions: Sequence[QuestionSpec]
+) -> dict[str, object]:
+    values = _mapping(source)
+    projected: dict[str, object] = {}
+    for question in questions:
+        present, value = _optional_item(values, question.id)
+        if not present:
+            continue
+        frozen = _freeze_answer(question, value)
+        projected[question.id] = (
+            list(frozen) if isinstance(frozen, tuple) else frozen
+        )
+    return projected
+
+
+def _project_daily_context(source: object) -> dict[str, object]:
+    values = _mapping(source)
+    projected: dict[str, object] = {}
+    for key in DAILY_CONTEXT_DEFAULTS:
+        present, value = _optional_item(values, key)
+        if not present:
+            continue
+        frozen = _context_value(key, value)
+        projected[key] = list(frozen) if isinstance(frozen, tuple) else frozen
+    return projected
+
+
+def _project_instrument_versions(source: object) -> dict[str, object]:
+    values = _mapping(source)
+    return {
+        key: _plain_string(_required_item(values, key))
+        for key in _INSTRUMENT_VERSION_KEYS
+    }
+
+
+def _project_completion(source: object, *, visit: str) -> dict[str, object]:
+    values = _mapping(source)
+    status = _plain_string(_required_item(values, "status"))
+    answered_by_visit = _mapping(
+        _required_item(values, "answered_field_ids")
+    )
+    current_step_by_visit = _mapping(
+        _required_item(values, "current_step")
+    )
+    visits = _mapping(_required_item(values, "questionnaire_visits"))
+    raw_answered = _required_item(answered_by_visit, visit)
+    if (
+        isinstance(raw_answered, (str, bytes, bytearray))
+        or not isinstance(raw_answered, Sequence)
+    ):
+        raise _invalid_record()
+    declared_answer_count = len(raw_answered)
+    answered = [_plain_string(field_id) for field_id in raw_answered]
+    if len(answered) != declared_answer_count:
+        raise _invalid_record()
+    current_step = _required_item(current_step_by_visit, visit)
+    metadata = _mapping(_required_item(visits, visit))
+    return {
+        "status": status,
+        "answered_field_ids": {visit: answered},
+        "current_step": {visit: current_step},
+        "questionnaire_visits": {
+            visit: {
+                "status": _plain_string(
+                    _required_item(metadata, "status")
+                ),
+                "revision": _required_item(metadata, "revision"),
+                "completed_at_iso": _plain_string(
+                    _required_item(metadata, "completed_at_iso")
+                ),
+            }
+        },
+    }
+
+
+def _project_field_status(
+    source: object,
+    *,
+    visit: str,
+    questions: Sequence[QuestionSpec],
+) -> dict[str, object]:
+    visits = _mapping(source)
+    stored = _mapping(_required_item(visits, visit))
+    statuses: dict[str, object] = {}
+    for question in questions:
+        present, value = _optional_item(stored, question.id)
+        if present:
+            statuses[question.id] = _plain_string(value)
+    return {visit: statuses}
+
+
+def _project_recording(source: object) -> dict[str, object]:
+    values = _mapping(source)
+    return {key: _required_item(values, key) for key in _RECORDING_KEYS}
+
+
+def _project_formal_visits(
+    source: object,
+    *,
+    visit: str,
+    questions: Sequence[QuestionSpec],
+) -> dict[str, object]:
+    visits = _mapping(source)
+    if visit == "daily":
+        return {}
+    visit_payload = _mapping(_required_item(visits, visit))
+    raw_answers = _project_answers(
+        _required_item(visit_payload, "raw_answers"), questions
+    )
+    source_instruments = _mapping(
+        _required_item(visit_payload, "instruments")
+    )
+    instruments: dict[str, object] = {}
+    for instrument_id in VISIT_INSTRUMENT_IDS[visit]:
+        spec = FORMAL_INSTRUMENTS[instrument_id]
+        payload = _mapping(_required_item(source_instruments, instrument_id))
+        completeness = _mapping(
+            _required_item(payload, "completeness")
+        )
+        instruments[instrument_id] = {
+            "instrument_id": _plain_string(
+                _required_item(payload, "instrument_id")
+            ),
+            "instrument_version": _plain_string(
+                _required_item(payload, "instrument_version")
+            ),
+            "label": _plain_string(_required_item(payload, "label")),
+            "time_window": _plain_string(
+                _required_item(payload, "time_window")
+            ),
+            "raw_answers": _project_answers(
+                _required_item(payload, "raw_answers"), spec.questions
+            ),
+            "completeness": {
+                "answered": _required_item(completeness, "answered"),
+                "required": _required_item(completeness, "required"),
+            },
+            "complete": _required_item(payload, "complete"),
+        }
+    return {
+        visit: {
+            "raw_answers": raw_answers,
+            "instruments": instruments,
+            "complete": _required_item(visit_payload, "complete"),
+        }
+    }
+
+
+def _materialize_record(
+    record: Mapping[str, object], *, visit: str
+) -> tuple[dict[str, object], str]:
+    _mapping(record)
+    if not isinstance(visit, str):
+        raise ValueError("visit is invalid")
+    safe_visit = str.__str__(visit)
+    if safe_visit not in {"daily", *VISIT_INSTRUMENT_IDS}:
+        raise ValueError("visit is invalid")
+    try:
+        captured = {key: record[key] for key in _SESSION_KEYS}
+    except (KeyError, TypeError):
+        raise _invalid_record() from None
+    record_visit = _plain_string(captured["visit"])
+    if record_visit != safe_visit:
+        raise ValueError("visit is invalid")
+    intervention_day = captured["intervention_day"]
+    questions = _projection_questions(
+        visit=safe_visit, intervention_day=intervention_day
+    )
+    daily_core = _mapping(captured["daily_core"])
+    conditional = _mapping(captured["conditional_details"])
+    weekly = _mapping(captured["weekly_extension"])
+    if safe_visit == "daily":
+        core_answers = _project_answers(daily_core, DAILY_CORE)
+        conditional_answers = _project_answers(
+            conditional, DAILY_CONDITIONAL
+        )
+        weekly_questions = questions[
+            len(DAILY_CORE) + len(DAILY_CONDITIONAL) :
+        ]
+        weekly_answers = _project_answers(weekly, weekly_questions)
+    else:
+        core_answers = {}
+        conditional_answers = {}
+        weekly_answers = {}
+    return (
+        {
+            "schema_version": captured["schema_version"],
+            "record_id": _plain_string(captured["record_id"]),
+            "subject_id": _plain_string(captured["subject_id"]),
+            "record_date": _plain_string(captured["record_date"]),
+            "intervention_day": intervention_day,
+            "visit": record_visit,
+            "revision": captured["revision"],
+            "instrument_versions": _project_instrument_versions(
+                captured["instrument_versions"]
+            ),
+            "daily_context": _project_daily_context(
+                captured["daily_context"]
+            ),
+            "daily_core": core_answers,
+            "conditional_details": conditional_answers,
+            "weekly_extension": weekly_answers,
+            "formal_visits": _project_formal_visits(
+                captured["formal_visits"],
+                visit=safe_visit,
+                questions=questions,
+            ),
+            "field_status": _project_field_status(
+                captured["field_status"],
+                visit=safe_visit,
+                questions=questions,
+            ),
+            "recording": _project_recording(captured["recording"]),
+            "completion": _project_completion(
+                captured["completion"], visit=safe_visit
+            ),
+            "created_at_iso": _plain_string(captured["created_at_iso"]),
+            "updated_at_iso": _plain_string(captured["updated_at_iso"]),
+        },
+        safe_visit,
+    )
+
+
 def _completion_projection(
     record: Mapping[str, object],
     *,
@@ -321,25 +596,17 @@ def _record_projection(
     record: Mapping[str, object],
     *,
     visit: str,
-) -> tuple[dict[str, object], tuple[str, ...], str, date]:
-    record_visit = record.get("visit")
-    if not isinstance(visit, str) or visit not in {"daily", *VISIT_INSTRUMENT_IDS}:
-        raise ValueError("visit is invalid")
-    if record_visit != visit:
-        raise ValueError("visit is invalid")
-    parsed_date = _record_date(record.get("record_date"))
+) -> tuple[dict[str, object], tuple[str, ...], str, date, str]:
+    projected, safe_visit = _materialize_record(record, visit=visit)
+    parsed_date = _record_date(projected["record_date"])
     completion, answered_ids, completed_at_iso = _completion_projection(
-        record, visit=visit
+        projected, visit=safe_visit
     )
-    try:
-        projected = {key: record[key] for key in _SESSION_KEYS}
-    except (KeyError, TypeError):
-        raise _invalid_record() from None
     projected["completion"] = completion
     subject_id = projected.get("subject_id")
     intervention_day = projected.get("intervention_day")
     if (
-        not isinstance(subject_id, str)
+        type(subject_id) is not str
         or type(intervention_day) is not int
         or not 1 <= intervention_day <= 28
     ):
@@ -349,25 +616,33 @@ def _record_projection(
         subject_id=subject_id,
         record_date=parsed_date,
         intervention_day=intervention_day,
-        visit=visit,
+        visit=safe_visit,
     ):
         raise _invalid_record()
-    if not questionnaire_visit_complete(projected, visit):
+    if not questionnaire_visit_complete(projected, safe_visit):
         raise _invalid_record()
-    return projected, answered_ids, completed_at_iso, parsed_date
+    return projected, answered_ids, completed_at_iso, parsed_date, safe_visit
 
 
 def _question_entries(
     record: Mapping[str, object], *, visit: str
 ) -> tuple[_QuestionEntry, ...]:
-    versions = cast(Mapping[str, object], record["instrument_versions"])
+    versions = _mapping(record["instrument_versions"])
+    daily_version = versions[_DAILY_VERSION_KEY]
+    weekly_version = versions[_WEEKLY_VERSION_KEY]
+    formal_version = versions[_FORMAL_VERSION_KEY]
+    if any(
+        type(version) is not str
+        for version in (daily_version, weekly_version, formal_version)
+    ):
+        raise _invalid_record()
     if visit == "daily":
         day = record["intervention_day"]
         assert isinstance(day, int)
         entries = [
             _QuestionEntry(
                 "daily_nssi_ema",
-                str(versions[_DAILY_VERSION_KEY]),
+                daily_version,
                 question,
             )
             for question in (*DAILY_CORE, *DAILY_CONDITIONAL)
@@ -376,7 +651,7 @@ def _question_entries(
             entries.extend(
                 _QuestionEntry(
                     instrument.id,
-                    str(versions[_WEEKLY_VERSION_KEY]),
+                    weekly_version,
                     question,
                 )
                 for instrument in WEEKLY_INSTRUMENTS
@@ -386,7 +661,7 @@ def _question_entries(
     return tuple(
         _QuestionEntry(
             instrument_id,
-            str(versions[_FORMAL_VERSION_KEY]),
+            formal_version,
             question,
         )
         for instrument_id in VISIT_INSTRUMENT_IDS[visit]
@@ -416,13 +691,20 @@ def _freeze_answer(question: QuestionSpec, value: object) -> RawExportValue:
         return _export_text(value)
     if question.kind == "multiselect":
         if (
-            not isinstance(value, list)
-            or any(not isinstance(item, str) for item in value)
-            or len(set(value)) != len(value)
-            or any(item not in question.options for item in value)
+            isinstance(value, (str, bytes, bytearray))
+            or not isinstance(value, Sequence)
         ):
             raise _invalid_record()
-        return tuple(_export_text(item) for item in value)
+        items = list(value)
+        if any(not isinstance(item, str) for item in items):
+            raise _invalid_record()
+        frozen = tuple(_export_text(item) for item in items)
+        if (
+            len(set(frozen)) != len(frozen)
+            or any(item not in question.options for item in frozen)
+        ):
+            raise _invalid_record()
+        return frozen
     raise _invalid_record()
 
 
@@ -442,11 +724,15 @@ def _context_value(key: str, value: object) -> RawExportValue:
             raise _invalid_record()
         return _export_number(value)
     if key in {"tags", "coping_used"}:
-        if not isinstance(value, list) or any(
-            not isinstance(item, str) for item in value
+        if (
+            isinstance(value, (str, bytes, bytearray))
+            or not isinstance(value, Sequence)
         ):
             raise _invalid_record()
-        return tuple(_export_text(item) for item in value)
+        items = list(value)
+        if any(not isinstance(item, str) for item in items):
+            raise _invalid_record()
+        return tuple(_export_text(item) for item in items)
     if not isinstance(value, str):
         raise _invalid_record()
     return _export_text(value)
@@ -476,10 +762,11 @@ def _recording(record: Mapping[str, object]) -> tuple[tuple[str, RawExportValue]
     if (
         type(version) is not int
         or version != 2
+        or type(storage) is not str
         or storage != "browser_local"
-        or not isinstance(status, str)
+        or type(status) is not str
         or status not in _TERMINAL_RECORDING_STATES
-        or not isinstance(mode, str)
+        or type(mode) is not str
         or mode not in _RECORDING_MODES
         or type(duration) is not int
         or not 0 <= duration <= 2700
@@ -494,7 +781,16 @@ def _recording(record: Mapping[str, object]) -> tuple[tuple[str, RawExportValue]
         raise _invalid_record()
     _export_number(version)
     _export_number(duration)
-    return tuple((key, source[key]) for key in _RECORDING_KEYS)  # type: ignore[misc]
+    return (
+        ("version", version),
+        ("storage", storage),
+        ("status", status),
+        ("mode", mode),
+        ("duration_seconds", duration),
+        ("camera_ready", camera_ready),
+        ("microphone_ready", microphone_ready),
+        ("saved_confirmed", saved_confirmed),
+    )  # type: ignore[return-value]
 
 
 def _status_inventory(
@@ -535,6 +831,10 @@ def _validate_formal_payload(
     formal_visits = _visit_mapping(record.get("formal_visits"), visit=visit)
     visit_payload = _mapping(formal_visits.get(visit))
     instruments = _mapping(visit_payload.get("instruments"))
+    versions = _mapping(record.get("instrument_versions"))
+    formal_version = versions.get(_FORMAL_VERSION_KEY)
+    if type(formal_version) is not str:
+        raise _invalid_record()
     if visit_payload.get("complete") is not True or tuple(
         key for key in instruments if key in FORMAL_INSTRUMENTS
     ) != VISIT_INSTRUMENT_IDS[visit]:
@@ -556,7 +856,7 @@ def _validate_formal_payload(
         completeness = _mapping(payload.get("completeness"))
         if (
             payload.get("instrument_id") != instrument_id
-            or payload.get("instrument_version") != "1.0"
+            or payload.get("instrument_version") != formal_version
             or payload.get("label") != spec.label
             or payload.get("time_window") != spec.time_window
             or {
@@ -674,17 +974,24 @@ def _build_participant_snapshot(
     visit: str,
     exported_at_iso: str,
 ) -> ParticipantSnapshot:
-    exported_at = _utc_second(exported_at_iso)
-    projected, stored_answered, completed_at_iso, parsed_date = _record_projection(
-        record, visit=visit
-    )
+    if not isinstance(exported_at_iso, str):
+        raise ValueError("timestamp is invalid")
+    safe_exported_at_iso = str.__str__(exported_at_iso)
+    exported_at = _utc_second(safe_exported_at_iso)
+    (
+        projected,
+        stored_answered,
+        completed_at_iso,
+        parsed_date,
+        safe_visit,
+    ) = _record_projection(record, visit=visit)
     if exported_at < _utc_second(completed_at_iso):
         raise ValueError("timestamp is invalid")
-    entries = _question_entries(projected, visit=visit)
-    answers = questionnaire_answers(projected, visit)
+    entries = _question_entries(projected, visit=safe_visit)
+    answers = questionnaire_answers(projected, safe_visit)
     statuses = _status_inventory(
         projected,
-        visit=visit,
+        visit=safe_visit,
         entries=entries,
         answers=answers,
     )
@@ -697,29 +1004,33 @@ def _build_participant_snapshot(
         raise _invalid_record()
     _validate_formal_payload(
         projected,
-        visit=visit,
+        visit=safe_visit,
         answers=answers,
         statuses=dict(statuses),
     )
     responses = _responses(
-        visit=visit,
+        visit=safe_visit,
         entries=entries,
         answers=answers,
         statuses=statuses,
     )
     visits = _visit_snapshots(
-        visit=visit,
+        visit=safe_visit,
         completed_at_iso=completed_at_iso,
         entries=entries,
         statuses=statuses,
     )
+    participant_id = projected["subject_id"]
+    intervention_day = projected["intervention_day"]
+    assert type(participant_id) is str
+    assert type(intervention_day) is int
     return ParticipantSnapshot(
         export_schema_version=_EXPORT_SCHEMA_VERSION,
-        participant_id=str(projected["subject_id"]),
+        participant_id=participant_id,
         record_date=parsed_date.isoformat(),
-        intervention_day=int(projected["intervention_day"]),
-        visit=visit,
-        exported_at_iso=exported_at_iso,
+        intervention_day=intervention_day,
+        visit=safe_visit,
+        exported_at_iso=safe_exported_at_iso,
         daily_context=_daily_context(projected),
         recording=_recording(projected),
         answered_field_ids=ordered_answered,
