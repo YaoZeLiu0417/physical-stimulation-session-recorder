@@ -1,5 +1,5 @@
 import ast
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -26,6 +26,36 @@ VALID_CREATION = {
     "token": "01abcdef",
     "now_iso": "2026-07-24T08:09:10+00:00",
 }
+REQUIRED_TOP_LEVEL_KEYS = {
+    "schema_version",
+    "record_id",
+    "subject_id",
+    "record_date",
+    "intervention_day",
+    "visit",
+    "revision",
+    "instrument_versions",
+    "daily_context",
+    "daily_core",
+    "conditional_details",
+    "weekly_extension",
+    "formal_visits",
+    "field_status",
+    "recording",
+    "completion",
+    "created_at_iso",
+    "updated_at_iso",
+}
+MUTABLE_SECTION_KEYS = {
+    "daily_context",
+    "daily_core",
+    "conditional_details",
+    "weekly_extension",
+    "formal_visits",
+    "field_status",
+    "recording",
+}
+PROTECTED_SESSION_KEYS = {"authed", "auth_source", "subject_id", "visit"}
 
 
 def test_create_session_record_returns_exact_session_only_schema() -> None:
@@ -60,26 +90,7 @@ def test_create_session_record_returns_exact_session_only_schema() -> None:
         "created_at_iso": "2026-07-24T08:09:10+00:00",
         "updated_at_iso": "2026-07-24T08:09:10+00:00",
     }
-    assert set(record) == {
-        "schema_version",
-        "record_id",
-        "subject_id",
-        "record_date",
-        "intervention_day",
-        "visit",
-        "revision",
-        "instrument_versions",
-        "daily_context",
-        "daily_core",
-        "conditional_details",
-        "weekly_extension",
-        "formal_visits",
-        "field_status",
-        "recording",
-        "completion",
-        "created_at_iso",
-        "updated_at_iso",
-    }
+    assert set(record) == REQUIRED_TOP_LEVEL_KEYS
     assert set(record["completion"]) == {
         "status",
         "answered_field_ids",
@@ -241,6 +252,7 @@ def test_create_session_record_preserves_approved_utc_timestamp_form(
         "2026-07-24T08:09:10",
         "2026-07-24T08:09:10.000000+00:00",
         "2026-07-24T08:09:10+08:00",
+        "2026-02-30T08:09:10+00:00",
         "2026-07-24 08:09:10+00:00",
         "not-a-timestamp",
         False,
@@ -257,6 +269,220 @@ def test_create_session_record_rejects_noncanonical_or_non_utc_timestamps(
 
 def test_session_record_matches_approved_identity_and_context() -> None:
     record = create_session_record(**VALID_CREATION)
+
+    assert session_record_matches(record, **VALID_CONTEXT) is True
+
+
+def test_session_record_matches_rejects_identity_only_partial_record() -> None:
+    partial_record = {
+        "schema_version": 5,
+        "subject_id": "sub-001",
+        "record_date": "2026-07-24",
+        "intervention_day": 7,
+        "visit": "daily",
+    }
+
+    assert session_record_matches(partial_record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("missing_key", sorted(REQUIRED_TOP_LEVEL_KEYS))
+def test_session_record_matches_rejects_each_missing_top_level_section(
+    missing_key: str,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    del record[missing_key]
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "extra_key",
+    [
+        "upload",
+        "derived_metrics",
+        "safety_signals",
+        "local_cleanup",
+        "path",
+        "filename",
+        "media",
+        "media_bytes",
+        "server_storage",
+    ],
+)
+def test_session_record_matches_rejects_forbidden_extra_top_level_fields(
+    extra_key: str,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record[extra_key] = {}
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("section", sorted(MUTABLE_SECTION_KEYS))
+@pytest.mark.parametrize("malformed", [None, False, [], "mapping"])
+def test_session_record_matches_rejects_malformed_mutable_sections(
+    section: str,
+    malformed: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record[section] = malformed
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "instrument_versions",
+    [
+        None,
+        [],
+        {},
+        {
+            "daily_nssi_ema": "1.0",
+            "weekly_nssi": "1.0",
+            "formal_nssi_crf": "2.0",
+        },
+        {
+            "daily_nssi_ema": "1.0",
+            "weekly_nssi": "1.0",
+            "formal_nssi_crf": "1.0",
+            "extra": "1.0",
+        },
+    ],
+)
+def test_session_record_matches_requires_exact_instrument_versions(
+    instrument_versions: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["instrument_versions"] = instrument_versions
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("revision", [False, 0, 2, "1", None])
+def test_session_record_matches_requires_initial_integer_revision(
+    revision: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["revision"] = revision
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        "sub-002_20260724_01abcdef",
+        "sub-001_20260725_01abcdef",
+        "sub-001_20260724_ABCDEF12",
+        "sub-001_20260724_short",
+        False,
+        None,
+    ],
+)
+def test_session_record_matches_requires_context_consistent_record_id(
+    record_id: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["record_id"] = record_id
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("timestamp_key", ["created_at_iso", "updated_at_iso"])
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-07-24T08:09:10",
+        "2026-07-24T08:09:10.123+00:00",
+        "2026-07-24T08:09:10+08:00",
+        "2026-02-30T08:09:10+00:00",
+        False,
+        None,
+    ],
+)
+def test_session_record_matches_requires_utc_second_precision_timestamps(
+    timestamp_key: str,
+    timestamp: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record[timestamp_key] = timestamp
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("completion", [None, False, [], "mapping"])
+def test_session_record_matches_rejects_malformed_completion(
+    completion: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"] = completion
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ["status", "answered_field_ids", "current_step", "questionnaire_visits"],
+)
+def test_session_record_matches_rejects_incomplete_completion_shape(
+    missing_key: str,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    del record["completion"][missing_key]
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+def test_session_record_matches_rejects_extra_completion_field() -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"]["extra"] = {}
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize(
+    "nested_key",
+    ["answered_field_ids", "current_step", "questionnaire_visits"],
+)
+@pytest.mark.parametrize("malformed", [None, False, [], "mapping"])
+def test_session_record_matches_rejects_malformed_completion_containers(
+    nested_key: str,
+    malformed: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"][nested_key] = malformed
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+@pytest.mark.parametrize("status", [None, False, "", "finished"])
+def test_session_record_matches_rejects_invalid_completion_status(
+    status: object,
+) -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["completion"]["status"] = status
+
+    assert session_record_matches(record, **VALID_CONTEXT) is False
+
+
+def test_session_record_matches_allows_legitimate_nonempty_mutable_state() -> None:
+    record = create_session_record(**VALID_CREATION)
+    record["daily_context"]["setting"] = "home"
+    record["daily_core"]["nssi_urge"] = 2
+    record["conditional_details"]["nssi_method"] = "other"
+    record["weekly_extension"]["weekly_frequency"] = 1
+    record["formal_visits"]["V1"] = {"raw_answers": {"pss_1": False}}
+    record["field_status"]["daily"] = {"nssi_urge": "answered"}
+    record["recording"]["status"] = "saved"
+    record["completion"] = {
+        "status": "complete",
+        "answered_field_ids": {"daily": ["nssi_urge"]},
+        "current_step": {"daily": 1},
+        "questionnaire_visits": {
+            "daily": {"status": "complete", "revision": 1}
+        },
+    }
+    record["updated_at_iso"] = "2026-07-24T09:10:11Z"
 
     assert session_record_matches(record, **VALID_CONTEXT) is True
 
@@ -352,7 +578,6 @@ def test_clear_owned_session_state_deletes_only_owned_exact_and_prefix_keys() ->
         "auth_source": "signed-link",
         "subject_id": "sub-001",
         "visit": "daily",
-        "link_lock": True,
         "owned_exact": "remove",
         "flow:answer": 1,
         "flow:step": 2,
@@ -371,7 +596,6 @@ def test_clear_owned_session_state_deletes_only_owned_exact_and_prefix_keys() ->
         "auth_source": "signed-link",
         "subject_id": "sub-001",
         "visit": "daily",
-        "link_lock": True,
         "flow": "not-prefixed",
         "other": "preserve",
     }
@@ -398,12 +622,86 @@ def test_clear_owned_session_state_ignores_empty_prefix() -> None:
     }
 
 
-def test_clear_owned_session_state_can_explicitly_remove_an_auth_key() -> None:
-    state = {"authed": True, "unrelated": "preserve"}
+def test_clear_owned_session_state_preserves_protected_exact_keys() -> None:
+    state = {
+        "authed": True,
+        "auth_source": "signed-link",
+        "subject_id": "sub-001",
+        "visit": "daily",
+        "owned": "remove",
+    }
 
-    clear_owned_session_state(state, exact_keys=["authed"], prefixes=[])
+    clear_owned_session_state(
+        state,
+        exact_keys=[*PROTECTED_SESSION_KEYS, "owned"],
+        prefixes=[],
+    )
 
-    assert state == {"unrelated": "preserve"}
+    assert state == {
+        "authed": True,
+        "auth_source": "signed-link",
+        "subject_id": "sub-001",
+        "visit": "daily",
+    }
+
+
+def test_clear_owned_session_state_preserves_protected_prefix_matches() -> None:
+    state = {
+        "authed": True,
+        "auth_source": "signed-link",
+        "subject_id": "sub-001",
+        "visit": "daily",
+        "answer": "remove",
+        "subject_answer": "remove",
+        "visit_answer": "remove",
+    }
+
+    clear_owned_session_state(
+        state,
+        exact_keys=[],
+        prefixes=["a", "subject", "visit"],
+    )
+
+    assert state == {
+        "authed": True,
+        "auth_source": "signed-link",
+        "subject_id": "sub-001",
+        "visit": "daily",
+    }
+
+
+class CascadingDeleteState(MutableMapping[str, object]):
+    def __init__(self) -> None:
+        self.data = {
+            "owned:first": 1,
+            "owned:second": 2,
+            "unrelated": "preserve",
+        }
+
+    def __getitem__(self, key: str) -> object:
+        return self.data[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self.data[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self.data[key]
+        if key == "owned:first":
+            self.data.pop("owned:second", None)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+def test_clear_owned_session_state_tolerates_selected_key_disappearing() -> None:
+    state = CascadingDeleteState()
+
+    clear_owned_session_state(state, exact_keys=[], prefixes=["owned:"])
+
+    assert dict(state) == {"unrelated": "preserve"}
 
 
 def test_session_record_workflow_has_only_pure_validation_dependencies() -> None:
