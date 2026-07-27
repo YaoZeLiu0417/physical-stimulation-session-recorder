@@ -47,6 +47,44 @@ RECORDING_KEYS = (
     "microphone_ready",
     "saved_confirmed",
 )
+ALLOWED_RUNTIME_CACHE_DIRS = frozenset(
+    {".pytest_cache", ".streamlit", "__pycache__"}
+)
+
+
+def _operational_side_effect_snapshot(root: Path) -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if ALLOWED_RUNTIME_CACHE_DIRS.intersection(relative.parts):
+            continue
+        key = relative.as_posix()
+        if path.is_symlink():
+            snapshot[key] = ("symlink", str(path.readlink()))
+        elif path.is_dir():
+            snapshot[key] = ("directory", None)
+        else:
+            snapshot[key] = ("file", path.read_bytes())
+    return snapshot
+
+
+def _reject_network_calls(monkeypatch) -> None:
+    import http.client
+    import socket
+    import urllib.request
+
+    import requests.sessions
+
+    def reject(*args, **kwargs):
+        raise AssertionError("operational fixture attempted network access")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", reject)
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    monkeypatch.setattr(http.client.HTTPConnection, "request", reject)
+    monkeypatch.setattr(http.client.HTTPSConnection, "request", reject)
+    monkeypatch.setattr(socket, "create_connection", reject)
+    monkeypatch.setattr(socket.socket, "connect", reject)
+    monkeypatch.setattr(socket.socket, "connect_ex", reject)
 
 
 def _negative_daily_answers() -> dict[str, object]:
@@ -387,6 +425,21 @@ def test_questionnaire_fixture_never_constructs_a_server_store(tmp_path, monkeyp
 
     assert app.session_state[SESSION_RECORD_KEY]["schema_version"] == 5
     assert list(tmp_path.iterdir()) == []
+
+
+def test_operational_fixture_has_no_filesystem_or_network_side_effects(
+    tmp_path, monkeypatch
+):
+    before = _operational_side_effect_snapshot(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _reject_network_calls(monkeypatch)
+
+    answers = _negative_daily_answers()
+    flow = build_flow(answers, 1)
+    app = _complete_fixture(_start_fixture("day1"), flow, "daily", answers)
+
+    assert SESSION_EXPORT_KEY in app.session_state
+    assert _operational_side_effect_snapshot(tmp_path) == before
 
 
 @pytest.mark.parametrize(
