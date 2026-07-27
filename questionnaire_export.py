@@ -83,6 +83,9 @@ _UTC_SECOND_ISO_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)"
 )
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_OOXML_ESCAPE_RE = re.compile(r"_x[0-9a-f]{4}_", re.IGNORECASE)
+_MAX_EXCEL_TEXT_LENGTH = 32_767
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
 _SESSION_KEYS = (
     "schema_version",
     "record_id",
@@ -122,6 +125,9 @@ _RECORDING_KEYS = (
 _TERMINAL_RECORDING_STATES = frozenset({"saved", "skipped", "failed"})
 _RECORDING_MODES = frozenset({"demo", "long"})
 _FIELD_STATES = frozenset({"answered", "missing", "not_applicable"})
+_NEUTRAL_ERROR_MESSAGES = frozenset(
+    {"record is invalid", "timestamp is invalid", "visit is invalid"}
+)
 _FORMAL_VERSION_KEY = "formal_nssi_crf"
 _DAILY_VERSION_KEY = "daily_nssi_ema"
 _WEEKLY_VERSION_KEY = "weekly_nssi"
@@ -129,6 +135,25 @@ _WEEKLY_VERSION_KEY = "weekly_nssi"
 
 def _invalid_record() -> ValueError:
     return ValueError("record is invalid")
+
+
+def _export_text(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _invalid_record() from None
+    rendered_length = len(value) + int(value.startswith(_FORMULA_PREFIXES))
+    if (
+        rendered_length > _MAX_EXCEL_TEXT_LENGTH
+        or any(
+            ord(character) < 32 and character not in {"\t", "\n"}
+            for character in value
+        )
+        or any(character in {"\ufffe", "\uffff"} for character in value)
+        or _OOXML_ESCAPE_RE.search(value) is not None
+    ):
+        raise _invalid_record()
+    return value
 
 
 def _utc_second(value: object) -> datetime:
@@ -340,7 +365,7 @@ def _freeze_answer(question: QuestionSpec, value: object) -> RawExportValue:
     if question.kind == "text":
         if not isinstance(value, str):
             raise _invalid_record()
-        return value
+        return _export_text(value)
     if question.kind == "multiselect":
         if (
             not isinstance(value, list)
@@ -349,7 +374,7 @@ def _freeze_answer(question: QuestionSpec, value: object) -> RawExportValue:
             or any(item not in question.options for item in value)
         ):
             raise _invalid_record()
-        return tuple(value)
+        return tuple(_export_text(item) for item in value)
     raise _invalid_record()
 
 
@@ -362,7 +387,11 @@ def _context_value(key: str, value: object) -> RawExportValue:
         "coping_effect_1to5": (1, 5),
     }
     if key == "sleep_hours":
-        if type(value) not in {int, float} or not math.isfinite(value):
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(value)
+            or not 0 <= value <= 24
+        ):
             raise _invalid_record()
         return value
     if key in integer_ranges:
@@ -375,10 +404,10 @@ def _context_value(key: str, value: object) -> RawExportValue:
             not isinstance(item, str) for item in value
         ):
             raise _invalid_record()
-        return tuple(value)
+        return tuple(_export_text(item) for item in value)
     if not isinstance(value, str):
         raise _invalid_record()
-    return value
+    return _export_text(value)
 
 
 def _daily_context(record: Mapping[str, object]) -> tuple[tuple[str, RawExportValue], ...]:
@@ -509,9 +538,9 @@ def _display_value(question: QuestionSpec, value: RawExportValue) -> str:
         return "、".join(value)
     if question.kind == "slider":
         if value == question.min_value and question.low_label:
-            return question.low_label
+            return _export_text(question.low_label)
         if value == question.max_value and question.high_label:
-            return question.high_label
+            return _export_text(question.high_label)
     return str(value)
 
 
@@ -539,7 +568,7 @@ def _responses(
                 instrument_id=entry.instrument_id,
                 instrument_version=entry.instrument_version,
                 field_id=question.id,
-                question_text=question.prompt,
+                question_text=_export_text(question.prompt),
                 question_kind=question.kind,
                 answered=answered,
                 applicability=(
@@ -595,14 +624,12 @@ def _visit_snapshots(
     return tuple(snapshots)
 
 
-def build_participant_snapshot(
+def _build_participant_snapshot(
     record: Mapping[str, object],
     *,
     visit: str,
     exported_at_iso: str,
 ) -> ParticipantSnapshot:
-    if not isinstance(record, Mapping):
-        raise TypeError("record must be a mapping")
     exported_at = _utc_second(exported_at_iso)
     projected, stored_answered, completed_at_iso, parsed_date = _record_projection(
         record, visit=visit
@@ -656,6 +683,32 @@ def build_participant_snapshot(
         responses=responses,
         visits=visits,
     )
+
+
+def build_participant_snapshot(
+    record: Mapping[str, object],
+    *,
+    visit: str,
+    exported_at_iso: str,
+) -> ParticipantSnapshot:
+    if not isinstance(record, Mapping):
+        raise TypeError("record must be a mapping")
+    error_message = "record is invalid"
+    try:
+        return _build_participant_snapshot(
+            record,
+            visit=visit,
+            exported_at_iso=exported_at_iso,
+        )
+    except Exception as error:
+        if (
+            type(error) is ValueError
+            and len(error.args) == 1
+            and type(error.args[0]) is str
+            and error.args[0] in _NEUTRAL_ERROR_MESSAGES
+        ):
+            error_message = error.args[0]
+    raise ValueError(error_message) from None
 
 
 def _json_raw(value: RawExportValue) -> object:

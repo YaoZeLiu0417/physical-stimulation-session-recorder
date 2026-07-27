@@ -1,6 +1,7 @@
 import ast
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 import json
@@ -186,6 +187,70 @@ def _assert_no_sentinel_in_exception(error: BaseException, sentinel: str) -> Non
         traceback.TracebackException.from_exception(error).format(chain=True)
     )
     assert sentinel not in rendered
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        assert sentinel not in str(current)
+        current = current.__cause__ or current.__context__
+
+
+class _ExplodingMapping(Mapping[str, object]):
+    def __init__(
+        self,
+        source: Mapping[str, object],
+        *,
+        sentinel: str,
+        operation: str,
+        key: str = "",
+    ) -> None:
+        self._source = source
+        self._sentinel = sentinel
+        self._operation = operation
+        self._key = key
+
+    def __getitem__(self, key: str) -> object:
+        if self._operation == "getitem" and key == self._key:
+            raise RuntimeError(self._sentinel)
+        return self._source[key]
+
+    def __iter__(self):
+        if self._operation == "iter":
+            raise RuntimeError(self._sentinel)
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        if self._operation == "len":
+            raise RuntimeError(self._sentinel)
+        return len(self._source)
+
+
+class _ExplodingSequence(Sequence[str]):
+    def __init__(
+        self,
+        source: Sequence[str],
+        *,
+        sentinel: str,
+        operation: str,
+    ) -> None:
+        self._source = source
+        self._sentinel = sentinel
+        self._operation = operation
+
+    def __getitem__(self, index):
+        if self._operation == "getitem":
+            raise RuntimeError(self._sentinel)
+        return self._source[index]
+
+    def __iter__(self):
+        if self._operation == "iter":
+            raise RuntimeError(self._sentinel)
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        if self._operation == "len":
+            raise RuntimeError(self._sentinel)
+        return len(self._source)
 
 
 def test_day_one_negative_branch_builds_canonical_frozen_snapshot() -> None:
@@ -556,6 +621,237 @@ def test_snapshot_json_and_sheet_builders_reject_forged_types() -> None:
         participant_snapshot_json({})  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         questionnaire_export_sheets({})  # type: ignore[arg-type]
+
+
+def _hostile_record(case: str, sentinel: str) -> Mapping[str, object]:
+    record = _completed_record(positive=True)
+    if case == "top_level_getitem":
+        return _ExplodingMapping(
+            record,
+            sentinel=sentinel,
+            operation="getitem",
+            key="record_date",
+        )
+    if case == "nested_mapping_iter":
+        record["recording"] = _ExplodingMapping(
+            record["recording"], sentinel=sentinel, operation="iter"
+        )
+        return record
+    if case == "nested_mapping_getitem":
+        record["recording"] = _ExplodingMapping(
+            record["recording"],
+            sentinel=sentinel,
+            operation="getitem",
+            key="version",
+        )
+        return record
+    answered = record["completion"]["answered_field_ids"]["daily"]
+    record["completion"]["answered_field_ids"]["daily"] = _ExplodingSequence(
+        answered,
+        sentinel=sentinel,
+        operation="iter" if case == "nested_sequence_iter" else "len",
+    )
+    return record
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "top_level_getitem",
+        "nested_mapping_iter",
+        "nested_mapping_getitem",
+        "nested_sequence_iter",
+        "nested_sequence_len",
+    ),
+)
+def test_hostile_container_exceptions_are_neutral_at_both_public_boundaries(
+    case: str, monkeypatch
+) -> None:
+    sentinel = f"CALLER_CONTROLLED_{case}_7f1a9"
+    record = _hostile_record(case, sentinel)
+
+    with pytest.raises(ValueError, match="^record is invalid$") as snapshot_error:
+        build_participant_snapshot(
+            record,
+            visit="daily",
+            exported_at_iso=EXPORTED_AT_ISO,
+        )
+    _assert_no_sentinel_in_exception(snapshot_error.value, sentinel)
+    assert snapshot_error.value.__cause__ is None
+    assert snapshot_error.value.__context__ is None
+
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+    with pytest.raises(ValueError, match="^record is invalid$") as export_error:
+        build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+    assert bundle_calls == []
+    _assert_no_sentinel_in_exception(export_error.value, sentinel)
+    assert export_error.value.__cause__ is None
+    assert export_error.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("visit", "exported_at_iso", "message"),
+    (
+        ("V1", EXPORTED_AT_ISO, "visit is invalid"),
+        ("daily", "not-a-timestamp", "timestamp is invalid"),
+    ),
+)
+def test_snapshot_preserves_its_intentional_neutral_error_categories(
+    visit: str, exported_at_iso: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=f"^{message}$") as captured:
+        build_participant_snapshot(
+            _completed_record(),
+            visit=visit,
+            exported_at_iso=exported_at_iso,
+        )
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+@pytest.mark.parametrize("sleep_hours", (0, 0.0, 24, 24.0))
+def test_sleep_hours_accepts_exact_protocol_boundaries(sleep_hours) -> None:
+    record = _completed_record()
+    record["daily_context"]["sleep_hours"] = sleep_hours
+
+    snapshot = build_participant_snapshot(
+        record,
+        visit="daily",
+        exported_at_iso=EXPORTED_AT_ISO,
+    )
+
+    assert dict(snapshot.daily_context)["sleep_hours"] == sleep_hours
+
+
+@pytest.mark.parametrize("sleep_hours", (-0.5, 24.5))
+def test_sleep_hours_rejects_values_just_outside_protocol_range_before_bundle(
+    sleep_hours: float, monkeypatch
+) -> None:
+    record = _completed_record()
+    record["daily_context"]["sleep_hours"] = sleep_hours
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_snapshot(
+            record,
+            visit="daily",
+            exported_at_iso=EXPORTED_AT_ISO,
+        )
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
+
+
+def _set_exported_text(record: dict[str, object], target: str, value: str) -> None:
+    if target == "raw_text":
+        record["conditional_details"]["nssi_other_description_24h"] = value
+    elif target == "context_text":
+        record["daily_context"]["narrative"] = value
+    else:
+        record["daily_context"]["tags"] = [value]
+
+
+@pytest.mark.parametrize("target", ("raw_text", "context_text", "context_tuple"))
+@pytest.mark.parametrize(
+    "bad_text",
+    (
+        "nul\x00text",
+        "carriage\rreturn",
+        "noncharacter\ufffe",
+        "noncharacter\uffff",
+        "ambiguous_xAbC9_escape",
+        "unpaired\ud800surrogate",
+    ),
+)
+def test_lossy_exported_text_is_rejected_by_snapshot_before_bundle(
+    target: str, bad_text: str, monkeypatch
+) -> None:
+    record = _completed_record(positive=True)
+    _set_exported_text(record, target, bad_text)
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_snapshot(
+            record,
+            visit="daily",
+            exported_at_iso=EXPORTED_AT_ISO,
+        )
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
+
+
+@pytest.mark.parametrize("metadata_field", ("prompt", "low_label"))
+def test_lossy_question_metadata_is_rejected_before_serialization(
+    metadata_field: str, monkeypatch
+) -> None:
+    index = 3
+    questions = list(questionnaire_export.DAILY_CORE)
+    questions[index] = replace(
+        questions[index], **{metadata_field: "metadata_x1234_sentinel"}
+    )
+    monkeypatch.setattr(questionnaire_export, "DAILY_CORE", tuple(questions))
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_snapshot(
+            _completed_record(),
+            visit="daily",
+            exported_at_iso=EXPORTED_AT_ISO,
+        )
+
+
+def test_safe_unicode_newline_and_tab_remain_valid_export_text() -> None:
+    record = _completed_record(positive=True)
+    safe_text = "安全 Unicode 😀\t标签\n下一行"
+    _set_exported_text(record, "raw_text", safe_text)
+    _set_exported_text(record, "context_text", safe_text)
+    _set_exported_text(record, "context_tuple", safe_text)
+
+    snapshot = build_participant_snapshot(
+        record,
+        visit="daily",
+        exported_at_iso=EXPORTED_AT_ISO,
+    )
+
+    response = next(
+        item
+        for item in snapshot.responses
+        if item.field_id == "nssi_other_description_24h"
+    )
+    assert response.raw_value == safe_text
+    assert response.display_value == safe_text
+    assert dict(snapshot.daily_context)["narrative"] == safe_text
+    assert dict(snapshot.daily_context)["tags"] == (safe_text,)
 
 
 def test_export_source_has_no_scoring_or_external_capabilities() -> None:
