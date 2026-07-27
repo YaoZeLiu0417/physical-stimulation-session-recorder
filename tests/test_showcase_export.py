@@ -277,11 +277,11 @@ def _assert_workbook_package_preflight(members: list[ZipInfo]) -> None:
             f"explicit workbook package directory is not allowed: {name}"
         )
         parts = name.split("/")
-        first_part = parts[0] if parts else ""
         is_drive_qualified = (
-            len(first_part) == 2
-            and first_part[0].isalpha()
-            and first_part[1] == ":"
+            len(name) >= 2
+            and name[0].isascii()
+            and name[0].isalpha()
+            and name[1] == ":"
         )
         has_safe_path = (
             bool(name)
@@ -935,7 +935,13 @@ def test_privacy_gate_decodes_utf16_xml_before_scanning() -> None:
         _assert_archive_has_no_private_content(mutated_archive)
 
 
-def test_privacy_gate_rejects_drive_qualified_workbook_member_path() -> None:
+@pytest.mark.parametrize(
+    "member_name",
+    ["C:/private.bin", "C:private.bin", "C:Users/Alice/record.bin"],
+)
+def test_privacy_gate_rejects_drive_qualified_workbook_member_path(
+    member_name: str,
+) -> None:
     archive = _build_archive()
     workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
     mutated_archive = _replace_archive_member(
@@ -943,7 +949,7 @@ def test_privacy_gate_rejects_drive_qualified_workbook_member_path() -> None:
         "responses.xlsx",
         _add_workbook_payloads(
             workbook_bytes,
-            {"C:/private.bin": b"safe"},
+            {member_name: b"safe"},
         ),
     )
 
