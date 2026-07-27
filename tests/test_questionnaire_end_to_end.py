@@ -124,6 +124,29 @@ PARTICIPANT_DATA_IDENTIFIERS = frozenset(
         "weekly_extension",
     }
 )
+QUESTIONNAIRE_FIELD_IDS = frozenset(
+    question.id
+    for question in (
+        *DAILY_CORE,
+        *DAILY_CONDITIONAL,
+        *(
+            question
+            for instrument in WEEKLY_INSTRUMENTS
+            for question in instrument.questions
+        ),
+        *(
+            question
+            for instrument in FORMAL_INSTRUMENTS.values()
+            for question in instrument.questions
+        ),
+    )
+)
+PARTICIPANT_DATA_BYTE_MARKERS = tuple(
+    (marker, marker.encode("utf-8"))
+    for marker in sorted(
+        PARTICIPANT_DATA_IDENTIFIERS | QUESTIONNAIRE_FIELD_IDS
+    )
+)
 
 
 def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
@@ -140,20 +163,20 @@ def _participant_artifact_reason(path: Path, relative: Path) -> str | None:
         return f"prohibited {path.suffix.casefold()} artifact"
     if path.suffix.casefold() in {".pyc", ".pyo"}:
         return None
+    filename_tokens = set(
+        re.findall(r"[a-z0-9]+", path.name.casefold())
+    )
     if (
-        path.name.casefold() in {"index", "index.json"}
+        "index" in filename_tokens
         and "store" in path_tokens
     ):
         return "store index"
     if path_tokens & PARTICIPANT_ARTIFACT_NAME_TOKENS:
         return "participant artifact name"
-    if path.suffix.casefold() in {".csv", ".json", ".tsv", ".txt"}:
-        text = path.read_bytes()[:1_048_577].decode("utf-8", errors="ignore")
-        identifiers = set(
-            re.findall(r"[a-z0-9]+(?:_[a-z0-9]+)*", text.casefold())
-        )
-        if identifiers & PARTICIPANT_DATA_IDENTIFIERS:
-            return "participant data fields"
+    data = path.read_bytes().lower()
+    for marker, encoded_marker in PARTICIPANT_DATA_BYTE_MARKERS:
+        if encoded_marker in data:
+            return f"participant data marker {marker}"
     return None
 
 
@@ -417,6 +440,15 @@ def _surface_strings(value):
         yield str(value)
 
 
+def _privacy_tokens(value: str) -> tuple[str, ...]:
+    separated = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+        " ",
+        value,
+    )
+    return tuple(re.findall(r"[a-z0-9]+", separated.casefold()))
+
+
 def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
     workbook_values = tuple(
         value
@@ -435,7 +467,7 @@ def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
         terms = {
             token
             for value in strings
-            for token in re.findall(r"[a-z0-9]+", value.casefold())
+            for token in _privacy_tokens(value)
         }
         forbidden_terms = terms & FORBIDDEN_PARTICIPANT_TERMS
         assert not forbidden_terms, (
@@ -454,6 +486,58 @@ def _assert_participant_surfaces_are_raw_only(app, payload, workbook) -> None:
             f"{label} exposes private identifiers: "
             f"{sorted(private_identifiers)}"
         )
+
+
+@pytest.mark.parametrize(
+    "sensitive_text",
+    (
+        "derivedScore",
+        "RiskLevel",
+        "thresholdValue",
+        "filePath",
+        "uploadStatus",
+        "derived_score",
+        "risk-level",
+        "threshold value",
+        "file_path",
+        "upload status",
+    ),
+)
+def test_participant_privacy_tokens_cover_identifier_styles(sensitive_text):
+    class VisibleSurface:
+        main = sensitive_text
+        sidebar = ""
+
+        def __getattr__(self, name):
+            return ()
+
+    class EmptyWorkbook:
+        worksheets = ()
+
+    with pytest.raises(AssertionError, match="forbidden participant terms"):
+        _assert_participant_surfaces_are_raw_only(
+            VisibleSurface(),
+            {},
+            EmptyWorkbook(),
+        )
+
+
+def test_participant_privacy_tokens_do_not_match_innocent_substrings():
+    class VisibleSurface:
+        main = "scorecard brisk thresholding pathways preupload"
+        sidebar = ""
+
+        def __getattr__(self, name):
+            return ()
+
+    class EmptyWorkbook:
+        worksheets = ()
+
+    _assert_participant_surfaces_are_raw_only(
+        VisibleSurface(),
+        {},
+        EmptyWorkbook(),
+    )
 
 
 def test_visible_text_collector_captures_every_structured_render_channel(tmp_path):
@@ -625,8 +709,13 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
         ),
         pytest.param(
             ".streamlit/cache.json",
-            b'{"answers":{"nssi_urge_now":3}}',
-            id="generic-participant-json",
+            b'{"value":{"nssi_urge_now":3}}',
+            id="questionnaire-field-json",
+        ),
+        pytest.param(
+            ".streamlit/cache.bin",
+            b"binary-prefix participant_id binary-suffix",
+            id="extension-independent-participant-data",
         ),
         pytest.param(
             ".streamlit/responses.xlsx",
@@ -654,6 +743,11 @@ def test_operational_fixture_has_no_filesystem_or_network_side_effects(
             id="store-index",
         ),
         pytest.param(
+            ".streamlit/record_store/index.db",
+            b"database index",
+            id="database-store-index",
+        ),
+        pytest.param(
             ".pytest_cache/cache.csv",
             b"participant_id,answer\nsub-001,true\n",
             id="other-participant-data",
@@ -666,6 +760,19 @@ def test_cache_directories_cannot_hide_participant_artifacts(
     artifact = tmp_path / relative_path
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(data)
+
+    with pytest.raises(AssertionError, match="participant artifact"):
+        _operational_side_effect_snapshot(tmp_path)
+
+
+def test_cache_scans_complete_file_beyond_one_mebibyte(tmp_path):
+    artifact = tmp_path / ".streamlit/late.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(
+        b'{"padding":"'
+        + b"x" * (1024 * 1024 + 64)
+        + b'","participant_id":"sub-001"}'
+    )
 
     with pytest.raises(AssertionError, match="participant artifact"):
         _operational_side_effect_snapshot(tmp_path)
