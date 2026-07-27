@@ -2,11 +2,12 @@ import ast
 import copy
 import hashlib
 import json
+import stat
 import time
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZIP_STORED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
 import pytest
 import streamlit as st
@@ -22,7 +23,7 @@ from app_workflow import (
 )
 from browser_recorder import RecorderStatus
 from link_auth import sign_subject_link
-from local_export_bundle import LocalExportBundle
+from local_export_bundle import LocalExportBundle, build_local_export_bundle
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
 from questionnaire_ui import ALTO_COLORS, ALTO_CSS, validate_submission
 from session_record_workflow import (
@@ -229,12 +230,26 @@ def _zip_bytes(
     members: tuple[str, ...] = ("responses.json", "responses.xlsx"),
     *,
     json_data: bytes = b"{}",
+    compression: int = ZIP_DEFLATED,
+    member_modes: dict[str, int] | None = None,
+    archive_comment: bytes = b"",
+    member_comments: dict[str, bytes] | None = None,
+    member_extras: dict[str, bytes] | None = None,
 ) -> bytes:
     output = BytesIO()
-    with ZipFile(output, "w", compression=ZIP_STORED) as archive:
+    with ZipFile(output, "w", compression=compression) as archive:
+        archive.comment = archive_comment
         for member in members:
             data = json_data if member == "responses.json" else b"minimal-xlsx"
-            archive.writestr(member, data)
+            info = ZipInfo(member, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = compression
+            info.create_system = 3
+            info.external_attr = (
+                (member_modes or {}).get(member, stat.S_IFREG | 0o600) << 16
+            )
+            info.comment = (member_comments or {}).get(member, b"")
+            info.extra = (member_extras or {}).get(member, b"")
+            archive.writestr(info, data, compress_type=compression)
     return output.getvalue()
 
 
@@ -251,11 +266,167 @@ class _LocalExportBundleSubclass(LocalExportBundle):
 
 
 def _corrupt_zip_bytes() -> bytes:
-    payload = b"unique-json-payload"
-    data = bytearray(_zip_bytes(json_data=payload))
-    payload_index = data.index(payload)
+    data = bytearray(_zip_bytes(json_data=b"unique-json-payload"))
+    local_header = data.index(b"PK\x03\x04")
+    filename_length = int.from_bytes(
+        data[local_header + 26 : local_header + 28], "little"
+    )
+    extra_length = int.from_bytes(
+        data[local_header + 28 : local_header + 30], "little"
+    )
+    compressed_size = int.from_bytes(
+        data[local_header + 18 : local_header + 22], "little"
+    )
+    payload_index = (
+        local_header
+        + 30
+        + filename_length
+        + extra_length
+        + compressed_size // 2
+    )
     data[payload_index] ^= 1
     return bytes(data)
+
+
+def _patch_central_uncompressed_sizes(
+    archive_data: bytes,
+    sizes: tuple[int, int],
+) -> bytes:
+    data = bytearray(archive_data)
+    offset = 0
+    for size in sizes:
+        central_header = data.index(b"PK\x01\x02", offset)
+        data[central_header + 24 : central_header + 28] = size.to_bytes(
+            4, "little"
+        )
+        offset = central_header + 46
+    return bytes(data)
+
+
+def _patch_zip_encryption_flags(archive_data: bytes) -> bytes:
+    data = bytearray(archive_data)
+    offset = 0
+    while True:
+        candidates = [
+            index
+            for signature in (b"PK\x03\x04", b"PK\x01\x02")
+            if (index := data.find(signature, offset)) >= 0
+        ]
+        if not candidates:
+            break
+        header = min(candidates)
+        flag_offset = header + (6 if data[header : header + 4] == b"PK\x03\x04" else 8)
+        flags = int.from_bytes(data[flag_offset : flag_offset + 2], "little")
+        data[flag_offset : flag_offset + 2] = (flags | 1).to_bytes(2, "little")
+        offset = header + 4
+    return bytes(data)
+
+
+def _bundle_with_data(data: bytes) -> LocalExportBundle:
+    return LocalExportBundle(
+        filename="session-20260724-080910.zip",
+        mime_type="application/zip",
+        data=data,
+    )
+
+
+def _hostile_zip_bundles() -> tuple[object, ...]:
+    valid_data = _zip_bytes()
+    return (
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(
+                    member_modes={
+                        "responses.json": stat.S_IFLNK | 0o777,
+                    }
+                )
+            ),
+            id="unix-symlink-member",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(
+                    member_modes={
+                        "responses.xlsx": stat.S_IFIFO | 0o600,
+                    }
+                )
+            ),
+            id="unix-non-regular-member",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(
+                    member_modes={
+                        "responses.json": stat.S_IFDIR | 0o700,
+                    }
+                )
+            ),
+            id="unix-directory-member",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(archive_comment=b"unexpected archive comment")
+            ),
+            id="archive-comment",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(
+                    member_comments={
+                        "responses.json": b"unexpected member comment",
+                    }
+                )
+            ),
+            id="member-comment",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(
+                    member_extras={
+                        "responses.xlsx": b"\xfe\xca\x01\x00x",
+                    }
+                )
+            ),
+            id="member-extra-metadata",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _zip_bytes(compression=ZIP_STORED)
+            ),
+            id="unsupported-compression",
+        ),
+        pytest.param(
+            _bundle_with_data(_patch_zip_encryption_flags(valid_data)),
+            id="encrypted-member-flags",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _patch_central_uncompressed_sizes(
+                    valid_data,
+                    (64 * 1024 * 1024, len(b"minimal-xlsx")),
+                )
+            ),
+            id="oversized-member-metadata",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _patch_central_uncompressed_sizes(
+                    valid_data,
+                    (25 * 1024 * 1024, 25 * 1024 * 1024),
+                )
+            ),
+            id="oversized-total-metadata",
+        ),
+        pytest.param(
+            _bundle_with_data(
+                _patch_central_uncompressed_sizes(
+                    valid_data,
+                    (8 * 1024 * 1024, len(b"minimal-xlsx")),
+                )
+            ),
+            id="high-expansion-metadata",
+        ),
+    )
 
 
 def _invalid_bundles() -> tuple[object, ...]:
@@ -359,6 +530,7 @@ def _invalid_bundles() -> tuple[object, ...]:
             ),
             id="wrong-member-order",
         ),
+        *_hostile_zip_bundles(),
     )
 
 
@@ -1299,6 +1471,119 @@ def test_invalid_built_export_is_neutral_retryable_and_preserves_answers(
     assert len(attempts) == 2
     assert app.session_state["operational_record"]["daily_core"] == retained
     assert app.session_state["operational_export_bundle"] is valid_bundle
+    assert len(app.get("download_button")) == 1
+
+
+@pytest.mark.parametrize("source", ["cache", "builder"])
+@pytest.mark.parametrize("invalid_bundle", _hostile_zip_bundles())
+def test_hostile_zip_metadata_is_rejected_before_crc_decompression(
+    monkeypatch,
+    source,
+    invalid_bundle,
+):
+    testzip_calls: list[tuple[str, ...]] = []
+
+    def forbidden_testzip(archive):
+        testzip_calls.append(tuple(archive.namelist()))
+        raise AssertionError("metadata preflight must run before testzip")
+
+    monkeypatch.setattr(ZipFile, "testzip", forbidden_testzip)
+    if source == "cache":
+        app, recorder_calls = _signed_app(
+            monkeypatch,
+            status=RecorderStatus(mode="long", state="recording"),
+        )
+        app.session_state["operational_export_bundle"] = invalid_bundle
+        app.session_state["operational_saved_locally"] = True
+        app.run()
+        assert len(recorder_calls) == 2
+        assert "operational_saved_locally" not in app.session_state
+    else:
+        app, _ = _signed_app(
+            monkeypatch,
+            status=_saved_status(),
+            render_questionnaire=_complete_renderer([]),
+            build_export=lambda *args, **kwargs: invalid_bundle,
+        )
+        assert "下载文件暂时无法生成，请重试。" in _visible_app_text(app)
+
+    assert not app.exception
+    assert testzip_calls == []
+    assert "operational_export_bundle" not in app.session_state
+    assert not app.get("download_button")
+
+
+@pytest.mark.parametrize("source", ["cache", "builder"])
+def test_oversized_archive_is_rejected_before_zip_open(monkeypatch, source):
+    oversized_bundle = _bundle_with_data(
+        _zip_bytes(
+            json_data=b"x" * (16 * 1024 * 1024),
+            compression=ZIP_STORED,
+        )
+    )
+    zip_open_calls: list[int] = []
+
+    def forbidden_zip_init(archive, *args, **kwargs):
+        zip_open_calls.append(1)
+        raise AssertionError("archive size preflight must run before ZIP open")
+
+    monkeypatch.setattr(ZipFile, "__init__", forbidden_zip_init)
+    if source == "cache":
+        app, recorder_calls = _signed_app(
+            monkeypatch,
+            status=RecorderStatus(mode="long", state="recording"),
+        )
+        app.session_state["operational_export_bundle"] = oversized_bundle
+        app.session_state["operational_saved_locally"] = True
+        app.run()
+        assert len(recorder_calls) == 2
+        assert "operational_saved_locally" not in app.session_state
+    else:
+        app, _ = _signed_app(
+            monkeypatch,
+            status=_saved_status(),
+            render_questionnaire=_complete_renderer([]),
+            build_export=lambda *args, **kwargs: oversized_bundle,
+        )
+        assert "下载文件暂时无法生成，请重试。" in _visible_app_text(app)
+
+    assert not app.exception
+    assert zip_open_calls == []
+    assert "operational_export_bundle" not in app.session_state
+    assert not app.get("download_button")
+
+
+def test_task4_canonical_bundle_is_accepted_for_build_and_cached_rerun(
+    monkeypatch,
+):
+    bundle = build_local_export_bundle(
+        snapshot={"schema_version": 1, "value": "raw"},
+        sheets={"Session": ({"field": "value"},)},
+        exported_at=datetime(2026, 7, 24, 8, 9, 10, tzinfo=timezone.utc),
+    )
+    build_calls: list[dict[str, object]] = []
+
+    def return_canonical(record, *, visit, exported_at):
+        build_calls.append(copy.deepcopy(record))
+        return bundle
+
+    app, _ = _signed_app(
+        monkeypatch,
+        status=_saved_status(),
+        render_questionnaire=_complete_renderer([]),
+        build_export=return_canonical,
+    )
+
+    assert not app.exception
+    assert len(build_calls) == 1
+    assert app.session_state["operational_export_bundle"] is bundle
+    assert len(app.get("download_button")) == 1
+
+    app.run()
+
+    assert not app.exception
+    assert len(build_calls) == 1
+    assert app.session_state["operational_export_bundle"] is bundle
     assert len(app.get("download_button")) == 1
 
 

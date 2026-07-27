@@ -10,10 +10,11 @@ import hmac
 import os
 import re
 import secrets
+import stat
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import streamlit as st
 
@@ -82,6 +83,11 @@ _EXPORT_FILENAME_RE = re.compile(
     re.ASCII,
 )
 _EXPORT_MEMBERS = ("responses.json", "responses.xlsx")
+_EXPORT_MEMBER_MODE = stat.S_IFREG | 0o600
+_MAX_EXPORT_ARCHIVE_BYTES = 16 * 1024 * 1024
+_MAX_EXPORT_MEMBER_BYTES = 32 * 1024 * 1024
+_MAX_EXPORT_TOTAL_BYTES = 48 * 1024 * 1024
+_MAX_EXPORT_COMPRESSION_RATIO = 4096
 
 
 def _has_operational_phase_state(state: Any) -> bool:
@@ -123,6 +129,7 @@ def _valid_export_bundle(value: object) -> bool:
         or type(value.mime_type) is not str
         or value.mime_type != "application/zip"
         or type(value.data) is not bytes
+        or len(value.data) > _MAX_EXPORT_ARCHIVE_BYTES
     ):
         return False
     match = _EXPORT_FILENAME_RE.fullmatch(value.filename)
@@ -136,8 +143,32 @@ def _valid_export_bundle(value: object) -> bool:
         if value.filename != f"session-{parsed:%Y%m%d-%H%M%S}.zip":
             return False
         with ZipFile(BytesIO(value.data), mode="r") as archive:
-            if tuple(archive.namelist()) != _EXPORT_MEMBERS:
+            members = archive.infolist()
+            if archive.comment != b"" or tuple(
+                member.filename for member in members
+            ) != _EXPORT_MEMBERS:
                 return False
+            total_size = 0
+            for member in members:
+                if (
+                    member.is_dir()
+                    or member.create_system != 3
+                    or member.external_attr != _EXPORT_MEMBER_MODE << 16
+                    or member.flag_bits != 0
+                    or member.compress_type != ZIP_DEFLATED
+                    or member.comment != b""
+                    or member.extra != b""
+                    or member.file_size < 0
+                    or member.compress_size < 0
+                    or member.file_size > _MAX_EXPORT_MEMBER_BYTES
+                    or member.file_size
+                    > max(1, member.compress_size)
+                    * _MAX_EXPORT_COMPRESSION_RATIO
+                ):
+                    return False
+                total_size += member.file_size
+                if total_size > _MAX_EXPORT_TOTAL_BYTES:
+                    return False
             if archive.testzip() is not None:
                 return False
     except Exception:
