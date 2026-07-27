@@ -1,71 +1,93 @@
-# 问卷录制与上传运维指南
+# Questionnaire Session Operations
 
-## 入口与访问控制
+This guide covers the current browser-local operational flow. It contains no
+questionnaire wording or participant examples.
 
-- 日常问卷签名链接继续兼容原格式 `?sid=...&exp=...&sig=...`，不带 `visit` 时按 `daily` 验签和进入。
-- 正式访视链接必须在签名中包含 `visit`。当前允许值以 `VISIT_INSTRUMENT_IDS` 为准：`V1`、`V3`、`V4`、`V5`、`V6`。`V5` 的量表映射必须与 `V4` 完全一致。
-- 签名被试只能使用服务端锁定的受试者编号和干预日，不能选择干预日、访视或清理策略，也看不到分数、风险标签、远端路径、上传响应、历史记录和运维信息。
-- 管理员通过 `APP_PASSWORD_SHA256` 进入。管理员创建当日记录前必须明确选择并确认干预日；改变选择后需要重新确认。
+## Controlled Access
 
-## 配置
+- Open the application only through the controlled access process approved by
+  the operating team.
+- A participant session starts from the signed access link issued for that
+  session. Confirm the displayed session context before proceeding.
+- An authorized operator may use the separate administrative entry when a
+  participant link is not appropriate.
+- Stop if the session context is unexpected. Do not continue in another
+  participant's browser session.
 
-顶层配置 `LINK_SIGNING_KEY`、`SAFETY_CONTACT`、`TRUSTED_INTERVENTION_DAYS`、`APP_PASSWORD_SHA256` 可放在 Streamlit Secrets 或同名环境变量中，不要提交到仓库：
+## Pre-Session Check
 
-- `LINK_SIGNING_KEY`：签名链接的共享密钥。生成链接和应用验签必须使用同一个值。
-- `SAFETY_CONTACT`：安全支持提示中展示给被试的研究团队联系方式；未配置时应用使用通用联系提示。
-- `TRUSTED_INTERVENTION_DAYS`：签名被试的服务端受试者编号到干预日映射。Secrets 可使用映射，环境变量可使用等价 JSON 字符串，例如 `{"sub-001": 7, "sub-002": "28"}`。顶层必须是对象，当前受试者编号必须存在；值可为整数或整数字符串，解析后必须在 `1..28`，布尔值、缺失值、非整数和范围外值均拒绝。研究团队负责在每日访问前更新该映射，应用不会根据链接参数或日期自行推进干预日。
-- `APP_PASSWORD_SHA256`：管理员口令的 SHA-256 十六进制摘要；配置后用于管理员登录，不应填写明文口令。未配置时应用允许无口令的内部/本地管理员入口，因此生产部署必须设置。
+1. Use a current Chrome release over HTTPS.
+2. Confirm that Chrome can request camera and microphone access.
+3. Confirm that the selected camera and microphone are the intended devices.
+4. Confirm that the browser can save a small test file to a
+   participant-selected local destination.
+5. Confirm that the configured support contact is available to the operating
+   team.
 
-百度配置的来源与上述四项顶层配置不同：
+## Browser-Local Recording
 
-- `[baidu]`：只从 Streamlit Secrets 的 `[baidu]` 表或本地未提交的 `config.toml` 读取；普通环境变量不会进入应用的百度 `CFG`。`app_key`、`secret_key` 为应用启动所需凭据；`refresh_token` 为上传前换取访问令牌所需；`save_dir` 为远端根目录，缺省为 `/apps/collector`；`redirect_uri` 缺省为 `http://localhost:8501/oauth/callback`，部署时必须与百度应用登记值一致。应用实际读取的字段如下：
+- Chrome captures the camera and microphone locally.
+- The recording is saved as WebM directly to the participant-selected local
+  destination. The Streamlit application does not receive the media bytes.
+- Keep the page open until Chrome reports that the local save has completed.
+- A saved recording must be explicitly confirmed before the questionnaire can
+  continue.
+- When recording is skipped or fails, continuation requires the explicit
+  on-screen confirmation. Record the operational incident outside the
+  participant session without including participant content.
 
-```toml
-[baidu]
-app_key = "..."
-secret_key = "..."
-refresh_token = "..."
-save_dir = "/apps/collector"
-redirect_uri = "http://localhost:8501/oauth/callback"
-```
+## Questionnaire And Local Export
 
-百度返回新 `refresh_token` 时，管理员必须及时手动更新 Secrets；应用不会写回部署配置。
+- Raw questionnaire responses exist only in Streamlit session memory while the
+  page remains open.
+- Complete the questionnaire in the displayed order and use the on-screen
+  support contact whenever the support notice appears.
+- At completion, download the local ZIP. It contains JSON and Excel copies of
+  the same raw response snapshot.
+- Open the ZIP locally and confirm that both files are present before selecting
+  the local-save confirmation.
+- The local-save confirmation enables the final action. Finish clears the
+  application-owned session state from Streamlit session memory.
+- The application does not upload recording or questionnaire data.
+- The application does not store participant data on the server.
 
-## 记录与恢复
+## Data-Loss Boundary
 
-- 每个受试者、每个日历日期只创建一条 schema 4 记录。`record_id` 创建后在草稿、重载、修订、重试和远端目录中保持不变；远端日期段使用 `YYYYMMDD`。
-- 问卷每次前进、后退或完成都会保存当前答案、已回答字段和当前步骤。日常问卷与每个正式访视分别保存在 `completion.questionnaire_visits` 中，并与当前 `revision` 绑定；完成一个访视不会让同日其他访视误判为完成。
-- 修订增加 `revision`，重置该修订的问卷完成标记，并保留稳定 `record_id`。旧修订不能覆盖新修订。
-- 上传并清理状态文件后，系统保留最小化、版本化的日期身份索引。刷新时会以同一稳定编号返回已归档状态，不会为同一受试者和日期生成第二个编号。已完成的对应访视可显示完成结果；归档中没有完成的访视不能被当作已完成。
-- 录制优先于问卷。只有当前记录编号对应的安全文件名、常规文件和有效起止时间才可继续。刷新后可恢复已持久化的有效录制；选择“重新录制”会抑制旧录制恢复，直到新录制完成。草稿答案和步骤不因安全重录而丢失。
+- Refreshing or closing the page before the local ZIP is saved discards the
+  in-memory questionnaire state. It cannot be recovered by the application.
+- Closing Chrome before the WebM writer finishes may leave an incomplete local
+  recording. Verify the saved file before continuing.
+- Selecting Finish intentionally clears the active session. A completed local
+  export cannot be reopened inside the application.
 
-## 上传与失败保留
+## Deployment Checks
 
-上传顺序固定为：初始 JSON、选定视频、持久化两项上传状态、最终 JSON 同步。两项远端对象成功后才进入本地清理；若有转码前 FLV，也在同一清理批次内处理。
+Before opening the service for use:
 
-- 初始 JSON、视频或最终 JSON 同步失败时，保留记录 JSON、选定视频和源 FLV，以稳定 `record_id` 重试；不得改名生成新记录。
-- 请求上传后清理时，`local_cleanup.status=pending` 表示最终远端 JSON 尚未获得本地持久确认，刷新后绝不能据此删除任何本地工件。最终 JSON 明确成功后，应用只在本地原子保存 `local_cleanup.status=ready`；只有 `requested=true` 且状态为 `ready` 才允许刷新后执行 cleanup-only 恢复。
-- `ready` 是本地崩溃恢复确认，不是新的远端上传状态。最终远端 JSON 仍包含上传前的 `pending` 是预期行为；不要为了同步 `ready` 增加第五次上传。若本地 ready 确认保存失败，保留整个 bundle 并重试上传流程。
-- 兼容旧记录时，仅在 `local_cleanup` 缺失或属于旧结构、且视频已经缺失的情况下允许保守 cleanup-only；旧结构的视频仍存在时不得自动删除。`requested=false/status=retained` 始终保留本地副本。
-- `LocalCleanupError` 表示远端上传已经完成，但本地清理未完成。它与上传失败不同；按 `remaining_paths` 处理占用或权限问题后继续清理，不要重新解释为远端失败。
-- 成功清理后不得再次保存记录 JSON，否则会重新创建已经归档的状态文件。最小身份索引必须保留。
-- 被试只看到简化的重试或清理中提示和必要的稳定记录编号；管理员可查看上传状态和执行恢复操作。
+1. Verify HTTPS from the same Chrome environment used for sessions.
+2. Verify the camera and microphone permission prompt and device selection.
+3. Save and play a short local WebM using non-participant test material.
+4. Complete a synthetic questionnaire flow and download the local ZIP.
+5. Confirm that the ZIP contains matching JSON and Excel response data.
+6. Confirm that browser network activity contains no recording or
+   questionnaire transfer.
+7. Confirm that the support contact text is visible when the support notice is
+   triggered with synthetic data.
+8. Refresh a synthetic unfinished session and confirm the documented data-loss
+   behavior.
 
-## 安全与测量边界
+## Retry And Troubleshooting
 
-- 日常问卷回答“有自杀想法”，或正式访视任一已激活且已回答的 PSS 项为阳性时，页面展示 `SAFETY_CONTACT` 支持文案。未激活、未回答或已被控制题关闭的旧值不会触发支持提示。
-- 本迭代不自动划分风险等级、不自动通知研究人员，也不把分数展示给被试。团队仍须按研究方案执行人工安全处置。
-- 日常指标只表示过去 24 小时各类 NSSI 的实际次数；正式访视 DSHI-Y 分数只保存在正式量表结果中，不能复制为日常实际次数。
-- 第 7、14、21、28 天附加周测。SICQ 第 7 题原始答案保持 `0..4`，只在计分项中按 `4 - 原值` 反向计分；规范周测指标键为 `sicq_weekly`。日常实际次数与周测得分保持独立。
-- 正式量表记录使用 `instrument_version`、`time_window`、原始答案、计分答案、完整性和分数字段；被试界面不展示这些结果。
-
-## 异常处置
-
-- 恢复演练只能使用虚拟或合成受试者编号和合成内容，禁止使用真实受试者资料。
-- 演练不得使用生产云凭据、生产 `refresh_token` 或生产远端目录；上传步骤必须使用本地假实现。
-- 演练数据只能写入测试进程创建的临时目录或项目内明确指定的相对测试路径，不得触碰生产录制目录。演练结束后按测试清理流程移除临时数据。
-- 日志、报告和沟通记录不得打印、截图或长期保留绝对本地路径；仅记录相对测试路径、稳定测试 `record_id` 和不含敏感信息的结果摘要。
-- 出现索引或状态损坏时，立即停止该受试者当日写入，备份现有状态文件和最小身份索引，再核对受试者编号、日期、`record_id`、最新修订号和更新时间。不要删除索引、手工修改编号或让系统创建替代记录。
-- 状态文件存在而索引缺失时，存储层可从唯一且有效的最新状态重建索引；存在多个编号、身份不匹配或内容损坏时按数据损坏处理，先从备份恢复一致文件。
-- 索引存在而状态文件已清理时属于归档；若索引显示已上传且目标访视已完成，按归档完成处理。若归档的是草稿或目标访视未完成，不要新建同日记录，应恢复该稳定编号对应的最新状态备份或交由数据管理员处理。
-- 恢复后先以同一受试者、日期和 `record_id` 验证草稿步骤、访视完成状态和录制元数据，再允许继续填写或重试上传。
+- Camera or microphone unavailable: check Chrome site permissions, reconnect
+  the device, and retry before collecting responses.
+- Local file selection canceled: start the recording step again and select a
+  destination when prompted.
+- Recording failure: retry after confirming both devices, or use the explicit
+  continue-without-recording confirmation when the operating procedure permits
+  it.
+- ZIP generation failure: keep the page open and retry. Do not refresh while
+  the in-memory responses are still needed.
+- Local file cannot be opened: repeat the local export while the session is
+  still active, then verify both files before Finish.
+- Page refreshed or closed: begin a newly authorized session. The prior
+  in-memory responses cannot be recovered.
