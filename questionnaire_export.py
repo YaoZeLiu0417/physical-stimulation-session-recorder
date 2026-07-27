@@ -156,6 +156,54 @@ def _export_text(value: str) -> str:
     return value
 
 
+def _export_number(value: object) -> int | float:
+    """Match the public export delegate's exact .16G typed round-trip."""
+    if type(value) not in {int, float}:
+        raise _invalid_record()
+    if isinstance(value, float) and not math.isfinite(value):
+        raise _invalid_record()
+    try:
+        serialized = f"{value:.16G}"
+        try:
+            round_tripped: int | float = int(serialized)
+        except ValueError:
+            round_tripped = float(serialized)
+    except (OverflowError, ValueError):
+        raise _invalid_record() from None
+    if (
+        type(round_tripped) is not type(value)
+        or round_tripped != value
+        or isinstance(round_tripped, float)
+        and not math.isfinite(round_tripped)
+        or isinstance(value, float)
+        and value == 0
+        and math.copysign(1.0, round_tripped) != math.copysign(1.0, value)
+    ):
+        raise _invalid_record()
+    return value
+
+
+def _sleep_hours(value: object) -> int | float:
+    if type(value) not in {int, float} or not 0 <= value <= 24:
+        raise _invalid_record()
+    if isinstance(value, float) and (
+        not math.isfinite(value)
+        or value == 0
+        and math.copysign(1.0, value) < 0
+    ):
+        raise _invalid_record()
+    doubled = value * 2
+    if doubled != int(doubled):
+        raise _invalid_record()
+    # Streamlit emits floats; integral half-hour values become typed Excel ints.
+    canonical = (
+        int(value)
+        if isinstance(value, float) and value.is_integer()
+        else value
+    )
+    return _export_number(canonical)
+
+
 def _utc_second(value: object) -> datetime:
     if not isinstance(value, str) or _UTC_SECOND_ISO_RE.fullmatch(value) is None:
         raise ValueError("timestamp is invalid")
@@ -361,7 +409,7 @@ def _freeze_answer(question: QuestionSpec, value: object) -> RawExportValue:
             and value > question.max_value
         ):
             raise _invalid_record()
-        return value
+        return _export_number(value)
     if question.kind == "text":
         if not isinstance(value, str):
             raise _invalid_record()
@@ -387,18 +435,12 @@ def _context_value(key: str, value: object) -> RawExportValue:
         "coping_effect_1to5": (1, 5),
     }
     if key == "sleep_hours":
-        if (
-            type(value) not in {int, float}
-            or not math.isfinite(value)
-            or not 0 <= value <= 24
-        ):
-            raise _invalid_record()
-        return value
+        return _sleep_hours(value)
     if key in integer_ranges:
         lower, upper = integer_ranges[key]
         if type(value) is not int or not lower <= value <= upper:
             raise _invalid_record()
-        return value
+        return _export_number(value)
     if key in {"tags", "coping_used"}:
         if not isinstance(value, list) or any(
             not isinstance(item, str) for item in value
@@ -450,6 +492,8 @@ def _recording(record: Mapping[str, object]) -> tuple[tuple[str, RawExportValue]
         and saved_confirmed
     ):
         raise _invalid_record()
+    _export_number(version)
+    _export_number(duration)
     return tuple((key, source[key]) for key in _RECORDING_KEYS)  # type: ignore[misc]
 
 
@@ -768,12 +812,14 @@ def participant_snapshot_json(snapshot: ParticipantSnapshot) -> dict[str, object
 
 
 def _cell_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return _export_text(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
 
 

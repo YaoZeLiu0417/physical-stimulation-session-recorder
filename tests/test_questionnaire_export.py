@@ -12,6 +12,7 @@ from zipfile import ZipFile
 import openpyxl
 import pytest
 
+from app_workflow import daily_context_values
 import questionnaire_export
 from questionnaire_export import (
     ParticipantSnapshot,
@@ -719,8 +720,13 @@ def test_snapshot_preserves_its_intentional_neutral_error_categories(
     assert captured.value.__context__ is None
 
 
-@pytest.mark.parametrize("sleep_hours", (0, 0.0, 24, 24.0))
-def test_sleep_hours_accepts_exact_protocol_boundaries(sleep_hours) -> None:
+@pytest.mark.parametrize(
+    ("sleep_hours", "expected"),
+    ((0, 0), (0.0, 0), (0.5, 0.5), (7.0, 7), (7.5, 7.5), (24.0, 24), (24, 24)),
+)
+def test_sleep_hours_accepts_half_hour_steps_and_canonicalizes_integral_floats(
+    sleep_hours, expected
+) -> None:
     record = _completed_record()
     record["daily_context"]["sleep_hours"] = sleep_hours
 
@@ -730,10 +736,15 @@ def test_sleep_hours_accepts_exact_protocol_boundaries(sleep_hours) -> None:
         exported_at_iso=EXPORTED_AT_ISO,
     )
 
-    assert dict(snapshot.daily_context)["sleep_hours"] == sleep_hours
+    exported = dict(snapshot.daily_context)["sleep_hours"]
+    assert exported == expected
+    assert type(exported) is type(expected)
 
 
-@pytest.mark.parametrize("sleep_hours", (-0.5, 24.5))
+@pytest.mark.parametrize(
+    "sleep_hours",
+    (-0.5, 24.5, -0.0, 7.1, 0.10000000000000002),
+)
 def test_sleep_hours_rejects_values_just_outside_protocol_range_before_bundle(
     sleep_hours: float, monkeypatch
 ) -> None:
@@ -760,6 +771,169 @@ def test_sleep_hours_rejects_values_just_outside_protocol_range_before_bundle(
         )
 
     assert bundle_calls == []
+
+
+def test_daily_context_values_default_sleep_float_exports_as_canonical_int() -> None:
+    record = _completed_record()
+    record["daily_context"] = {}
+    context = daily_context_values(record)
+    assert context["sleep_hours"] == 7.0
+    assert type(context["sleep_hours"]) is float
+    record["daily_context"] = context
+
+    snapshot = build_participant_snapshot(
+        record,
+        visit="daily",
+        exported_at_iso=EXPORTED_AT_ISO,
+    )
+
+    exported = dict(snapshot.daily_context)["sleep_hours"]
+    assert exported == 7
+    assert type(exported) is int
+
+
+def test_oversized_integer_raw_answer_is_rejected_before_bundle(monkeypatch) -> None:
+    record = _completed_record(positive=True)
+    record["conditional_details"]["nssi_cut_count_24h"] = 10**100
+    bundle_calls: list[object] = []
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        lambda **kwargs: bundle_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="^record is invalid$"):
+        build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+
+    assert bundle_calls == []
+
+
+def test_exactly_representable_large_integer_raw_answer_remains_valid() -> None:
+    record = _completed_record(positive=True)
+    record["conditional_details"]["nssi_cut_count_24h"] = 10**15
+
+    snapshot = build_participant_snapshot(
+        record,
+        visit="daily",
+        exported_at_iso=EXPORTED_AT_ISO,
+    )
+
+    response = next(
+        item
+        for item in snapshot.responses
+        if item.field_id == "nssi_cut_count_24h"
+    )
+    assert response.raw_value == 10**15
+    assert type(response.raw_value) is int
+
+
+def _canonical_cell_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize("extra", (0, 1))
+def test_daily_context_cell_uses_final_serialized_excel_length_boundary(
+    extra: int, monkeypatch
+) -> None:
+    empty = _canonical_cell_json({"narrative": ""})
+    narrative = "x" * (32_767 - len(empty) + extra)
+    record = _completed_record()
+    record["daily_context"] = {"narrative": narrative}
+    bundle_calls: list[dict[str, object]] = []
+    result_sentinel = object()
+
+    def capture_bundle(**kwargs):
+        bundle_calls.append(kwargs)
+        return result_sentinel
+
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        capture_bundle,
+    )
+    if extra == 0:
+        result = build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+        assert result is result_sentinel
+        assert len(bundle_calls) == 1
+        context_cell = bundle_calls[0]["sheets"]["Session"][0]["daily_context"]
+        assert len(context_cell) == 32_767
+    else:
+        with pytest.raises(ValueError, match="^record is invalid$"):
+            build_participant_export(
+                record,
+                visit="daily",
+                exported_at=EXPORTED_AT,
+            )
+        assert bundle_calls == []
+
+
+@pytest.mark.parametrize("extra", (0, 1))
+def test_tuple_raw_cell_uses_final_serialized_excel_length_boundary(
+    extra: int, monkeypatch
+) -> None:
+    empty = _canonical_cell_json([""])
+    option = "x" * (32_767 - len(empty) + extra)
+    questions = list(questionnaire_export.DAILY_CONDITIONAL)
+    index = next(
+        index
+        for index, question in enumerate(questions)
+        if question.id == "nssi_motives_24h"
+    )
+    questions[index] = replace(questions[index], options=(option,))
+    monkeypatch.setattr(
+        questionnaire_export, "DAILY_CONDITIONAL", tuple(questions)
+    )
+    record = _completed_record(positive=True)
+    record["conditional_details"]["nssi_motives_24h"] = [option]
+    bundle_calls: list[dict[str, object]] = []
+    result_sentinel = object()
+
+    def capture_bundle(**kwargs):
+        bundle_calls.append(kwargs)
+        return result_sentinel
+
+    monkeypatch.setattr(
+        questionnaire_export,
+        "build_local_export_bundle",
+        capture_bundle,
+    )
+    if extra == 0:
+        result = build_participant_export(
+            record,
+            visit="daily",
+            exported_at=EXPORTED_AT,
+        )
+        assert result is result_sentinel
+        assert len(bundle_calls) == 1
+        response_rows = bundle_calls[0]["sheets"]["Responses"]
+        raw_cell = next(
+            row["raw_value"]
+            for row in response_rows
+            if row["field_id"] == "nssi_motives_24h"
+        )
+        assert len(raw_cell) == 32_767
+    else:
+        with pytest.raises(ValueError, match="^record is invalid$"):
+            build_participant_export(
+                record,
+                visit="daily",
+                exported_at=EXPORTED_AT,
+            )
+        assert bundle_calls == []
 
 
 def _set_exported_text(record: dict[str, object], target: str, value: str) -> None:
