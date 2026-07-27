@@ -4,12 +4,14 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from io import BytesIO
 import json
 from pathlib import Path
-from zipfile import ZipFile
+import xml.etree.ElementTree as ElementTree
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import openpyxl
 import pytest
 
 import showcase_export
+from showcase_audit import FORBIDDEN_TERMS
 from showcase_export import SyntheticShowcaseArchive, build_synthetic_showcase_zip
 
 
@@ -22,7 +24,7 @@ ITEM_IDS = (
     "demo_workflow_willingness",
 )
 ZIP_MEMBERS = ["responses.json", "responses.xlsx"]
-PROHIBITED_CONTENT_TERMS = (
+PROHIBITED_CONTENT_TERMS = FORBIDDEN_TERMS + (
     "questionnaire",
     "research",
     "study",
@@ -32,9 +34,16 @@ PROHIBITED_CONTENT_TERMS = (
     "subject",
     "path",
     "upload",
-    "nssi",
-    "tavns",
 )
+OOXML_RAW_PROHIBITED_TERMS = tuple(
+    term for term in PROHIBITED_CONTENT_TERMS if term not in {"path", "subject"}
+)
+SAFE_IMPORT_ROOTS = {
+    "__future__",
+    "dataclasses",
+    "datetime",
+    "local_export_bundle",
+}
 
 
 class _HostileTimezone(tzinfo):
@@ -130,6 +139,177 @@ def _sheet_rows(
     assert rows
     headers = rows[0]
     return [dict(zip(headers, values, strict=True)) for values in rows[1:]]
+
+
+def _archive_member_bytes(
+    archive: SyntheticShowcaseArchive,
+    member_name: str,
+) -> bytes:
+    with ZipFile(BytesIO(archive.data), "r") as zip_file:
+        return zip_file.read(member_name)
+
+
+def _replace_archive_member(
+    archive: SyntheticShowcaseArchive,
+    member_name: str,
+    replacement: bytes,
+) -> SyntheticShowcaseArchive:
+    output = BytesIO()
+    with ZipFile(BytesIO(archive.data), "r") as source:
+        with ZipFile(output, "w", compression=ZIP_DEFLATED) as target:
+            for member in source.infolist():
+                payload = (
+                    replacement
+                    if member.filename == member_name
+                    else source.read(member.filename)
+                )
+                target.writestr(member, payload)
+    return SyntheticShowcaseArchive(filename=archive.filename, data=output.getvalue())
+
+
+def _add_workbook_xml_payload(
+    workbook_bytes: bytes,
+    member_name: str,
+    payload: bytes,
+) -> bytes:
+    output = BytesIO()
+    with ZipFile(BytesIO(workbook_bytes), "r") as source:
+        with ZipFile(output, "w", compression=ZIP_DEFLATED) as target:
+            for member in source.infolist():
+                target.writestr(member, source.read(member.filename))
+            target.writestr(member_name, payload)
+    return output.getvalue()
+
+
+def _assert_source_imports_are_isolated(source: str) -> None:
+    tree = ast.parse(source)
+    imported_roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_roots.add(node.module.split(".", 1)[0])
+    assert imported_roots == SAFE_IMPORT_ROOTS
+
+
+def _assert_text_has_no_private_content(
+    text: str,
+    *,
+    location: str,
+    terms: tuple[str, ...] = PROHIBITED_CONTENT_TERMS,
+) -> None:
+    folded_text = text.casefold()
+    for term in terms:
+        assert term.casefold() not in folded_text, f"{term}: {location}"
+
+
+def _assert_bytes_have_no_private_content(
+    payload: bytes,
+    *,
+    location: str,
+    terms: tuple[str, ...] = PROHIBITED_CONTENT_TERMS,
+) -> None:
+    folded_payload = payload.lower()
+    for term in terms:
+        assert term.casefold().encode("utf-8") not in folded_payload, (
+            f"{term}: {location}"
+        )
+
+
+def _xml_content_values(payload: bytes, *, location: str) -> list[str]:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError:
+        raise AssertionError(f"invalid XML payload: {location}") from None
+
+    values: list[str] = []
+    for element in root.iter():
+        if element.text:
+            values.append(element.text)
+        if element.tail:
+            values.append(element.tail)
+        values.extend(element.attrib.values())
+    return values
+
+
+def _assert_archive_has_no_private_content(
+    archive: SyntheticShowcaseArchive,
+) -> None:
+    _assert_text_has_no_private_content(
+        archive.filename,
+        location="archive filename",
+    )
+    with ZipFile(BytesIO(archive.data), "r") as outer_archive:
+        assert outer_archive.namelist() == ZIP_MEMBERS
+        json_bytes = outer_archive.read("responses.json")
+        workbook_bytes = outer_archive.read("responses.xlsx")
+
+    _assert_bytes_have_no_private_content(
+        json_bytes,
+        location="responses.json bytes",
+    )
+    try:
+        json_text = json_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise AssertionError("responses.json is not valid UTF-8") from None
+    _assert_text_has_no_private_content(
+        json_text,
+        location="responses.json text",
+    )
+    snapshot = json.loads(json_text)
+    _assert_text_has_no_private_content(
+        json.dumps(snapshot, ensure_ascii=False),
+        location="parsed responses.json",
+    )
+
+    with ZipFile(BytesIO(workbook_bytes), "r") as workbook_package:
+        for member in workbook_package.infolist():
+            if member.is_dir() or not member.filename.casefold().endswith(
+                (".xml", ".rels")
+            ):
+                continue
+            _assert_text_has_no_private_content(
+                member.filename,
+                location="workbook package member name",
+            )
+            payload = workbook_package.read(member)
+            _assert_bytes_have_no_private_content(
+                payload,
+                location=member.filename,
+                terms=OOXML_RAW_PROHIBITED_TERMS,
+            )
+            try:
+                package_text = payload.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                raise AssertionError(
+                    f"workbook text payload is not UTF-8: {member.filename}"
+                ) from None
+            _assert_text_has_no_private_content(
+                package_text,
+                location=member.filename,
+                terms=OOXML_RAW_PROHIBITED_TERMS,
+            )
+            _assert_text_has_no_private_content(
+                "\n".join(
+                    _xml_content_values(payload, location=member.filename)
+                ),
+                location=f"{member.filename} structured content",
+            )
+
+    workbook = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True)
+    searchable_values: list[str] = []
+    for worksheet in workbook.worksheets:
+        searchable_values.append(worksheet.title)
+        searchable_values.extend(
+            str(cell.value)
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        )
+    _assert_text_has_no_private_content(
+        "\n".join(searchable_values),
+        location="workbook sheets and cells",
+    )
 
 
 def test_saved_archive_has_exact_public_shape_and_matching_values() -> None:
@@ -411,35 +591,7 @@ def test_timedelta_subclass_cannot_disguise_a_nonzero_offset() -> None:
 def test_source_is_closed_to_operational_data_storage_and_network_modules() -> None:
     source = MODULE_SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    forbidden_import_roots = {
-        "app",
-        "app_workflow",
-        "browser_recorder",
-        "local_recording_workflow",
-        "participant_identity",
-        "pathlib",
-        "questionnaire_export",
-        "questionnaire_scoring",
-        "questionnaire_specs",
-        "questionnaire_ui",
-        "record_store",
-        "requests",
-        "session_record_workflow",
-        "showcase_app",
-        "socket",
-        "storage",
-        "tempfile",
-        "upload",
-        "urllib",
-    }
-    imported_roots: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported_roots.add(node.module.split(".", 1)[0])
-
-    assert imported_roots.isdisjoint(forbidden_import_roots)
+    _assert_source_imports_are_isolated(source)
     assert not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -461,6 +613,28 @@ def test_source_is_closed_to_operational_data_storage_and_network_modules() -> N
 
 
 @pytest.mark.parametrize(
+    "unsafe_module",
+    [
+        "os",
+        "subprocess",
+        "httpx",
+        "sqlite3",
+        "importlib",
+        "network",
+        "socket",
+        "storage",
+    ],
+)
+def test_source_import_allowlist_rejects_every_unapproved_root(
+    unsafe_module: str,
+) -> None:
+    source = MODULE_SOURCE.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_source_imports_are_isolated(f"{source}\nimport {unsafe_module}\n")
+
+
+@pytest.mark.parametrize(
     ("recording_state", "camera_smoothness"),
     [("saved", 3), ("skipped", None), ("failed", None)],
 )
@@ -477,15 +651,60 @@ def test_archive_content_contains_only_invented_ids_and_no_private_terms(
     assert tuple(
         item["item_id"] for item in snapshot["ratings"]  # type: ignore[index]
     ) == ITEM_IDS
-    searchable_values: list[str] = [archive.filename, json.dumps(snapshot)]
-    for worksheet in workbook.worksheets:
-        searchable_values.append(worksheet.title)
-        searchable_values.extend(
-            str(cell.value)
-            for row in worksheet.iter_rows()
-            for cell in row
-            if cell.value is not None
-        )
-    searchable_content = "\n".join(searchable_values).casefold()
+    assert workbook.sheetnames == ["Session", "Responses", "Recording"]
+    _assert_archive_has_no_private_content(archive)
 
-    assert not any(term in searchable_content for term in PROHIBITED_CONTENT_TERMS)
+
+def test_privacy_gate_rejects_private_term_in_raw_json_extra_field() -> None:
+    archive = _build_archive()
+    json_bytes = _archive_member_bytes(archive, "responses.json")
+    assert json_bytes.startswith(b"{")
+    mutated_json = (
+        b'{"private_marker":"sicq","private_marker":"safe",'
+        + json_bytes[1:]
+    )
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.json",
+        mutated_json,
+    )
+
+    with pytest.raises(AssertionError, match="sicq"):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_private_term_in_workbook_metadata() -> None:
+    archive = _build_archive()
+    workbook = openpyxl.load_workbook(
+        BytesIO(_archive_member_bytes(archive, "responses.xlsx"))
+    )
+    private_term = "\u81ea\u4f24"
+    workbook.properties.title = private_term
+    workbook_output = BytesIO()
+    workbook.save(workbook_output)
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        workbook_output.getvalue(),
+    )
+
+    with pytest.raises(AssertionError, match=private_term):
+        _assert_archive_has_no_private_content(mutated_archive)
+
+
+def test_privacy_gate_rejects_private_term_in_non_cell_xml_payload() -> None:
+    archive = _build_archive()
+    workbook_bytes = _archive_member_bytes(archive, "responses.xlsx")
+    mutated_workbook = _add_workbook_xml_payload(
+        workbook_bytes,
+        "customXml/item1.xml",
+        b'<?xml version="1.0" encoding="UTF-8"?><private>fasm</private>',
+    )
+    mutated_archive = _replace_archive_member(
+        archive,
+        "responses.xlsx",
+        mutated_workbook,
+    )
+
+    with pytest.raises(AssertionError, match="fasm"):
+        _assert_archive_has_no_private_content(mutated_archive)
