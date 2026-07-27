@@ -60,6 +60,12 @@ _OWNED_EXACT_KEYS = (
     _COMPLETE_KEY,
     "operational_export_retry",
 )
+_FINISH_EXACT_KEYS = (
+    *_OWNED_EXACT_KEYS,
+    "participant_identifier",
+    "operational_finish",
+    "operational_visit_selection",
+)
 _OWNED_PREFIXES = (
     "questionnaire::",
     "operational_recorder::",
@@ -182,11 +188,15 @@ def _clear_current_session() -> None:
 
 
 def _finish_current_session() -> None:
+    auth_source = st.session_state.get("auth_source")
     clear_owned_session_state(
         st.session_state,
-        exact_keys=_OWNED_EXACT_KEYS,
+        exact_keys=_FINISH_EXACT_KEYS,
         prefixes=_FINISH_PREFIXES,
     )
+    if auth_source == "admin":
+        st.session_state.pop("subject_id", None)
+        st.session_state.pop("visit", None)
     st.session_state[_COMPLETE_KEY] = True
 
 
@@ -467,18 +477,40 @@ recorder_status = render_browser_recorder(
     key=recorder_key,
     initial_mode="long",
 )
-continue_without_recording = False
+pending_terminal_key = f"operational_recorder::pending::{session_token}"
+terminal_status = None
 if recorder_status.state in {"skipped", "failed"}:
+    terminal_status = recorder_status
+    st.session_state[pending_terminal_key] = local_recording_metadata(
+        recorder_status
+    )
+elif recorder_status.state == "idle":
+    pending_status = _stored_recorder_status(
+        st.session_state.get(pending_terminal_key)
+    )
+    if (
+        pending_status is not None
+        and pending_status.state in {"skipped", "failed"}
+        and pending_status.mode == recorder_status.mode
+    ):
+        terminal_status = pending_status
+    else:
+        st.session_state.pop(pending_terminal_key, None)
+else:
+    st.session_state.pop(pending_terminal_key, None)
+
+gate_status = terminal_status or recorder_status
+continue_without_recording = False
+if terminal_status is not None:
     continue_without_recording = st.checkbox(
         "我确认继续填写问卷，不保存本次录制",
         key=f"operational_recording_continue::{session_token}",
     )
 
 recording_continuation_satisfied = recording_gate_satisfied(
-    recorder_status,
+    gate_status,
     continue_without_recording,
 )
-gate_status = recorder_status
 if not recording_continuation_satisfied:
     stored_status = _stored_recorder_status(record.get("recording"))
     if stored_status is not None:
@@ -492,6 +524,7 @@ if not recording_continuation_satisfied:
 if not recording_continuation_satisfied:
     st.info("请先完成本地录制保存，或在无法录制时明确确认继续。")
     st.stop()
+st.session_state.pop(pending_terminal_key, None)
 record["recording"] = local_recording_metadata(gate_status)
 
 st.warning("进入问卷后请勿刷新或关闭页面，否则当前问卷内容将丢失。")

@@ -42,6 +42,9 @@ SESSION_EXACT_KEYS = {
     "operational_export_error",
     "operational_saved_locally",
     "operational_complete",
+    "participant_identifier",
+    "operational_finish",
+    "operational_visit_selection",
 }
 SESSION_PREFIXES = (
     "questionnaire::",
@@ -158,12 +161,30 @@ def _signed_app(
     return app, recorder_calls
 
 
-def _admin_app(monkeypatch) -> AppTest:
+def _admin_app(
+    monkeypatch,
+    *,
+    status=RecorderStatus(mode="long", state="recording"),
+    render_questionnaire=None,
+    build_export=None,
+) -> AppTest:
     monkeypatch.setattr(
         browser_recorder,
         "render_browser_recorder",
-        lambda **kwargs: RecorderStatus(mode="long", state="recording"),
+        lambda **kwargs: status() if callable(status) else status,
     )
+    if render_questionnaire is not None:
+        monkeypatch.setattr(
+            questionnaire_ui,
+            "render_questionnaire",
+            render_questionnaire,
+        )
+    if build_export is not None:
+        monkeypatch.setattr(
+            questionnaire_export,
+            "build_participant_export",
+            build_export,
+        )
     app = AppTest.from_file(str(APP_PATH), default_timeout=10)
     app.secrets["APP_PASSWORD_SHA256"] = hashlib.sha256(
         b"admin-password"
@@ -184,6 +205,27 @@ def _saved_status() -> RecorderStatus:
         microphone_ready=True,
         saved_confirmed=True,
     )
+
+
+def _terminal_metadata(terminal_state: str) -> dict[str, object]:
+    return {
+        "version": 2,
+        "storage": "browser_local",
+        "status": terminal_state,
+        "mode": "long",
+        "duration_seconds": 0,
+        "camera_ready": False,
+        "microphone_ready": False,
+        "saved_confirmed": False,
+    }
+
+
+def _remaining_user_state_keys(app: AppTest) -> set[str]:
+    return {
+        str(key)
+        for key in app.session_state.filtered_state
+        if not str(key).startswith("$$")
+    }
 
 
 def _minimal_daily_answers(*, support: bool = False) -> dict[str, object]:
@@ -560,17 +602,85 @@ def test_skipped_or_failed_recording_requires_explicit_continue_confirmation(
     assert not app.exception
     assert len(questionnaire_calls) == 1
     stored = app.session_state["operational_record"]["recording"]
-    assert stored == {
-        "version": 2,
-        "storage": "browser_local",
-        "status": terminal_state,
-        "mode": "long",
-        "duration_seconds": 0,
-        "camera_ready": False,
-        "microphone_ready": False,
-        "saved_confirmed": False,
-    }
+    assert stored == _terminal_metadata(terminal_state)
     assert "error_code" not in stored
+
+
+@pytest.mark.parametrize("terminal_state", ["skipped", "failed"])
+def test_one_shot_terminal_recording_survives_idle_confirmation_rerun(
+    monkeypatch,
+    terminal_state,
+):
+    statuses = [
+        RecorderStatus(mode="long", state=terminal_state),
+        RecorderStatus(mode="long"),
+    ]
+    questionnaire_calls = []
+
+    def next_status():
+        return statuses.pop(0)
+
+    def incomplete_questionnaire(**kwargs):
+        questionnaire_calls.append(kwargs)
+        return kwargs["answers"], False
+
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=next_status,
+        render_questionnaire=incomplete_questionnaire,
+    )
+    pending_keys = {
+        str(key)
+        for key in app.session_state.filtered_state
+        if str(key).startswith("operational_recorder::pending::")
+    }
+    assert len(pending_keys) == 1
+    pending_key = pending_keys.pop()
+    assert "sub-001" not in pending_key
+    assert app.session_state[pending_key] == _terminal_metadata(terminal_state)
+    assert app.session_state["operational_record"]["recording"] == {}
+    confirmation = _element_by_label(
+        app.checkbox,
+        "我确认继续填写问卷，不保存本次录制",
+    )
+
+    confirmation.check().run()
+
+    assert not app.exception
+    assert statuses == []
+    assert len(recorder_calls) == 2
+    assert len(questionnaire_calls) == 1
+    assert app.session_state["operational_record"]["recording"] == (
+        _terminal_metadata(terminal_state)
+    )
+    assert pending_key not in app.session_state
+
+
+def test_pending_terminal_is_cleared_when_new_recording_activity_arrives(
+    monkeypatch,
+):
+    statuses = [
+        RecorderStatus(mode="long", state="skipped"),
+        RecorderStatus(mode="long", state="recording"),
+    ]
+
+    app, _ = _signed_app(
+        monkeypatch,
+        status=lambda: statuses.pop(0),
+    )
+    assert any(
+        str(key).startswith("operational_recorder::pending::")
+        for key in app.session_state.filtered_state
+    )
+
+    app.run()
+
+    assert statuses == []
+    assert app.session_state["operational_record"]["recording"] == {}
+    assert not any(
+        str(key).startswith("operational_recorder::pending::")
+        for key in app.session_state.filtered_state
+    )
 
 
 def test_questionnaire_callback_mutates_only_raw_session_record(monkeypatch):
@@ -792,6 +902,10 @@ def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch
     finish = _element_by_label(app.button, "完成本次会话")
     assert finish.disabled is True
     app.session_state["operational_admin_day::stale"] = 7
+    app.session_state["operational_visit_selection"] = "V1"
+    app.session_state["operational_recorder::pending::stale"] = (
+        _terminal_metadata("failed")
+    )
     _element_by_label(
         app.checkbox,
         "我确认问卷 ZIP 已保存到本地",
@@ -806,19 +920,59 @@ def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch
     assert app.session_state["subject_id"] == "sub-001"
     assert app.session_state["visit"] == "daily"
     assert app.session_state["operational_complete"] is True
-    assert "operational_record" not in app.session_state
-    assert "operational_export_bundle" not in app.session_state
-    assert "operational_export_error" not in app.session_state
-    assert "operational_saved_locally" not in app.session_state
-    assert not any(
-        str(key).startswith(SESSION_PREFIXES)
-        for key in app.session_state.filtered_state
-    )
+    assert _remaining_user_state_keys(app) == {
+        "authed",
+        "auth_source",
+        "subject_id",
+        "visit",
+        "operational_complete",
+    }
     visible = _visible_app_text(app)
     assert "本次会话已完成。" in visible
     assert not app.get("download_button")
     assert not app.slider
     assert not app.text_area
+
+
+def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatch):
+    bundle = LocalExportBundle(
+        filename="session-20260724-080910.zip",
+        mime_type="application/zip",
+        data=b"admin-finish-zip",
+    )
+    app = _admin_app(
+        monkeypatch,
+        status=_saved_status(),
+        render_questionnaire=_complete_renderer([]),
+        build_export=lambda *args, **kwargs: bundle,
+    )
+    _element_by_label(app.button, "确认日期").click().run()
+    assert not app.exception
+    assert app.session_state["auth_source"] == "admin"
+    assert app.session_state["subject_id"] == "sub-001"
+    assert app.session_state["visit"] == "daily"
+    assert "participant_identifier" in app.session_state
+    assert "operational_visit_selection" in app.session_state
+    assert any(
+        str(key).startswith("operational_admin_day::")
+        for key in app.session_state.filtered_state
+    )
+
+    _element_by_label(
+        app.checkbox,
+        "我确认问卷 ZIP 已保存到本地",
+    ).check().run()
+    _element_by_label(app.button, "完成本次会话").click().run()
+
+    assert not app.exception
+    assert _remaining_user_state_keys(app) == {
+        "authed",
+        "auth_source",
+        "operational_complete",
+    }
+    assert app.session_state["auth_source"] == "admin"
+    assert app.session_state["operational_complete"] is True
+    assert _visible_app_text(app).strip().endswith("本次会话已完成。")
 
 
 def test_visible_titles_and_generated_timestamps_are_neutral_and_utc_aware():
