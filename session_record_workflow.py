@@ -15,6 +15,20 @@ from questionnaire_specs import (
 
 
 _ALLOWED_VISITS = ("daily", *VISIT_INSTRUMENT_IDS)
+DAILY_CONTEXT_DEFAULTS: dict[str, object] = {
+    "sleep_hours": 7.0,
+    "mood_1to9": 5,
+    "stress_1to9": 4,
+    "pain_0to10": 1,
+    "nssi_urge_0to10": 0,
+    "coping_effect_1to5": 3,
+    "caffeine": "少量",
+    "exercise": "少量",
+    "tags": [],
+    "coping_used": [],
+    "narrative": "",
+    "triggers": "",
+}
 _TOKEN_RE = re.compile(r"[0-9a-f]{8}")
 _UTC_SECOND_ISO_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)"
@@ -706,8 +720,9 @@ def persist_daily_questionnaire(
     assert isinstance(formal_visits, dict)
     context = (
         {
-            key: _copy_raw_value(value)
-            for key, value in daily_context.items()
+            key: _raw_payload_copy(daily_context[key])
+            for key in DAILY_CONTEXT_DEFAULTS
+            if key in daily_context
         }
         if daily_context is not None
         else None

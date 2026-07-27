@@ -20,6 +20,7 @@ from record_store import (
     validate_subject_id,
 )
 from session_record_workflow import (
+    DAILY_CONTEXT_DEFAULTS,
     _daily_field_status,
     _formal_field_status,
     mark_questionnaire_visit_complete as _mark_questionnaire_visit_complete,
@@ -33,22 +34,6 @@ from upload_workflow import (
     UnsafeUploadSourceError,
     upload_private_snapshot,
 )
-
-
-DAILY_CONTEXT_DEFAULTS: dict[str, Any] = {
-    "sleep_hours": 7.0,
-    "mood_1to9": 5,
-    "stress_1to9": 4,
-    "pain_0to10": 1,
-    "nssi_urge_0to10": 0,
-    "coping_effect_1to5": 3,
-    "caffeine": "少量",
-    "exercise": "少量",
-    "tags": [],
-    "coping_used": [],
-    "narrative": "",
-    "triggers": "",
-}
 
 
 @dataclass(frozen=True)

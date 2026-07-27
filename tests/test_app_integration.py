@@ -1527,6 +1527,13 @@ def test_daily_context_seeds_all_scoped_fields_and_draft_persists_them():
     assert record["daily_context"] == saved_context
 
 
+def test_daily_context_defaults_are_reexported_from_the_pure_session_workflow():
+    workflow = _workflow()
+    from session_record_workflow import DAILY_CONTEXT_DEFAULTS
+
+    assert workflow.DAILY_CONTEXT_DEFAULTS is DAILY_CONTEXT_DEFAULTS
+
+
 def test_daily_context_defaults_only_fill_missing_persisted_values():
     workflow = _workflow()
     record = _record()

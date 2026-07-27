@@ -8,6 +8,7 @@ import pytest
 
 import session_record_workflow
 from session_record_workflow import (
+    DAILY_CONTEXT_DEFAULTS,
     clear_owned_session_state,
     create_session_record,
     mark_questionnaire_visit_complete,
@@ -859,6 +860,89 @@ def test_daily_persistence_preserves_answered_falsy_values_and_raw_context() -> 
     assert record["completion"]["answered_field_ids"]["daily"] == sorted(answered)
     assert record["completion"]["current_step"]["daily"] == 8
     assert set(record).isdisjoint({"derived_metrics", "safety_signals"})
+
+
+def test_daily_context_preserves_every_allowlisted_field() -> None:
+    record = _session_record(day=6)
+    context = {
+        "sleep_hours": 0.0,
+        "mood_1to9": 1,
+        "stress_1to9": 9,
+        "pain_0to10": 0,
+        "nssi_urge_0to10": 10,
+        "coping_effect_1to5": 1,
+        "caffeine": "none",
+        "exercise": "none",
+        "tags": [],
+        "coping_used": [],
+        "narrative": "",
+        "triggers": "",
+    }
+
+    persist_daily_questionnaire(
+        record,
+        {},
+        set(),
+        current_step=0,
+        daily_context=context,
+    )
+
+    assert tuple(DAILY_CONTEXT_DEFAULTS) == tuple(context)
+    assert record["daily_context"] == context
+
+
+def test_daily_context_allowlists_keys_and_recursively_scrubs_non_raw_data() -> None:
+    record = _session_record(day=6)
+    context = {
+        "sleep_hours": 7.0,
+        "tags": [
+            {
+                "label": "kept raw metadata",
+                "score": 99,
+                "nested": {
+                    "note": "kept",
+                    "risk_level": "high",
+                    "safety_signals": {"urgent": True},
+                    "thresholds": {"urgent": 1},
+                },
+            }
+        ],
+        "score": 99,
+        "risk": {"level": "high"},
+        "safety_signals": {"urgent": True},
+        "thresholds": {"urgent": 1},
+        "unknown_context": {"score": 100},
+    }
+
+    persist_daily_questionnaire(
+        record,
+        {},
+        set(),
+        current_step=0,
+        daily_context=context,
+    )
+
+    assert record["daily_context"] == {
+        "sleep_hours": 7.0,
+        "tags": [
+            {
+                "label": "kept raw metadata",
+                "nested": {"note": "kept"},
+            }
+        ],
+    }
+    serialized = repr(record["daily_context"])
+    assert all(
+        key not in serialized
+        for key in (
+            "score",
+            "risk",
+            "risk_level",
+            "safety_signals",
+            "thresholds",
+            "unknown_context",
+        )
+    )
 
 
 def test_daily_negative_branch_removes_stale_hidden_answers() -> None:
