@@ -88,12 +88,16 @@ PROGRESS_STATES = (
     "confirmation",
 )
 EXPECTED_SIDEBAR_INVENTORIES = {
-    "access": ((), ()),
+    "access": (),
     **{
         state: (
-            ("SESSION PROGRESS",),
-            tuple(
-                f"**当前 · {label}**" if state == label_state else label
+            ("caption", "value", "SESSION PROGRESS"),
+            *(
+                (
+                    "markdown",
+                    "value",
+                    f"**当前 · {label}**" if state == label_state else label,
+                )
                 for label, label_state in zip(
                     PROGRESS_LABELS,
                     PROGRESS_STATES,
@@ -200,6 +204,16 @@ EXPECTED_DOWNLOAD_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     ("checkbox", "value", False),
     ("checkbox", "label", "我已确认合成 ZIP 已保存在本机"),
     ("button", "label", "完成演示"),
+)
+EXPECTED_DOWNLOAD_ERROR_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
+    ("subheader", "value", "下载合成演示数据"),
+    (
+        "caption",
+        "value",
+        "下载文件仅包含合成演示内容，并且只会保存在本机。",
+    ),
+    ("warning", "value", "下载文件暂时无法生成，请重试。"),
+    ("button", "label", "重试生成"),
 )
 EXPECTED_CONFIRMATION_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     (
@@ -364,7 +378,7 @@ def _visible_text(app: AppTest) -> str:
     return "\n".join(values)
 
 
-def _main_content_inventory(app: AppTest):
+def _content_inventory(root):
     inventory = []
 
     def visit(node):
@@ -397,7 +411,7 @@ def _main_content_inventory(app: AppTest):
             and markdown_values[0].strip().count("</style>") == 1
         )
 
-        structural_types = {"main", "vertical"}
+        structural_types = {"main", "sidebar", "vertical"}
         if not is_standalone_stylesheet and (
             node_type not in structural_types or visible_fields
         ):
@@ -414,8 +428,12 @@ def _main_content_inventory(app: AppTest):
             for child in children.values():
                 visit(child)
 
-    visit(app.main)
+    visit(root)
     return tuple(inventory)
+
+
+def _main_content_inventory(app: AppTest):
+    return _content_inventory(app.main)
 
 
 def _authenticate(app: AppTest) -> AppTest:
@@ -545,11 +563,7 @@ def _assert_showcase_only_inventory(
     for term in VISIBLE_FORBIDDEN_TERMS:
         assert term.casefold() not in folded_text, term
     assert _main_content_inventory(app) == expected_inventory
-    sidebar_inventory = (
-        tuple(element.value for element in app.sidebar.caption),
-        tuple(element.value for element in app.sidebar.markdown),
-    )
-    assert sidebar_inventory == EXPECTED_SIDEBAR_INVENTORIES[step]
+    assert _content_inventory(app.sidebar) == EXPECTED_SIDEBAR_INVENTORIES[step]
 
 
 def test_showcase_fails_closed_without_configured_password(monkeypatch):
@@ -1162,6 +1176,11 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     assert not app.exception
     assert len(attempts) == 1
     assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    _assert_showcase_only_inventory(
+        app,
+        step="download",
+        expected_inventory=EXPECTED_DOWNLOAD_ERROR_INVENTORY,
+    )
     _element_by_key(app.button, SHOWCASE_RETRY_BUTTON_KEY).click().run()
 
     assert not app.exception
@@ -1175,6 +1194,11 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     assert len(app.get("download_button")) == 1
     assert app.session_state["showcase_step"] == "download"
     assert _element_by_key(app.button, "finish_download").disabled is True
+    _assert_showcase_only_inventory(
+        app,
+        step="download",
+        expected_inventory=EXPECTED_DOWNLOAD_INVENTORY,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1512,6 +1536,63 @@ def test_inventory_gate_rejects_canonical_forbidden_copy_drift(tmp_path):
             mutated_app,
             step="access",
             expected_inventory=EXPECTED_ACCESS_INVENTORY,
+        )
+
+
+def test_sidebar_inventory_rejects_unknown_visible_node_type(tmp_path):
+    source = APP.read_text(encoding="utf-8")
+    progress_anchor = 'st.sidebar.caption("SESSION PROGRESS")\n'
+    mutated_source = source.replace(
+        progress_anchor,
+        progress_anchor + 'st.sidebar.error("额外合成演示信息")\n',
+        1,
+    )
+    assert mutated_source != source
+    mutated_path = tmp_path / "mutated_showcase_sidebar.py"
+    mutated_path.write_text(mutated_source, encoding="utf-8")
+    mutated_app = _app_with_password(mutated_path)
+    mutated_app.session_state["showcase_authenticated"] = True
+    mutated_app.session_state["showcase_step"] = "overview"
+    mutated_app.run()
+
+    assert not mutated_app.exception
+    with pytest.raises(AssertionError):
+        _assert_showcase_only_inventory(
+            mutated_app,
+            step="overview",
+            expected_inventory=EXPECTED_OVERVIEW_INVENTORY,
+        )
+
+
+def test_download_error_inventory_rejects_extra_neutral_copy(tmp_path):
+    source = APP.read_text(encoding="utf-8")
+    retry_anchor = '    st.warning("下载文件暂时无法生成，请重试。")\n'
+    mutated_source = source.replace(
+        retry_anchor,
+        retry_anchor + '    st.info("额外合成演示信息")\n',
+        1,
+    )
+    assert mutated_source != source
+    mutated_path = tmp_path / "mutated_showcase_download_error.py"
+    mutated_path.write_text(mutated_source, encoding="utf-8")
+    mutated_app = _app_with_password(mutated_path)
+    mutated_app.session_state["showcase_authenticated"] = True
+    mutated_app.session_state["showcase_step"] = "download"
+    mutated_app.session_state["showcase_recorder_status"] = RecorderStatus(
+        state="saved",
+        saved_confirmed=True,
+    )
+    mutated_app.session_state[SHOWCASE_EXPORT_ERROR_KEY] = True
+    for key, value in SYNTHETIC_RESPONSES.items():
+        mutated_app.session_state[key] = value
+    mutated_app.run()
+
+    assert not mutated_app.exception
+    with pytest.raises(AssertionError):
+        _assert_showcase_only_inventory(
+            mutated_app,
+            step="download",
+            expected_inventory=EXPECTED_DOWNLOAD_ERROR_INVENTORY,
         )
 
 
