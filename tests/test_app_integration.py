@@ -38,23 +38,24 @@ def _workflow():
 
 def _record(day=6):
     return {
+        "schema_version": 5,
         "record_id": "sub-001_20260724_deadbeef",
         "subject_id": "sub-001",
         "record_date": "2026-07-24",
         "intervention_day": day,
+        "visit": "daily",
         "revision": 3,
         "instrument_versions": {
             "daily_nssi_ema": "1.0",
             "weekly_nssi": "1.0",
             "formal_nssi_crf": "1.0",
         },
+        "daily_context": {},
         "daily_core": {},
         "conditional_details": {},
         "weekly_extension": {},
         "formal_visits": {},
         "field_status": {},
-        "derived_metrics": {},
-        "safety_signals": {},
         "recording": {},
         "completion": {
             "status": "draft",
@@ -63,6 +64,8 @@ def _record(day=6):
             "questionnaire_visits": {},
         },
         "upload": {"json": "pending", "video": "pending"},
+        "created_at_iso": "2026-07-24T08:09:10+00:00",
+        "updated_at_iso": "2026-07-24T08:09:10+00:00",
     }
 
 
@@ -624,7 +627,7 @@ def test_app_admin_selects_day_but_signed_link_never_uses_unsigned_day():
     assert "无法确认本次干预日期，请联系研究团队。" in source
 
 
-def test_daily_persistence_keeps_only_active_answered_and_removes_stale_safety():
+def test_daily_persistence_keeps_only_active_answered_raw_values():
     workflow = _workflow()
     record = _record(day=6)
     record["conditional_details"] = {
@@ -661,17 +664,14 @@ def test_daily_persistence_keeps_only_active_answered_and_removes_stale_safety()
     }
     assert record["conditional_details"] == {}
     assert record["weekly_extension"] == {}
-    assert record["derived_metrics"]["daily"]["nssi_total_count_24h"] == 0
-    assert record["safety_signals"] == {
-        "suicide_thought_present_24h": False,
-        "V1_pss_positive": True,
-    }
+    assert "derived_metrics" not in record
+    assert "safety_signals" not in record
     assert record["completion"]["answered_field_ids"]["daily"] == sorted(filtered)
     assert record["completion"]["current_step"]["daily"] == 4
     assert record["field_status"]["daily"]["nssi_medical_care_24h"] == "not_applicable"
 
 
-def test_daily_weekly_sicq_scores_only_current_active_answered_values():
+def test_daily_weekly_sicq_preserves_current_raw_values_without_scoring():
     workflow = _workflow()
     record = _record(day=7)
     core = {
@@ -688,17 +688,14 @@ def test_daily_weekly_sicq_scores_only_current_active_answered_values():
     workflow.persist_daily_questionnaire(record, answers, answered, current_step=1)
 
     assert record["weekly_extension"] == weekly
-    assert record["derived_metrics"]["sicq_weekly"] == {
-        "total": 4,
-        "complete": True,
-        "scored_items": [0, 0, 0, 0, 0, 0, 4],
-    }
+    assert record["weekly_extension"]["sicq_7"] == 0
+    assert "derived_metrics" not in record
 
 
-def test_formal_persistence_filters_branches_and_unanswered_pss_signal():
+def test_formal_persistence_filters_branches_and_unanswered_raw_pss():
     workflow = _workflow()
     record = _record()
-    record["safety_signals"]["V1_pss_positive"] = True
+    record["safety_signals"] = {"V1_pss_positive": True}
     answers = {
         "nssi_ideation_6m_present": False,
         "nssi_ideation_6m_frequency": 6,
@@ -724,13 +721,13 @@ def test_formal_persistence_filters_branches_and_unanswered_pss_signal():
         "nssi_ideation_6m_present": False
     }
     assert visit["instruments"]["pss"]["raw_answers"] == {"pss_1": False}
-    assert record["safety_signals"]["V1_pss_positive"] is False
+    assert "safety_signals" not in record
     assert record["field_status"]["V1"]["nssi_ideation_6m_frequency"] == "not_applicable"
     assert record["field_status"]["V1"]["pss_2"] == "missing"
     assert record["completion"]["answered_field_ids"]["V1"] == sorted(filtered)
 
 
-def test_formal_instrument_payload_has_protocol_metadata_and_defined_score():
+def test_formal_instrument_payload_has_protocol_metadata_without_score():
     workflow = _workflow()
     record = _record()
     answers = {f"dshi_lifetime_{index}": 1 for index in range(1, 7)}
@@ -743,22 +740,27 @@ def test_formal_instrument_payload_has_protocol_metadata_and_defined_score():
     assert payload["instrument_id"] == "dshi_lifetime"
     assert payload["instrument_version"] == "1.0"
     assert "version" not in payload
+    assert payload["label"] == FORMAL_INSTRUMENTS["dshi_lifetime"].label
     assert payload["time_window"] == FORMAL_INSTRUMENTS["dshi_lifetime"].time_window
     assert payload["raw_answers"] == answers
-    assert payload["scored_answers"] == answers
-    assert payload["score"] == {"total": 6, "complete": True}
+    assert "scored_answers" not in payload
+    assert "score" not in payload
     assert payload["complete"] is True
 
 
 def test_questionnaire_answers_restore_only_the_current_visit_sections():
     workflow = _workflow()
-    record = _record()
-    record["daily_core"] = {"nssi_urge_now": 2}
+    record = _record(day=7)
+    record["daily_core"] = {
+        "nssi_thought_present_24h": True,
+        "nssi_urge_now": 2,
+    }
     record["conditional_details"] = {"nssi_thought_frequency_24h": 3}
     record["weekly_extension"] = {"sicq_1": 1}
     record["formal_visits"]["V3"] = {"raw_answers": {"pss_1": True}}
 
     assert workflow.questionnaire_answers(record, "daily") == {
+        "nssi_thought_present_24h": True,
         "nssi_urge_now": 2,
         "nssi_thought_frequency_24h": 3,
         "sicq_1": 1,
@@ -835,7 +837,7 @@ def test_persisted_formal_pss_support_survives_reload_and_upload_ready_retry(tmp
     assert workflow.persisted_support_needed(reloaded, "V1") is True
 
 
-def test_daily_safety_uses_canonical_suicide_frequency_and_medical_keys():
+def test_daily_raw_persistence_does_not_write_safety_classifications():
     workflow = _workflow()
     record = _record(day=6)
     answers = {
@@ -848,19 +850,15 @@ def test_daily_safety_uses_canonical_suicide_frequency_and_medical_keys():
         "nssi_resistance_confidence_now": 7,
     }
     workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
-    assert record["safety_signals"] == {
-        "suicide_thought_present_24h": True,
-        "suicide_thought_frequency_24h": 3,
-        "medical_care_required_24h": True,
-    }
+    assert "safety_signals" not in record
 
     answers["nssi_behavior_present_24h"] = False
     answers["suicide_thought_present_24h"] = False
     workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
-    assert record["safety_signals"] == {"suicide_thought_present_24h": False}
+    assert "safety_signals" not in record
 
 
-def test_daily_safety_preserves_explicit_false_for_an_active_medical_branch():
+def test_daily_raw_persistence_preserves_explicit_false_medical_answer():
     workflow = _workflow()
     record = _record(day=6)
     answers = {
@@ -874,8 +872,8 @@ def test_daily_safety_preserves_explicit_false_for_an_active_medical_branch():
 
     workflow.persist_daily_questionnaire(record, answers, set(answers), current_step=4)
 
-    assert record["safety_signals"]["medical_care_required_24h"] is False
-    assert "nssi_medical_care_24h" not in record["safety_signals"]
+    assert record["conditional_details"]["nssi_medical_care_24h"] is False
+    assert "safety_signals" not in record
 
 
 def test_archived_uploaded_record_uses_the_completed_lifecycle_policy(tmp_path):
@@ -960,6 +958,28 @@ def test_support_signal_uses_only_current_active_answered_values():
     ) is False
     assert workflow.support_needed("V1", {"pss_1": True}, set(), 6) is False
     assert workflow.support_needed("V1", {"pss_1": True}, {"pss_1"}, 6) is True
+
+
+def test_app_workflow_import_graph_has_no_questionnaire_scoring_dependency():
+    source = (ROOT / "app_workflow.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden = {
+        "questionnaire_scoring",
+        "daily_derived_metrics",
+        "score_sicq",
+        "score_formal_instrument",
+        "_formal_scored_answers",
+    }
+    referenced = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert forbidden.isdisjoint(referenced | imports)
 
 
 def test_upload_error_copy_separates_failure_from_cleanup_pending(tmp_path):

@@ -199,7 +199,8 @@ def test_negative_daily_record_round_trip_preserves_false_zero_and_upload_readin
         record["field_status"]["daily"][question.id] == "not_applicable"
         for question in DAILY_CONDITIONAL
     )
-    assert record["safety_signals"] == {"suicide_thought_present_24h": False}
+    assert "safety_signals" not in record
+    assert "derived_metrics" not in record
 
     mark_questionnaire_visit_complete(record, "daily")
     store.save(record)
@@ -216,7 +217,7 @@ def test_negative_daily_record_round_trip_preserves_false_zero_and_upload_readin
     assert upload_ready_for_visit(reloaded, "daily") is True
 
 
-def test_positive_daily_branches_persist_then_drop_stale_values_and_safety(tmp_path):
+def test_positive_daily_branches_persist_then_drop_stale_raw_values(tmp_path):
     store = DailyRecordStore(tmp_path)
     record = store.get_or_create(SUBJECT_ID, RECORD_DATE, intervention_day=6)
     counts = {field_id: index for index, field_id in enumerate(COUNT_FIELDS)}
@@ -246,11 +247,8 @@ def test_positive_daily_branches_persist_then_drop_stale_values_and_safety(tmp_p
         for key, value in positive.items()
         if key not in {question.id for question in DAILY_CORE}
     }
-    assert record["safety_signals"] == {
-        "suicide_thought_present_24h": True,
-        "suicide_thought_frequency_24h": 3,
-        "medical_care_required_24h": True,
-    }
+    assert "safety_signals" not in record
+    assert "derived_metrics" not in record
 
     stale_after_controller_change = dict(positive)
     stale_after_controller_change.update(
@@ -268,8 +266,8 @@ def test_positive_daily_branches_persist_then_drop_stale_values_and_safety(tmp_p
     )
 
     assert record["conditional_details"] == {}
-    assert record["safety_signals"] == {"suicide_thought_present_24h": False}
-    assert record["derived_metrics"]["daily"]["nssi_total_count_24h"] == 0
+    assert "safety_signals" not in record
+    assert "derived_metrics" not in record
 
     active_false_safety = {
         **positive,
@@ -279,13 +277,11 @@ def test_positive_daily_branches_persist_then_drop_stale_values_and_safety(tmp_p
     persist_daily_questionnaire(
         record, active_false_safety, set(active_false_safety), current_step=19
     )
-    assert record["safety_signals"] == {
-        "suicide_thought_present_24h": False,
-        "medical_care_required_24h": False,
-    }
+    assert record["conditional_details"]["nssi_medical_care_24h"] is False
+    assert "safety_signals" not in record
 
 
-def test_day7_keeps_daily_and_weekly_sections_distinct_and_scores_sicq_once(tmp_path):
+def test_day7_keeps_daily_and_weekly_raw_sections_distinct(tmp_path):
     store = DailyRecordStore(tmp_path)
     record = store.get_or_create(SUBJECT_ID, RECORD_DATE, intervention_day=7)
     daily = {
@@ -315,16 +311,11 @@ def test_day7_keeps_daily_and_weekly_sections_distinct_and_scores_sicq_once(tmp_
     assert set(record["weekly_extension"]) == {q.id for q in weekly_questions}
     assert not set(record["daily_core"]) & set(record["weekly_extension"])
     assert record["weekly_extension"]["sicq_7"] == 4
-    expected_scored = [weekly[f"sicq_{index}"] for index in range(1, 7)] + [0]
-    assert record["derived_metrics"]["sicq_weekly"] == {
-        "total": sum(expected_scored),
-        "complete": True,
-        "scored_items": expected_scored,
-    }
-    assert record["derived_metrics"]["daily"]["nssi_total_count_24h"] == 3
+    assert "derived_metrics" not in record
+    assert "safety_signals" not in record
 
 
-def test_formal_v5_matches_v4_metadata_scoring_and_pss_safety_boundary(tmp_path):
+def test_formal_v5_matches_v4_raw_metadata_and_pss_boundary(tmp_path):
     assert VISIT_INSTRUMENT_IDS["V5"] == VISIT_INSTRUMENT_IDS["V4"]
     store = DailyRecordStore(tmp_path)
     record = store.get_or_create(SUBJECT_ID, RECORD_DATE, intervention_day=7)
@@ -340,27 +331,28 @@ def test_formal_v5_matches_v4_metadata_scoring_and_pss_safety_boundary(tmp_path)
         assert {
             "instrument_id",
             "instrument_version",
+            "label",
             "time_window",
             "raw_answers",
-            "scored_answers",
             "completeness",
-            "score",
             "complete",
         } == set(payload)
         assert payload["instrument_id"] == instrument_id
         assert payload["instrument_version"] == "1.0"
+        assert payload["label"] == FORMAL_INSTRUMENTS[instrument_id].label
         assert payload["time_window"] == FORMAL_INSTRUMENTS[instrument_id].time_window
 
-    dshi_score = visit["instruments"]["dshi_lifetime"]["score"]
-    assert dshi_score["complete"] is True
-    assert dshi_score["total"] == 6
-    assert "nssi_total_count_24h" not in record["derived_metrics"].get("daily", {})
-    assert record["safety_signals"] == {"V5_pss_positive": True}
+    assert visit["instruments"]["sicq"]["raw_answers"]["sicq_7"] == answers[
+        "sicq_7"
+    ]
+    assert "derived_metrics" not in record
+    assert "safety_signals" not in record
 
     persist_formal_questionnaire(
         record, "V5", {"pss_1": True}, set(), current_step=0
     )
-    assert "V5_pss_positive" not in record["safety_signals"]
+    assert record["formal_visits"]["V5"]["raw_answers"] == {}
+    assert "safety_signals" not in record
 
 
 def test_fresh_store_resumes_partial_and_completed_visits_without_sibling_leak(tmp_path):

@@ -10,8 +10,21 @@ import session_record_workflow
 from session_record_workflow import (
     clear_owned_session_state,
     create_session_record,
+    mark_questionnaire_visit_complete,
+    persist_daily_questionnaire,
+    persist_formal_questionnaire,
+    questionnaire_answers,
+    questionnaire_visit_complete,
     session_record_matches,
 )
+from questionnaire_specs import (
+    DAILY_CONDITIONAL,
+    DAILY_CORE,
+    FORMAL_INSTRUMENTS,
+    VISIT_INSTRUMENT_IDS,
+    WEEKLY_INSTRUMENTS,
+)
+from questionnaire_ui import formal_flow
 
 
 WORKFLOW_SOURCE = Path(__file__).resolve().parents[1] / "session_record_workflow.py"
@@ -68,6 +81,36 @@ PROHIBITED_RECORD_KEYS = {
     "media_bytes",
     "server_storage",
 }
+
+
+def _session_record(*, day: int = 7, visit: str = "daily") -> dict[str, object]:
+    return create_session_record(
+        **{
+            **VALID_CREATION,
+            "intervention_day": day,
+            "visit": visit,
+        }
+    )
+
+
+def _raw_value(question: object) -> object:
+    kind = question.kind
+    if kind == "boolean":
+        return False
+    if kind in {"slider", "integer"}:
+        return question.min_value
+    if kind == "multiselect":
+        return []
+    if kind == "text":
+        return ""
+    raise AssertionError(f"unsupported question kind: {kind}")
+
+
+def _formal_answers(visit: str) -> dict[str, object]:
+    return {
+        question.id: _raw_value(question)
+        for question in formal_flow(visit, {})
+    }
 
 
 def _literal_record_keys(tree: ast.AST) -> set[str]:
@@ -770,6 +813,392 @@ def test_session_record_matches_does_not_mutate_the_record() -> None:
     assert record == before
 
 
+def test_daily_persistence_preserves_answered_falsy_values_and_raw_context() -> None:
+    record = _session_record(day=6)
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": True,
+        "nssi_other_description_24h": "",
+        "nssi_motives_24h": [],
+        "nssi_other_count_24h": 0,
+        "nssi_trigger_24h": "unanswered stale value",
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+    answered = set(answers) - {"nssi_trigger_24h"}
+    context = {"sleep_hours": 0.0, "tags": [], "narrative": ""}
+
+    persisted = persist_daily_questionnaire(
+        record,
+        answers,
+        answered,
+        current_step=8,
+        daily_context=context,
+    )
+
+    assert persisted == {
+        field_id: answers[field_id]
+        for field_id in answered
+    }
+    assert record["daily_context"] == context
+    assert record["daily_core"] == {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": True,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 7,
+    }
+    assert record["conditional_details"] == {
+        "nssi_other_description_24h": "",
+        "nssi_motives_24h": [],
+        "nssi_other_count_24h": 0,
+    }
+    assert record["weekly_extension"] == {}
+    assert record["field_status"]["daily"]["nssi_trigger_24h"] == "missing"
+    assert record["completion"]["answered_field_ids"]["daily"] == sorted(answered)
+    assert record["completion"]["current_step"]["daily"] == 8
+    assert set(record).isdisjoint({"derived_metrics", "safety_signals"})
+
+
+def test_daily_negative_branch_removes_stale_hidden_answers() -> None:
+    record = _session_record(day=6)
+    record["conditional_details"] = {
+        "nssi_thought_frequency_24h": 4,
+        "nssi_medical_care_24h": True,
+    }
+    answers = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 0,
+        "nssi_thought_frequency_24h": 4,
+        "nssi_medical_care_24h": True,
+    }
+
+    persisted = persist_daily_questionnaire(
+        record, answers, set(answers), current_step=4
+    )
+
+    expected = {
+        field_id: answers[field_id]
+        for field_id in {question.id for question in DAILY_CORE}
+    }
+    assert persisted == expected
+    assert record["conditional_details"] == {}
+    assert all(
+        record["field_status"]["daily"][question.id] == "not_applicable"
+        for question in DAILY_CONDITIONAL
+    )
+
+
+def test_weekly_answers_are_kept_only_on_protocol_weekly_days() -> None:
+    weekly_questions = [
+        question
+        for instrument in WEEKLY_INSTRUMENTS
+        for question in instrument.questions
+    ]
+    weekly = {question.id: _raw_value(question) for question in weekly_questions}
+    core = {
+        "nssi_thought_present_24h": False,
+        "nssi_behavior_present_24h": False,
+        "suicide_thought_present_24h": False,
+        "nssi_urge_now": 0,
+        "nssi_resistance_confidence_now": 0,
+    }
+    weekly_record = _session_record(day=7)
+    persist_daily_questionnaire(
+        weekly_record,
+        {**core, **weekly},
+        set(core) | set(weekly),
+        current_step=len(core) + len(weekly) - 1,
+    )
+    assert weekly_record["weekly_extension"] == weekly
+    assert weekly_record["weekly_extension"]["sicq_7"] == weekly["sicq_7"]
+
+    ordinary_record = _session_record(day=6)
+    ordinary_record["weekly_extension"] = dict(weekly)
+    persist_daily_questionnaire(
+        ordinary_record,
+        {**core, **weekly},
+        set(core) | set(weekly),
+        current_step=4,
+    )
+    assert ordinary_record["weekly_extension"] == {}
+    assert set(ordinary_record["field_status"]["daily"]).isdisjoint(weekly)
+
+
+@pytest.mark.parametrize("visit", tuple(VISIT_INSTRUMENT_IDS))
+def test_formal_persistence_uses_protocol_order_and_raw_metadata(visit: str) -> None:
+    record = _session_record(visit=visit)
+    answers = _formal_answers(visit)
+    answers["sicq_7"] = 4
+
+    persisted = persist_formal_questionnaire(
+        record,
+        visit,
+        answers,
+        set(answers),
+        current_step=max(0, len(answers) - 1),
+    )
+
+    visit_payload = record["formal_visits"][visit]
+    assert persisted == answers
+    assert visit_payload["raw_answers"] == answers
+    assert tuple(visit_payload["instruments"]) == VISIT_INSTRUMENT_IDS[visit]
+    assert visit_payload["complete"] is True
+    for instrument_id, payload in visit_payload["instruments"].items():
+        spec = FORMAL_INSTRUMENTS[instrument_id]
+        assert set(payload) == {
+            "instrument_id",
+            "instrument_version",
+            "label",
+            "time_window",
+            "raw_answers",
+            "completeness",
+            "complete",
+        }
+        assert payload["instrument_id"] == instrument_id
+        assert payload["instrument_version"] == "1.0"
+        assert payload["label"] == spec.label
+        assert payload["time_window"] == spec.time_window
+    if "sicq" in visit_payload["instruments"]:
+        assert visit_payload["instruments"]["sicq"]["raw_answers"]["sicq_7"] == 4
+    assert set(record).isdisjoint({"derived_metrics", "safety_signals"})
+    assert "score" not in repr(visit_payload)
+    assert "scored_answers" not in repr(visit_payload)
+
+
+def test_formal_persistence_filters_hidden_and_unanswered_values() -> None:
+    record = _session_record(visit="V1")
+    answers = {
+        "nssi_ideation_6m_present": False,
+        "nssi_ideation_6m_frequency": 6,
+        "pss_1": False,
+        "pss_2": True,
+    }
+
+    persisted = persist_formal_questionnaire(
+        record,
+        "V1",
+        answers,
+        {
+            "nssi_ideation_6m_present",
+            "nssi_ideation_6m_frequency",
+            "pss_1",
+        },
+        current_step=3,
+    )
+
+    assert persisted == {"nssi_ideation_6m_present": False, "pss_1": False}
+    assert record["field_status"]["V1"]["nssi_ideation_6m_frequency"] == (
+        "not_applicable"
+    )
+    assert record["field_status"]["V1"]["pss_2"] == "missing"
+
+
+def test_questionnaire_answer_restoration_is_scoped_and_fails_closed() -> None:
+    record = _session_record()
+    record["daily_core"] = {"nssi_urge_now": 0}
+    record["conditional_details"] = {"nssi_trigger_24h": ""}
+    record["weekly_extension"] = {"sicq_1": 0}
+    record["formal_visits"] = {
+        "V3": {"raw_answers": {"pss_1": False}}
+    }
+
+    assert questionnaire_answers(record, "daily") == {
+        "nssi_urge_now": 0,
+        "sicq_1": 0,
+    }
+    assert questionnaire_answers(record, "V3") == {"pss_1": False}
+    assert questionnaire_answers(record, "V1") == {}
+    assert questionnaire_answers(record, "V2") == {}
+    record["formal_visits"] = []
+    assert questionnaire_answers(record, "V3") == {}
+
+
+@pytest.mark.parametrize(
+    ("call", "expected_message"),
+    [
+        (
+            lambda record: persist_daily_questionnaire(
+                record, [], set(), current_step=0
+            ),
+            "answers are invalid",
+        ),
+        (
+            lambda record: persist_daily_questionnaire(
+                record, {}, {False}, current_step=0
+            ),
+            "answered field ids are invalid",
+        ),
+        (
+            lambda record: persist_daily_questionnaire(
+                record, {}, set(), current_step=False
+            ),
+            "current step is invalid",
+        ),
+        (
+            lambda record: persist_daily_questionnaire(
+                record, {}, set(), current_step=0, daily_context=[]
+            ),
+            "daily context is invalid",
+        ),
+        (
+            lambda record: persist_formal_questionnaire(
+                record, "V2", {}, set(), current_step=0
+            ),
+            "visit is invalid",
+        ),
+    ],
+)
+def test_questionnaire_persistence_rejects_malformed_inputs_atomically(
+    call, expected_message: str
+) -> None:
+    record = _session_record()
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError, match=expected_message):
+        call(record)
+
+    assert record == before
+
+
+def test_questionnaire_persistence_rejects_malformed_record_state_atomically() -> None:
+    record = _session_record()
+    record["completion"]["current_step"] = {"daily": False}
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError, match="record is invalid"):
+        persist_daily_questionnaire(record, {}, set(), current_step=0)
+
+    assert record == before
+
+
+def test_questionnaire_persistence_scrubs_hostile_legacy_non_raw_fields() -> None:
+    record = _session_record()
+    record.update(
+        {
+            "derived_metrics": {"participant_score": 99},
+            "safety_signals": {"risk_level": "high"},
+            "score": 99,
+            "risk_level": "high",
+            "thresholds": {"urgent": 1},
+        }
+    )
+    record["formal_visits"]["V3"] = {
+        "raw_answers": {"pss_1": False},
+        "instruments": {
+            "pss": {
+                "instrument_id": "pss",
+                "raw_answers": {"pss_1": False},
+                "scored_answers": {"pss_1": False},
+                "score": {"risk": "hidden"},
+            }
+        },
+        "complete": False,
+        "hidden_classification": "legacy",
+    }
+
+    persist_daily_questionnaire(record, {}, set(), current_step=0)
+
+    serialized = repr(record)
+    for key in (
+        "derived_metrics",
+        "safety_signals",
+        "scored_answers",
+        "score",
+        "risk",
+        "risk_level",
+        "thresholds",
+        "hidden_classification",
+    ):
+        assert key not in serialized
+
+
+def test_questionnaire_completion_records_timestamp_revision_and_chronology() -> None:
+    record = _session_record()
+
+    mark_questionnaire_visit_complete(
+        record,
+        "daily",
+        completed_at_iso="2026-07-24T08:10:11Z",
+    )
+
+    assert record["completion"]["status"] == "complete"
+    assert record["completion"]["questionnaire_visits"]["daily"] == {
+        "status": "complete",
+        "revision": 1,
+        "completed_at_iso": "2026-07-24T08:10:11Z",
+    }
+    assert record["updated_at_iso"] == "2026-07-24T08:10:11Z"
+    assert questionnaire_visit_complete(record, "daily") is True
+    record["revision"] = 2
+    assert questionnaire_visit_complete(record, "daily") is False
+
+
+@pytest.mark.parametrize(
+    ("visit", "timestamp"),
+    [
+        ("V2", "2026-07-24T08:10:11Z"),
+        ("daily", "2026-07-24T08:10:11"),
+        ("daily", "2026-07-24T08:10:11.001+00:00"),
+        ("daily", "2026-07-24T16:10:11+08:00"),
+        ("daily", "2026-07-24T08:09:09Z"),
+    ],
+)
+def test_questionnaire_completion_rejects_invalid_metadata_atomically(
+    visit: str, timestamp: str
+) -> None:
+    record = _session_record()
+    before = deepcopy(record)
+
+    with pytest.raises(ValueError):
+        mark_questionnaire_visit_complete(
+            record,
+            visit,
+            completed_at_iso=timestamp,
+        )
+
+    assert record == before
+
+
+def test_questionnaire_visit_complete_fails_closed_on_malformed_state() -> None:
+    record = _session_record()
+    record["completion"]["questionnaire_visits"] = {
+        "daily": {
+            "status": "complete",
+            "revision": 1,
+            "completed_at_iso": "not-a-time",
+        }
+    }
+    assert questionnaire_visit_complete(record, "daily") is False
+    assert questionnaire_visit_complete(record, "V2") is False
+
+
+def test_raw_workflow_source_has_no_scoring_imports_or_calls() -> None:
+    source = WORKFLOW_SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden = {
+        "questionnaire_scoring",
+        "daily_derived_metrics",
+        "score_sicq",
+        "_formal_scored_answers",
+        "score_formal_instrument",
+    }
+    referenced = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert forbidden.isdisjoint(referenced | imported)
+
+
 def test_clear_owned_session_state_deletes_only_owned_exact_and_prefix_keys() -> None:
     state = {
         "authed": True,
@@ -996,7 +1425,9 @@ def test_session_record_workflow_has_no_external_capability_calls_or_keys() -> N
     assert referenced_names.isdisjoint(forbidden_identifiers)
     assert referenced_attributes.isdisjoint(forbidden_identifiers)
     assert called_identifiers.isdisjoint(prohibited_calls)
-    assert _literal_record_keys(tree).isdisjoint(PROHIBITED_RECORD_KEYS)
+    assert _literal_record_keys(tree).isdisjoint(
+        PROHIBITED_RECORD_KEYS - {"derived_metrics", "safety_signals"}
+    )
 
 
 def test_capability_ast_is_precise_about_identifiers_and_record_keys() -> None:
