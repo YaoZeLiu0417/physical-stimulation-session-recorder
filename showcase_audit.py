@@ -61,6 +61,10 @@ XML_ENCODING_PATTERN = re.compile(
     r"\A<\?xml\s+[^?]*?\bencoding\s*=\s*(['\"])([^'\"]+)\1",
     re.IGNORECASE,
 )
+AMBIGUOUS_BINARY_TEXT_PATTERN = re.compile(
+    rb"(?:[\x09\x0a\x0d\x20-\x7e]\x00){3,}"
+    rb"|(?:\x00[\x09\x0a\x0d\x20-\x7e]){3,}"
+)
 
 
 class _InvalidMediaError(ValueError):
@@ -327,6 +331,10 @@ def _decode_metadata(payload: bytes) -> str:
         text = payload.decode(encoding, errors="strict")
     except (LookupError, UnicodeError) as error:
         raise _MetadataDecodeError from error
+    if encoding in {"utf-8", "utf-8-sig"} and AMBIGUOUS_BINARY_TEXT_PATTERN.search(
+        payload
+    ):
+        raise _MetadataDecodeError
 
     declaration = XML_ENCODING_PATTERN.search(text)
     if declaration is None:

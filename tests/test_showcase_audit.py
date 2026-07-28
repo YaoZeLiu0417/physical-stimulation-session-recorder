@@ -121,6 +121,23 @@ def _webp_bytes(
     return b"RIFF" + (len(chunks) + 4).to_bytes(4, "little") + b"WEBP" + chunks
 
 
+def _tiff_with_raw_description(description: bytes) -> bytes:
+    data_offset = 8 + 2 + 12 + 4
+    entry = (
+        b"\x01\x0e"
+        b"\x00\x02"
+        + len(description).to_bytes(4, "big")
+        + data_offset.to_bytes(4, "big")
+    )
+    return (
+        b"MM\x00\x2a\x00\x00\x00\x08"
+        + b"\x00\x01"
+        + entry
+        + b"\x00\x00\x00\x00"
+        + description
+    )
+
+
 def _write_safe_tree(root: Path) -> None:
     (root / "assets").mkdir(parents=True)
     (root / ".gitignore").write_text(
@@ -360,7 +377,36 @@ def test_real_webp_fixture_with_xmp_and_exif_is_valid_and_scanned(
     findings = _joined_findings(tmp_path)
 
     assert "forbidden-term: assets/step-01-access.webp" in findings
+    assert "metadata-decode-error" not in findings
     assert "tavns" not in findings
+
+
+@pytest.mark.parametrize(
+    "sensitive_text",
+    [
+        "tavns",
+        r"C:\Users\Alice\private.txt",
+        "https://example.test/private",
+        "https://example.test/private?token=value",
+    ],
+    ids=["forbidden-term", "absolute-path", "url", "credential"],
+)
+def test_ambiguous_utf16_exif_metadata_fails_closed_without_echoing_content(
+    tmp_path: Path, sensitive_text: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    relative_path = "assets/step-01-access.webp"
+    exif = _tiff_with_raw_description(
+        sensitive_text.encode("utf-16-le") + b"\x00\x00"
+    )
+    data = _webp_bytes(metadata=exif, metadata_type=b"EXIF")
+    _assert_pillow_valid(data)
+    (tmp_path / relative_path).write_bytes(data)
+
+    findings = audit_showcase(tmp_path)
+
+    assert findings == [f"metadata-decode-error: {relative_path}"]
+    assert sensitive_text not in "\n".join(findings)
 
 
 @pytest.mark.parametrize(
