@@ -664,6 +664,18 @@ async function settleRecorderApp() {
   }
 }
 
+function assertCompactCompletionLayout(elements, compact) {
+  for (const id of [
+    "settings-band",
+    "record-button",
+    "stop-button",
+    "skip-button",
+  ]) {
+    assert.equal(elements[id].hidden, compact, id);
+  }
+  assert.equal(elements["save-panel"].hidden, !compact, "save-panel");
+}
+
 let recorderAppImport = 0;
 
 async function recorderAppHarness({
@@ -703,6 +715,7 @@ async function recorderAppHarness({
   const ids = [
     "preview",
     "preview-placeholder",
+    "settings-band",
     "camera-select",
     "microphone-select",
     "audio-meter",
@@ -1112,6 +1125,8 @@ test("long recording rejects a successful close with zero nonempty output", asyn
     assert.equal(harness.latestStatus().saved_confirmed, false);
     assert.equal(harness.elements["save-confirmation"].disabled, true);
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
+    assertCompactCompletionLayout(harness.elements, false);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
   } finally {
     await harness.dispose();
   }
@@ -1152,13 +1167,16 @@ test("final nonempty data drains before close and explicit confirmation", async 
 test("local completion panel follows finalized output through confirmation and reset", async () => {
   const harness = await recorderAppHarness();
   try {
-    assert.equal(harness.elements["save-panel"].hidden, true);
+    assertCompactCompletionLayout(harness.elements, false);
+    assert.equal(harness.elements["rerecord-button"].hidden, true);
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
 
     await harness.render("long");
+    assertCompactCompletionLayout(harness.elements, false);
     harness.elements["record-button"].emit("click");
     await settleRecorderApp();
-    assert.equal(harness.elements["save-panel"].hidden, true);
+    assert.equal(harness.latestStatus().state, "recording");
+    assertCompactCompletionLayout(harness.elements, false);
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
 
     const recorder = harness.recorderInstances[0];
@@ -1167,13 +1185,16 @@ test("local completion panel follows finalized output through confirmation and r
     recorder.emitStop();
     await settleRecorderApp();
 
-    assert.equal(harness.elements["save-panel"].hidden, false);
+    assertCompactCompletionLayout(harness.elements, true);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
+    assert.equal(harness.elements["download-link"].hidden, true);
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, [
       { block: "nearest", behavior: "auto" },
     ]);
 
     await harness.render("long");
-    assert.equal(harness.elements["save-panel"].hidden, false);
+    assertCompactCompletionLayout(harness.elements, true);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
     assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
     assert.equal(
       harness.elements.status.textContent,
@@ -1201,7 +1222,8 @@ test("local completion panel follows finalized output through confirmation and r
       saved_confirmed: true,
       error_code: null,
     });
-    assert.equal(harness.elements["save-panel"].hidden, false);
+    assertCompactCompletionLayout(harness.elements, true);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
     assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
     assert.equal(
       harness.elements.status.textContent,
@@ -1210,8 +1232,30 @@ test("local completion panel follows finalized output through confirmation and r
 
     harness.elements["rerecord-button"].emit("click");
     await settleRecorderApp();
-    assert.equal(harness.elements["save-panel"].hidden, true);
+    assertCompactCompletionLayout(harness.elements, false);
+    assert.equal(harness.elements["rerecord-button"].hidden, true);
     assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("demo completion keeps download available in the compact layout", async () => {
+  const harness = await recorderAppHarness();
+  try {
+    await harness.render("demo");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+
+    const recorder = harness.recorderInstances[0];
+    recorder.emitData(new Blob(["demo"], { type: "video/webm" }));
+    recorder.emitStop();
+    await settleRecorderApp();
+
+    assert.equal(harness.latestStatus().state, "stopped");
+    assertCompactCompletionLayout(harness.elements, true);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
+    assert.equal(harness.elements["download-link"].hidden, false);
   } finally {
     await harness.dispose();
   }
@@ -1232,6 +1276,8 @@ test("picker cancellation returns ready without creating a recorder or file", as
     assert.equal(harness.handleCalls.createWritable, 0);
     assert.equal(harness.recorderInstances.length, 0);
     assert.equal(harness.latestStatus().state, "ready");
+    assertCompactCompletionLayout(harness.elements, false);
+    assert.equal(harness.elements["rerecord-button"].hidden, true);
   } finally {
     await harness.dispose();
   }
@@ -1336,6 +1382,8 @@ test("skip cleanup gates record until a pending audio close completes", async ()
     await settleRecorderApp();
     assert.equal(harness.latestStatus().state, "skipped");
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
+    assertCompactCompletionLayout(harness.elements, false);
+    assert.equal(harness.elements["rerecord-button"].hidden, false);
     assert.equal(
       harness.stream.tracks.every((track) => track.stopCalls === 1),
       true,

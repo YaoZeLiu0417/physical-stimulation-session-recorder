@@ -9,6 +9,7 @@ import {
 const elements = Object.freeze({
   preview: document.getElementById("preview"),
   previewPlaceholder: document.getElementById("preview-placeholder"),
+  settingsBand: document.getElementById("settings-band"),
   modeInputs: Array.from(document.querySelectorAll('input[name="mode"]')),
   cameraSelect: document.getElementById("camera-select"),
   microphoneSelect: document.getElementById("microphone-select"),
@@ -134,6 +135,7 @@ function statusMessage() {
 
 function renderControls(message = null) {
   const isRecording = status.state === "recording";
+  const completionReady = localCompletionReady;
   const canStart =
     componentHasRendered &&
     !startPending &&
@@ -158,13 +160,17 @@ function renderControls(message = null) {
   elements.rerecordButton.hidden = !canRecordAgain;
   elements.rerecordButton.disabled = cleaningUp;
   elements.skipButton.disabled = !canStart;
-  const shouldRevealSavePanel = localCompletionReady && elements.savePanel.hidden;
-  elements.savePanel.hidden = !localCompletionReady;
+  elements.settingsBand.hidden = completionReady;
+  elements.recordButton.hidden = completionReady;
+  elements.stopButton.hidden = completionReady;
+  elements.skipButton.hidden = completionReady;
+  const shouldRevealSavePanel = completionReady && elements.savePanel.hidden;
+  elements.savePanel.hidden = !completionReady;
   if (shouldRevealSavePanel) {
     elements.savePanel.scrollIntoView({ block: "nearest", behavior: "auto" });
   }
   elements.saveConfirmation.disabled =
-    cleaningUp || !localCompletionReady || status.state === "saved";
+    cleaningUp || !completionReady || status.state === "saved";
   elements.saveConfirmation.checked = status.saved_confirmed;
   elements.downloadLink.hidden = localObjectUrl === null;
   elements.timer.textContent = formatDuration(status.duration_seconds);

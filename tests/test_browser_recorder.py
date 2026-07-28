@@ -22,6 +22,7 @@ COMPONENT_ASSETS = (
 )
 RECORDER_ELEMENT_IDS = {
     "preview",
+    "settings-band",
     "mode-control",
     "camera-select",
     "microphone-select",
@@ -112,6 +113,10 @@ def test_component_html_is_semantic_and_accessible() -> None:
     assert parser.elements_by_id["preview"][0] == "video"
     assert "muted" in preview
     assert "playsinline" in preview
+    settings_tag, settings_attributes = parser.elements_by_id["settings-band"]
+    assert settings_tag == "section"
+    assert settings_attributes["class"] == "settings-band"
+    assert settings_attributes["aria-label"] == "Recording settings"
     assert parser.elements_by_id["mode-control"][0] == "fieldset"
     assert parser.elements_by_id["camera-select"][0] == "select"
     assert parser.elements_by_id["microphone-select"][0] == "select"
