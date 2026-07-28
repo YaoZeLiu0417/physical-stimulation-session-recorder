@@ -87,6 +87,7 @@ PROGRESS_STATES = (
     "download",
     "confirmation",
 )
+DOWNLOAD_RETRY_RECORDING_STATES = ("saved", "skipped", "failed")
 EXPECTED_SIDEBAR_INVENTORIES = {
     "access": (),
     **{
@@ -273,17 +274,27 @@ SOURCE_FORBIDDEN_TERMS = tuple(
     "file_path",
     "upload_status",
 )
-EXPECTED_SHOWCASE_SOURCE_IMPORTS = {
-    "__future__",
-    "browser_recorder",
-    "datetime",
-    "os",
-    "showcase_export",
-    "showcase_workflow",
-    "streamlit",
-}
+EXPECTED_SHOWCASE_IMPORT_BINDINGS = (
+    ("from", "__future__.annotations", "annotations"),
+    ("from", "browser_recorder.RecorderStatus", "RecorderStatus"),
+    (
+        "from",
+        "browser_recorder.render_browser_recorder",
+        "render_browser_recorder",
+    ),
+    ("from", "datetime.datetime", "datetime"),
+    ("from", "datetime.timezone", "timezone"),
+    (
+        "from",
+        "showcase_export.build_synthetic_showcase_zip",
+        "build_synthetic_showcase_zip",
+    ),
+    ("from", "showcase_workflow.advance_step", "advance_step"),
+    ("from", "showcase_workflow.password_matches", "password_matches"),
+    ("import", "os", "os"),
+    ("import", "streamlit", "st"),
+)
 EXPECTED_SHOWCASE_CALL_INVENTORY = {
-    "RecorderStatus",
     "ValueError",
     "_build_cached_synthetic_archive",
     "_clear_showcase_session_state",
@@ -297,36 +308,40 @@ EXPECTED_SHOWCASE_CALL_INVENTORY = {
     "_require_access",
     "_return_to_overview",
     "_secret",
-    "advance_step",
-    "build_synthetic_showcase_zip",
-    "button",
-    "caption",
-    "checkbox",
-    "container",
-    "download_button",
-    "error",
-    "get",
-    "getenv",
-    "info",
+    "browser_recorder.RecorderStatus",
+    "browser_recorder.render_browser_recorder",
+    "completed_ratings.items",
+    "datetime.datetime.now",
+    "datetime.datetime.now().replace",
     "isinstance",
-    "items",
-    "markdown",
-    "now",
-    "password_matches",
-    "pop",
-    "render_browser_recorder",
-    "replace",
-    "rerun",
-    "set_page_config",
-    "setdefault",
-    "slider",
-    "stop",
+    "os.getenv",
+    "showcase_export.build_synthetic_showcase_zip",
+    "showcase_workflow.advance_step",
+    "showcase_workflow.password_matches",
     "str",
-    "subheader",
-    "text_input",
-    "title",
-    "warning",
+    "streamlit.button",
+    "streamlit.caption",
+    "streamlit.checkbox",
+    "streamlit.container",
+    "streamlit.download_button",
+    "streamlit.error",
+    "streamlit.info",
+    "streamlit.markdown",
+    "streamlit.rerun",
+    "streamlit.session_state.get",
+    "streamlit.session_state.pop",
+    "streamlit.session_state.setdefault",
+    "streamlit.set_page_config",
+    "streamlit.sidebar.caption",
+    "streamlit.sidebar.markdown",
+    "streamlit.slider",
+    "streamlit.stop",
+    "streamlit.subheader",
+    "streamlit.text_input",
+    "streamlit.title",
+    "streamlit.warning",
 }
+ALLOWED_SHOWCASE_CALLS = EXPECTED_SHOWCASE_CALL_INVENTORY | {"str.replace"}
 
 
 def _app_with_password(app_path: Path = APP) -> AppTest:
@@ -1117,16 +1132,42 @@ def test_download_builds_once_and_uses_exact_cached_archive_contract(
     assert download_calls == [download_calls[0], download_calls[0]]
 
 
+def test_download_retry_matrix_covers_all_terminal_recording_states() -> None:
+    assert set(DOWNLOAD_RETRY_RECORDING_STATES) == {
+        "saved",
+        "skipped",
+        "failed",
+    }
+
+
+@pytest.mark.parametrize(
+    "recording_state",
+    DOWNLOAD_RETRY_RECORDING_STATES,
+)
 def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     monkeypatch,
+    recording_state,
 ):
+    saved = recording_state == "saved"
     status = RecorderStatus(
-        state="saved",
-        duration_seconds=3,
-        camera_ready=True,
-        microphone_ready=True,
-        saved_confirmed=True,
+        state=recording_state,
+        duration_seconds=3 if saved else 0,
+        camera_ready=saved,
+        microphone_ready=saved,
+        saved_confirmed=saved,
+        error_code="write_failed" if recording_state == "failed" else None,
     )
+    responses = {
+        key: value
+        for key, value in SYNTHETIC_RESPONSES.items()
+        if saved or key != "camera_smoothness"
+    }
+    expected_camera_rating = (
+        SYNTHETIC_RESPONSES["camera_smoothness"] if saved else None
+    )
+    expected_non_camera_responses = {
+        key: SYNTHETIC_RESPONSES[key] for key in NON_CAMERA_RESPONSE_KEYS
+    }
     archive = SyntheticShowcaseArchive(
         filename="synthetic-session.zip",
         data=b"retry-synthetic-zip",
@@ -1147,9 +1188,19 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     app = _advance_to_download(
         monkeypatch,
         status=status,
-        responses=dict(SYNTHETIC_RESPONSES),
+        responses=responses,
     )
 
+    assert len(attempts) == 1
+    assert attempts[0]["recording_state"] == recording_state
+    assert attempts[0]["camera_smoothness"] == expected_camera_rating
+    if saved:
+        assert type(attempts[0]["camera_smoothness"]) is int
+    else:
+        assert attempts[0]["camera_smoothness"] is None
+    assert {
+        key: attempts[0][key] for key in NON_CAMERA_RESPONSE_KEYS
+    } == expected_non_camera_responses
     visible = _visible_text(app)
     assert "下载文件暂时无法生成，请重试。" in visible
     assert "PRIVATE-EXPORT-TRACE" not in visible
@@ -1159,9 +1210,8 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     assert SHOWCASE_ARCHIVE_KEY not in app.session_state
     assert not app.get("download_button")
     assert not [button for button in app.button if button.key == "finish_download"]
-    assert {
-        key: app.session_state[key] for key in SYNTHETIC_RESPONSES
-    } == SYNTHETIC_RESPONSES
+    assert {key: app.session_state[key] for key in responses} == responses
+    assert ("camera_smoothness" in app.session_state) is saved
     assert app.session_state["showcase_recorder_status"] == status
     assert all(
         "PRIVATE-EXPORT-TRACE" not in repr(value)
@@ -1176,6 +1226,9 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
     assert not app.exception
     assert len(attempts) == 1
     assert app.session_state[SHOWCASE_EXPORT_ERROR_KEY] is True
+    assert {key: app.session_state[key] for key in responses} == responses
+    assert ("camera_smoothness" in app.session_state) is saved
+    assert app.session_state["showcase_recorder_status"] == status
     _assert_showcase_only_inventory(
         app,
         step="download",
@@ -1185,11 +1238,16 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
 
     assert not app.exception
     assert len(attempts) == 2
+    for attempt in attempts:
+        assert attempt["recording_state"] == recording_state
+        assert attempt["camera_smoothness"] == expected_camera_rating
+        assert {
+            key: attempt[key] for key in NON_CAMERA_RESPONSE_KEYS
+        } == expected_non_camera_responses
     assert app.session_state[SHOWCASE_ARCHIVE_KEY] is archive
     assert SHOWCASE_EXPORT_ERROR_KEY not in app.session_state
-    assert {
-        key: app.session_state[key] for key in SYNTHETIC_RESPONSES
-    } == SYNTHETIC_RESPONSES
+    assert {key: app.session_state[key] for key in responses} == responses
+    assert ("camera_smoothness" in app.session_state) is saved
     assert app.session_state["showcase_recorder_status"] == status
     assert len(app.get("download_button")) == 1
     assert app.session_state["showcase_step"] == "download"
@@ -1199,6 +1257,17 @@ def test_download_failure_is_neutral_retryable_and_preserves_all_state(
         step="download",
         expected_inventory=EXPECTED_DOWNLOAD_INVENTORY,
     )
+    visible = _visible_text(app)
+    for hidden in (
+        "PRIVATE-EXPORT-TRACE",
+        "/secret/path.zip",
+        "write_failed",
+        "recording_state",
+        SHOWCASE_ARCHIVE_KEY,
+        SHOWCASE_EXPORT_ERROR_KEY,
+        archive.filename,
+    ):
+        assert hidden.casefold() not in visible.casefold()
 
 
 @pytest.mark.parametrize(
@@ -1613,65 +1682,95 @@ def test_showcase_has_no_probe_split_or_legacy_media_hooks():
         assert legacy_name not in source
 
 
+def _showcase_ast_inventory(
+    source: str,
+) -> tuple[tuple[tuple[str, str, str], ...], set[str]]:
+    tree = ast.parse(source)
+    import_inventory: list[tuple[str, str, str]] = []
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local_name = alias.asname or alias.name.split(".", 1)[0]
+                qualified_name = (
+                    alias.name if alias.asname else alias.name.split(".", 1)[0]
+                )
+                import_inventory.append(("import", alias.name, local_name))
+                assert bindings.get(local_name, qualified_name) == qualified_name
+                bindings[local_name] = qualified_name
+        elif isinstance(node, ast.ImportFrom):
+            module_name = "." * node.level + (node.module or "")
+            for alias in node.names:
+                assert alias.name != "*"
+                qualified_name = (
+                    f"{module_name}.{alias.name}" if module_name else alias.name
+                )
+                local_name = alias.asname or alias.name
+                import_inventory.append(("from", qualified_name, local_name))
+                assert bindings.get(local_name, qualified_name) == qualified_name
+                bindings[local_name] = qualified_name
+
+    def qualified_expression(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return bindings.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            return f"{qualified_expression(node.value)}.{node.attr}"
+        if isinstance(node, ast.Call):
+            return f"{qualified_expression(node.func)}()"
+        if isinstance(node, ast.Constant):
+            return type(node.value).__name__
+        if isinstance(node, ast.Subscript):
+            return f"{qualified_expression(node.value)}[]"
+        return f"<{type(node).__name__}>"
+
+    call_inventory = {
+        qualified_expression(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    return tuple(sorted(import_inventory)), call_inventory
+
+
+def _assert_showcase_ast_boundary(source: str) -> set[str]:
+    import_inventory, call_inventory = _showcase_ast_inventory(source)
+    assert import_inventory == EXPECTED_SHOWCASE_IMPORT_BINDINGS
+    assert call_inventory <= ALLOWED_SHOWCASE_CALLS
+    return call_inventory
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        'os.replace("source", "target")',
+        'from os import replace\nreplace("source", "target")',
+        'import os as filesystem\nfilesystem.replace("source", "target")',
+        'from os import replace as move_file\nmove_file("source", "target")',
+    ),
+    ids=("qualified", "from-import", "module-alias", "function-alias"),
+)
+def test_showcase_ast_boundary_rejects_os_replace_and_aliases(mutation):
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(f"{source}\n{mutation}\n")
+
+
+def test_showcase_ast_boundary_allows_string_replace() -> None:
+    source = APP.read_text(encoding="utf-8")
+
+    _assert_showcase_ast_boundary(
+        f'{source}\n"synthetic".replace("syn", "Syn")\n'
+    )
+
+
 def test_showcase_source_has_no_private_or_io_capabilities():
     source = APP.read_text(encoding="utf-8")
-    tree = ast.parse(source)
     folded_source = source.casefold()
     for term in SOURCE_FORBIDDEN_TERMS:
         assert term.casefold() not in folded_source, term
-    imported_modules = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    } | {
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    }
-    assert imported_modules == EXPECTED_SHOWCASE_SOURCE_IMPORTS
-    prohibited_import_fragments = (
-        "questionnaire",
-        "upload",
-        "requests",
-        "webrtc",
-        "aiortc",
-        "av",
-        "twi" + "lio",
-        "showcase" + "_ice",
-        "showcase" + "_media",
-        "logging",
+    assert _assert_showcase_ast_boundary(source) == (
+        EXPECTED_SHOWCASE_CALL_INVENTORY
     )
-    assert not any(
-        fragment in module.casefold()
-        for module in imported_modules
-        for fragment in prohibited_import_fragments
-    )
-
-    prohibited_calls = {
-        "camera_input",
-        "file_uploader",
-        "open",
-        "touch",
-        "mkdir",
-        "write_bytes",
-        "write_text",
-        "webrtc_streamer",
-        "resolve_turn_rtc_configuration",
-        "render_live_camera",
-        "camera_is_playing",
-    }
-    call_names = {
-        node.func.id
-        if isinstance(node.func, ast.Name)
-        else node.func.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, (ast.Name, ast.Attribute))
-    }
-    assert call_names == EXPECTED_SHOWCASE_CALL_INVENTORY
-    assert prohibited_calls.isdisjoint(call_names)
-    assert not any("upload" in name.casefold() for name in call_names)
     assert "http://" not in source.casefold()
     assert "https://" not in source.casefold()
     assert "st.image" not in source
