@@ -47,6 +47,9 @@ OPERATIONAL_CSS = """<style>
   --operational-white: #FFFFFF;
 }
 .stApp { background: var(--operational-mist); color: var(--operational-navy); }
+[data-testid="stHeader"], [data-testid="stDecoration"], [data-testid="stToolbar"] {
+  display: none !important;
+}
 .operational-rail {
   box-sizing: border-box; position: fixed; inset: 0 auto 0 0; width: 252px; padding: 28px 22px;
   overflow-y: auto; background: var(--operational-navy); color: var(--operational-white); z-index: 10;
@@ -87,7 +90,7 @@ iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; hei
   .operational-progress__segment { height: 6px; border-radius: 6px; background: var(--operational-violet); }
   .operational-progress__segment--completed { background: var(--operational-cyan); }
   .operational-progress__segment--active { background: var(--operational-rose); }
-  .block-container { margin-left: 0; width: auto; }
+  .block-container { margin-left: 0; width: auto; padding: 1rem 1rem 3rem; }
   [data-testid="stHorizontalBlock"] { flex-direction: column; }
   [data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
   .stButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }

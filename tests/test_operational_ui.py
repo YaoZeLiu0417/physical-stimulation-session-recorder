@@ -146,7 +146,12 @@ def test_css_meets_operational_visual_contract() -> None:
     assert '[data-testid="column"]' in css
     assert "flex-direction: column" in css
     assert ".operational-status { display: inline-block; padding: 8px 12px; border-radius: 6px; background: var(--operational-violet); color: var(--operational-white); }" in css
-    assert ".block-container { margin-left: 0; width: auto; }" in css
+    assert ".block-container { margin-left: 0; width: auto; padding: 1rem 1rem 3rem; }" in css
+    assert '[data-testid="stHeader"]' in css
+    assert '[data-testid="stDecoration"]' in css
+    assert '[data-testid="stToolbar"]' in css
+    assert 'display: none !important;' in css
+    assert "padding: 1rem 1rem 3rem;" in css
     for forbidden in ("gradient", "vw", "https://", "http://", "@import", "url("):
         assert forbidden not in css.lower()
 
