@@ -54,6 +54,18 @@ EXPECTED_FORBIDDEN_TERMS = (
 )
 
 
+def _public_showcase_readme() -> Path | None:
+    candidates = (
+        Path(__file__).resolve().parents[2]
+        / "physical-stimulation-session-recorder-showcase"
+        / "README.md",
+        Path(__file__).resolve().parents[4]
+        / "physical-stimulation-session-recorder-showcase"
+        / "README.md",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
 def _sub_blocks(payload: bytes, block_size: int = 255) -> bytes:
     assert 1 <= block_size <= 255
     return b"".join(
@@ -292,6 +304,29 @@ def test_both_valid_gif_signatures_pass(
     gif_path.write_bytes(gif_signature + _gif_bytes()[6:])
 
     assert audit_showcase(tmp_path) == []
+
+
+def test_public_readme_leads_with_complete_questionnaire_story() -> None:
+    readme_path = _public_showcase_readme()
+    if readme_path is None:
+        pytest.skip("public showcase clone is not available")
+    readme = readme_path.read_text(encoding="utf-8")
+    first_viewport = readme.split("## 九步流程", 1)[0]
+    required_first_viewport = (
+        "# Physical Stimulation Intervention Session Companion",
+        "Controlled access",
+        "Daily context",
+        "Browser-local audio and video",
+        "Stepwise structured questionnaire",
+        "Local JSON + Excel package",
+        "Completion confirmation",
+    )
+
+    assert all(item in first_viewport for item in required_first_viewport)
+    assert "protected operational questionnaire" in readme.casefold()
+    assert "public synthetic demonstration" in readme.casefold()
+    assert "no participant-facing scores" in readme.casefold()
+    assert all(term.casefold() not in readme.casefold() for term in FORBIDDEN_TERMS)
 
 
 @pytest.mark.parametrize(
