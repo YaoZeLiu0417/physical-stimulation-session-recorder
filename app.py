@@ -11,7 +11,7 @@ import os
 import re
 import secrets
 import stat
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -19,7 +19,10 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import streamlit as st
 
 from app_workflow import (
+    build_daily_context_confirmation,
     confirm_admin_intervention_day,
+    daily_context_confirmation_matches,
+    daily_context_values,
     resolve_trusted_intervention_day,
     support_needed,
 )
@@ -58,8 +61,10 @@ _EXPORT_KEY = "operational_export_bundle"
 _EXPORT_ERROR_KEY = "operational_export_error"
 _SAVED_LOCALLY_KEY = "operational_saved_locally"
 _COMPLETE_KEY = "operational_complete"
+_CONTEXT_CONFIRMED_KEY = "operational_daily_context_confirmation"
 _OWNED_EXACT_KEYS = (
     _RECORD_KEY,
+    _CONTEXT_CONFIRMED_KEY,
     _EXPORT_KEY,
     _EXPORT_ERROR_KEY,
     _SAVED_LOCALLY_KEY,
@@ -296,6 +301,81 @@ def _clear_current_session() -> None:
     )
 
 
+def _daily_context_auth_source() -> str:
+    if st.session_state.get("auth_source") == "signed_link":
+        return "signed_link"
+    return "admin"
+
+
+def _validated_confirmed_record(
+    record: object,
+    confirmation: object,
+    *,
+    auth_source: str,
+    verified_link: VerifiedLink | None,
+    record_date: date,
+) -> dict[str, object] | None:
+    if not isinstance(record, dict) or not daily_context_confirmation_matches(
+        confirmation,
+        record,
+        auth_source=auth_source,
+    ):
+        return None
+
+    if auth_source == "signed_link":
+        if verified_link is None:
+            return None
+        try:
+            intervention_day = resolve_trusted_intervention_day(
+                _safe_secret("TRUSTED_INTERVENTION_DAYS", {}),
+                verified_link.subject_id,
+            )
+        except ValueError:
+            return None
+        if not session_record_matches(
+            record,
+            subject_id=verified_link.subject_id,
+            record_date=record_date,
+            intervention_day=intervention_day,
+            visit=verified_link.visit,
+        ):
+            return None
+        return record
+
+    subject_id = record.get("subject_id")
+    intervention_day = record.get("intervention_day")
+    visit = record.get("visit")
+    if (
+        type(subject_id) is not str
+        or type(intervention_day) is not int
+        or type(visit) is not str
+        or not session_record_matches(
+            record,
+            subject_id=subject_id,
+            record_date=record_date,
+            intervention_day=intervention_day,
+            visit=visit,
+        )
+    ):
+        return None
+
+    for key in ("participant_identifier", "subject_id"):
+        if key in st.session_state and st.session_state.get(key) != subject_id:
+            return None
+    for key in ("operational_visit_selection", "visit"):
+        if key in st.session_state and st.session_state.get(key) != visit:
+            return None
+
+    admin_scope = hashlib.sha256(
+        f"{subject_id}|{record_date.isoformat()}".encode("utf-8")
+    ).hexdigest()[:12]
+    for suffix in ("selection", "confirmation"):
+        key = f"operational_admin_day::{admin_scope}::{suffix}"
+        if key in st.session_state and st.session_state.get(key) != intervention_day:
+            return None
+    return record
+
+
 def _finish_current_session() -> None:
     auth_source = st.session_state.get("auth_source")
     _clear_operational_phase_state()
@@ -371,11 +451,28 @@ if st.session_state.get(_COMPLETE_KEY) is True:
     st.success("本次会话已完成。")
     st.stop()
 
+record_date = _utc_now().date()
+confirmation_auth_source = _daily_context_auth_source()
+record = st.session_state.get(_RECORD_KEY)
+confirmed_record = _validated_confirmed_record(
+    record,
+    st.session_state.get(_CONTEXT_CONFIRMED_KEY),
+    auth_source=confirmation_auth_source,
+    verified_link=verified_link,
+    record_date=record_date,
+)
+if _CONTEXT_CONFIRMED_KEY in st.session_state and confirmed_record is None:
+    _clear_current_session()
+    record = None
+
 st.title("问卷会话")
-st.subheader("① 当日状态")
+if confirmed_record is None:
+    st.subheader("① 当日状态")
 
 locked_link = verified_link
-if locked_link is not None:
+if confirmed_record is not None:
+    subject_id = str(confirmed_record["subject_id"])
+elif locked_link is not None:
     subject_id = st.text_input(
         "来访者编号（已由链接锁定）",
         value=locked_link.subject_id, disabled=True,
@@ -397,9 +494,10 @@ except ValueError:
     st.error("编号无效，请联系研究团队。")
     st.stop()
 
-record_date = _utc_now().date()
 is_participant = st.session_state.get("auth_source") == "signed_link"
-if is_participant:
+if confirmed_record is not None:
+    intervention_day = int(confirmed_record["intervention_day"])
+elif is_participant:
     try:
         intervention_day = resolve_trusted_intervention_day(
             _safe_secret("TRUSTED_INTERVENTION_DAYS", {}),
@@ -436,7 +534,9 @@ else:
     )
 
 visit_options = ("daily", *VISIT_INSTRUMENT_IDS)
-if locked_link is not None:
+if confirmed_record is not None:
+    visit = str(confirmed_record["visit"])
+elif locked_link is not None:
     visit = locked_link.visit
     if visit not in visit_options:
         st.error("无法确认本次问卷访视，请联系研究团队。")
@@ -471,6 +571,153 @@ if not session_record_matches(
         now_iso=_utc_now().isoformat(timespec="seconds"),
     )
     st.session_state[_RECORD_KEY] = record
+    confirmed_record = None
+
+session_token = str(record["record_id"]).rsplit("_", 1)[-1]
+if confirmed_record is not None:
+    daily_context = daily_context_values(record)
+else:
+    stored_context = record.get("daily_context", {})
+    if not isinstance(stored_context, dict):
+        stored_context = {}
+    context_defaults = {
+        field_id: copy.deepcopy(stored_context.get(field_id, default))
+        for field_id, default in DAILY_CONTEXT_DEFAULTS.items()
+    }
+    context_state_keys = {
+        field_id: f"operational_daily_context::{session_token}::{field_id}"
+        for field_id in DAILY_CONTEXT_DEFAULTS
+    }
+    for field_id, widget_key in context_state_keys.items():
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = context_defaults[field_id]
+
+    st.caption("请尽量用自己的语言描述当天体验。")
+    c21, c22, c23 = st.columns(3)
+    sleep_hours = c21.number_input(
+        "昨夜睡眠（小时）",
+        min_value=0.0,
+        max_value=24.0,
+        step=0.5,
+        key=context_state_keys["sleep_hours"],
+    )
+    mood = c22.slider(
+        "当前心境（1=很差，9=很好）",
+        1,
+        9,
+        key=context_state_keys["mood_1to9"],
+    )
+    stress = c23.slider(
+        "当前压力（1=很低，9=很高）",
+        1,
+        9,
+        key=context_state_keys["stress_1to9"],
+    )
+
+    c31, c32, c33 = st.columns(3)
+    pain = c31.slider(
+        "身体不适/疼痛（0=无，10=最剧烈）",
+        0,
+        10,
+        key=context_state_keys["pain_0to10"],
+    )
+    urge = c32.slider(
+        "自伤冲动强度（0=无，10=极强）",
+        0,
+        10,
+        key=context_state_keys["nssi_urge_0to10"],
+    )
+    coping_effect = c33.slider(
+        "本日应对效果（1=很差，5=很好）",
+        1,
+        5,
+        key=context_state_keys["coping_effect_1to5"],
+    )
+
+    c41, c42 = st.columns(2)
+    caffeine = c41.selectbox(
+        "近6小时咖啡因",
+        ["无", "少量", "适度", "较多"],
+        key=context_state_keys["caffeine"],
+    )
+    exercise = c42.selectbox(
+        "近24小时运动量",
+        ["无", "少量", "适度", "剧烈"],
+        key=context_state_keys["exercise"],
+    )
+    tags = st.multiselect(
+        "今天我想要描述的内容涉及...（请选择）",
+        [
+            "情绪波动",
+            "睡眠",
+            "人际",
+            "学业/工作压力",
+            "身体不适",
+            "药物相关",
+            "积极事件",
+            "其他",
+        ],
+        key=context_state_keys["tags"],
+    )
+    narrative = st.text_area(
+        "当日状态叙述（自由输入，尽量详细）",
+        height=220,
+        placeholder="今天发生了什么？情绪何时变化？哪些方法有效？有哪些支持？",
+        key=context_state_keys["narrative"],
+    )
+    triggers = st.text_area(
+        "今天发生的不如意与哪些触发因素或情境有关？",
+        height=120,
+        placeholder="例如人际、学业、工作、身体不适、环境、回忆或想法；也可留空。",
+        key=context_state_keys["triggers"],
+    )
+    coping_used = st.multiselect(
+        "面对今天的不如意，我的应对方式是...（可多选）",
+        [
+            "转移注意",
+            "呼吸放松/冥想",
+            "运动",
+            "写作/绘画",
+            "联系他人",
+            "专业求助",
+            "其他",
+        ],
+        key=context_state_keys["coping_used"],
+    )
+
+    daily_context = {
+        "sleep_hours": float(sleep_hours),
+        "mood_1to9": int(mood),
+        "stress_1to9": int(stress),
+        "pain_0to10": int(pain),
+        "nssi_urge_0to10": int(urge),
+        "coping_effect_1to5": int(coping_effect),
+        "caffeine": caffeine,
+        "exercise": exercise,
+        "tags": list(tags),
+        "coping_used": list(coping_used),
+        "narrative": narrative or "",
+        "triggers": triggers or "",
+    }
+    record["daily_context"] = copy.deepcopy(daily_context)
+
+    def confirm_daily_context() -> None:
+        record["daily_context"] = copy.deepcopy(daily_context)
+        st.session_state[_CONTEXT_CONFIRMED_KEY] = (
+            build_daily_context_confirmation(
+                record,
+                auth_source=confirmation_auth_source,
+            )
+        )
+        st.rerun()
+
+    st.button(
+        "确认当日状态，进入本地录制",
+        type="primary",
+        key=f"operational_daily_context::{session_token}::confirm",
+        on_click=confirm_daily_context,
+    )
+    st.stop()
 
 cached_bundle = st.session_state.get(_EXPORT_KEY)
 cached_bundle_is_valid = _valid_export_bundle(cached_bundle)
@@ -480,131 +727,6 @@ if cached_bundle is not None and not cached_bundle_is_valid:
 elif cached_bundle_is_valid:
     _render_export_finalization(cached_bundle)
     st.stop()
-
-session_token = str(record["record_id"]).rsplit("_", 1)[-1]
-stored_context = record.get("daily_context", {})
-if not isinstance(stored_context, dict):
-    stored_context = {}
-context_defaults = {
-    field_id: copy.deepcopy(stored_context.get(field_id, default))
-    for field_id, default in DAILY_CONTEXT_DEFAULTS.items()
-}
-context_state_keys = {
-    field_id: f"operational_daily_context::{session_token}::{field_id}"
-    for field_id in DAILY_CONTEXT_DEFAULTS
-}
-for field_id, widget_key in context_state_keys.items():
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = context_defaults[field_id]
-
-st.caption("请尽量用自己的语言描述当天体验。")
-c21, c22, c23 = st.columns(3)
-sleep_hours = c21.number_input(
-    "昨夜睡眠（小时）",
-    min_value=0.0,
-    max_value=24.0,
-    step=0.5,
-    key=context_state_keys["sleep_hours"],
-)
-mood = c22.slider(
-    "当前心境（1=很差，9=很好）",
-    1,
-    9,
-    key=context_state_keys["mood_1to9"],
-)
-stress = c23.slider(
-    "当前压力（1=很低，9=很高）",
-    1,
-    9,
-    key=context_state_keys["stress_1to9"],
-)
-
-c31, c32, c33 = st.columns(3)
-pain = c31.slider(
-    "身体不适/疼痛（0=无，10=最剧烈）",
-    0,
-    10,
-    key=context_state_keys["pain_0to10"],
-)
-urge = c32.slider(
-    "自伤冲动强度（0=无，10=极强）",
-    0,
-    10,
-    key=context_state_keys["nssi_urge_0to10"],
-)
-coping_effect = c33.slider(
-    "本日应对效果（1=很差，5=很好）",
-    1,
-    5,
-    key=context_state_keys["coping_effect_1to5"],
-)
-
-c41, c42 = st.columns(2)
-caffeine = c41.selectbox(
-    "近6小时咖啡因",
-    ["无", "少量", "适度", "较多"],
-    key=context_state_keys["caffeine"],
-)
-exercise = c42.selectbox(
-    "近24小时运动量",
-    ["无", "少量", "适度", "剧烈"],
-    key=context_state_keys["exercise"],
-)
-tags = st.multiselect(
-    "今天我想要描述的内容涉及...（请选择）",
-    [
-        "情绪波动",
-        "睡眠",
-        "人际",
-        "学业/工作压力",
-        "身体不适",
-        "药物相关",
-        "积极事件",
-        "其他",
-    ],
-    key=context_state_keys["tags"],
-)
-narrative = st.text_area(
-    "当日状态叙述（自由输入，尽量详细）",
-    height=220,
-    placeholder="今天发生了什么？情绪何时变化？哪些方法有效？有哪些支持？",
-    key=context_state_keys["narrative"],
-)
-triggers = st.text_area(
-    "今天发生的不如意与哪些触发因素或情境有关？",
-    height=120,
-    placeholder="例如人际、学业、工作、身体不适、环境、回忆或想法；也可留空。",
-    key=context_state_keys["triggers"],
-)
-coping_used = st.multiselect(
-    "面对今天的不如意，我的应对方式是...（可多选）",
-    [
-        "转移注意",
-        "呼吸放松/冥想",
-        "运动",
-        "写作/绘画",
-        "联系他人",
-        "专业求助",
-        "其他",
-    ],
-    key=context_state_keys["coping_used"],
-)
-
-daily_context = {
-    "sleep_hours": float(sleep_hours),
-    "mood_1to9": int(mood),
-    "stress_1to9": int(stress),
-    "pain_0to10": int(pain),
-    "nssi_urge_0to10": int(urge),
-    "coping_effect_1to5": int(coping_effect),
-    "caffeine": caffeine,
-    "exercise": exercise,
-    "tags": list(tags),
-    "coping_used": list(coping_used),
-    "narrative": narrative or "",
-    "triggers": triggers or "",
-}
-record["daily_context"] = copy.deepcopy(daily_context)
 
 st.subheader("② 本地录制")
 pending_terminal_key = f"operational_recorder::pending::{session_token}"
