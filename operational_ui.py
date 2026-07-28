@@ -49,14 +49,14 @@ OPERATIONAL_CSS = """<style>
 .stApp { background: var(--operational-mist); color: var(--operational-navy); }
 .operational-rail {
   box-sizing: border-box; position: fixed; inset: 0 auto 0 0; width: 252px; padding: 28px 22px;
-  background: var(--operational-navy); color: var(--operational-white); z-index: 10;
+  overflow-y: auto; background: var(--operational-navy); color: var(--operational-white); z-index: 10;
 }
 .block-container {
   margin-left: 252px; width: calc(100% - 252px); max-width: none; box-sizing: border-box;
 }
 .operational-brand { margin: 0 0 32px; font-size: 12px; font-weight: 700; letter-spacing: 0; line-height: 1.5; }
 .operational-brand span { display: block; color: var(--operational-cyan); }
-.operational-stages { display: grid; gap: 8px; }
+.operational-stages { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .operational-stage { display: grid; grid-template-columns: 32px 1fr; gap: 10px; align-items: center; padding: 8px; border-radius: 6px; color: var(--operational-white); }
 .operational-stage__number { color: var(--operational-violet); font-weight: 700; }
 .operational-stage__label { display: block; font-size: 13px; line-height: 1.25; }
@@ -65,6 +65,7 @@ OPERATIONAL_CSS = """<style>
 .operational-stage--completed .operational-stage__number { color: var(--operational-cyan); }
 .operational-stage--active { background: var(--operational-rose); color: var(--operational-white); }
 .operational-stage--active .operational-stage__number { background: var(--operational-rose); border: 2px solid var(--operational-rose); color: var(--operational-white); outline: 2px solid var(--operational-white); outline-offset: 2px; }
+.operational-stage--future .operational-stage__number { background: var(--operational-violet); border: 2px solid var(--operational-white); color: var(--operational-white); }
 .operational-heading { display: grid; gap: 8px; max-width: 960px; margin: 0 auto 24px; }
 .operational-heading__counter { color: var(--operational-violet); font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .operational-heading h1 { margin: 0; color: var(--operational-navy); font-size: 28px; letter-spacing: 0; }
@@ -77,7 +78,7 @@ OPERATIONAL_CSS = """<style>
 .stButton > button { border-radius: 6px; background: var(--operational-rose); color: var(--operational-white); white-space: normal; }
 .stButton > button:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--operational-cyan); outline-offset: 2px; }
 .stTextInput input, .stTextArea textarea, .stSelectbox select, .stNumberInput input { border-radius: 6px; }
-iframe { aspect-ratio: 16 / 9; max-width: 100%; }
+iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; height: auto !important; max-width: 100%; }
 .operational-mobile, .operational-progress { display: none; }
 @media (max-width: 840px) {
   .operational-rail { display: none; }
@@ -102,7 +103,7 @@ def _escape(value: object) -> str:
 
 
 def _stage(active_stage: int) -> OperationalStage:
-    if isinstance(active_stage, bool) or not isinstance(active_stage, int) or not 1 <= active_stage <= len(STAGES):
+    if type(active_stage) is not int or not 1 <= active_stage <= len(STAGES):
         raise ValueError("active stage must be an integer from 1 to 6")
     return STAGES[active_stage - 1]
 
@@ -111,10 +112,10 @@ def _stage_row(stage: OperationalStage, active_stage: int) -> str:
     state = "active" if stage.number == active_stage else "completed" if stage.number < active_stage else "future"
     current = ' aria-current="step"' if state == "active" else ""
     return (
-        f'<div class="operational-stage operational-stage--{_escape(state)}"{current}>'
+        f'<li class="operational-stage operational-stage--{_escape(state)}"{current}>'
         f'<span class="operational-stage__number">{_escape(f"{stage.number:02d}")}</span>'
         f'<span class="operational-stage__label">{_escape(stage.english)}<small>{_escape(stage.chinese)}</small></span>'
-        "</div>"
+        "</li>"
     )
 
 
@@ -140,7 +141,7 @@ def stage_shell_markup(
     progress = "".join(_progress_segment(stage, active_stage) for stage in STAGES)
     return f'''<aside class="operational-rail" aria-label="Session flow">
 <p class="operational-brand">SESSION COMPANION<span>GUIDED LOCAL-FIRST FLOW</span></p>
-<div class="operational-stages">{rows}</div>
+<ol class="operational-stages">{rows}</ol>
 </aside>
 <header class="operational-mobile"><span>SESSION COMPANION</span><span>{_escape(f"{active_stage:02d}")} / 06</span></header>
 <div class="operational-progress" aria-label="Session progress">{progress}</div>
@@ -148,7 +149,7 @@ def stage_shell_markup(
 
 
 def operational_status_markup(kind: str, message: object) -> str:
-    if not isinstance(kind, str) or kind not in {"neutral", "ready", "checkpoint", "blocking"}:
+    if type(kind) is not str or kind not in {"neutral", "ready", "checkpoint", "blocking"}:
         raise ValueError("status kind must be neutral, ready, checkpoint, or blocking")
     return f'<div class="operational-status operational-status--{_escape(kind)}" role="status">{_escape(message)}</div>'
 

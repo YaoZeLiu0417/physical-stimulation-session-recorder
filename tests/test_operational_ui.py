@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 
 import operational_ui
+
+
+class ShellParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags: list[tuple[str, dict[str, str | None]]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.tags.append((tag, dict(attrs)))
 
 
 def test_palette_and_stages_are_exact() -> None:
@@ -86,13 +96,21 @@ def test_status_markup_rejects_unknown_kind() -> None:
         operational_ui.operational_status_markup("unknown", "message")
 
 
-@pytest.mark.parametrize("kind", [[], {}, 1, None])
+class UnhashableString(str):
+    __hash__ = None
+
+
+@pytest.mark.parametrize("kind", [[], {}, 1, None, UnhashableString("ready")])
 def test_status_markup_rejects_non_string_kind(kind: object) -> None:
     with pytest.raises(ValueError, match="status kind"):
         operational_ui.operational_status_markup(kind, "message")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("active_stage", [True, "1", 0, 7])
+class IntSubclass(int):
+    pass
+
+
+@pytest.mark.parametrize("active_stage", [True, IntSubclass(1), "1", 0, 7])
 def test_stage_shell_rejects_invalid_active_stage(active_stage: object) -> None:
     with pytest.raises(ValueError, match="active stage"):
         operational_ui.stage_shell_markup(active_stage)  # type: ignore[arg-type]
@@ -113,14 +131,17 @@ def test_css_meets_operational_visual_contract() -> None:
         assert selector in css
     assert "@media (max-width: 840px)" in css
     assert "grid-template-columns: repeat(6, minmax(0, 1fr))" in css
-    assert "aspect-ratio: 16 / 9" in css
+    assert 'iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; height: auto !important;' in css
+    assert "iframe {" not in css
     assert ":focus-visible" in css
     assert "letter-spacing: 0" in css
     assert "white-space: normal" in css
     assert "@media (prefers-reduced-motion: reduce)" in css
     assert ".operational-rail {\n  box-sizing: border-box;" in css
+    assert "overflow-y: auto" in css
     assert ".block-container {\n  margin-left: 252px; width: calc(100% - 252px);" in css
     assert ".operational-stage--active .operational-stage__number { background: var(--operational-rose);" in css
+    assert ".operational-stage--future .operational-stage__number { background: var(--operational-violet); border: 2px solid var(--operational-white); color: var(--operational-white); }" in css
     assert '[data-testid="stHorizontalBlock"]' in css
     assert '[data-testid="column"]' in css
     assert "flex-direction: column" in css
@@ -135,6 +156,18 @@ def test_stage_shell_has_no_custom_workspace_wrapper() -> None:
 
     assert "operational-workspace" not in markup
     assert "<main" not in markup
+
+
+def test_stage_shell_has_the_expected_semantic_structure() -> None:
+    parser = ShellParser()
+    parser.feed(operational_ui.stage_shell_markup(3))
+
+    assert sum(tag == "aside" for tag, _ in parser.tags) == 1
+    assert sum(tag == "header" for tag, _ in parser.tags) == 1
+    assert sum(tag == "h1" for tag, _ in parser.tags) == 1
+    assert sum(tag == "li" and attrs.get("class") == "operational-stage operational-stage--future" for tag, attrs in parser.tags) == 3
+    assert sum(tag == "li" and attrs.get("class", "").startswith("operational-stage ") for tag, attrs in parser.tags) == 6
+    assert sum(attrs.get("class", "").startswith("operational-progress__segment ") for _, attrs in parser.tags) == 6
 
 
 def test_streamlit_theme_values_are_exact() -> None:
