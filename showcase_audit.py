@@ -79,6 +79,10 @@ class _MetadataDecodeError(ValueError):
     pass
 
 
+class _UnsupportedBinaryMetadataError(ValueError):
+    pass
+
+
 class _FileTooLargeError(ValueError):
     pass
 
@@ -277,6 +281,7 @@ def _webp_text_metadata(data: bytes) -> list[bytes]:
     metadata: list[bytes] = []
     metadata_used = 0
     found_image = False
+    found_exif = False
     position = 12
     while position < len(data):
         if position + 8 > len(data):
@@ -292,7 +297,9 @@ def _webp_text_metadata(data: bytes) -> list[bytes]:
             raise _InvalidMediaError
         if chunk_size % 2 and data[chunk_end] != 0:
             raise _InvalidMediaError
-        if chunk_type in {b"EXIF", b"XMP "}:
+        if chunk_type == b"EXIF":
+            found_exif = True
+        elif chunk_type == b"XMP ":
             if metadata_used + chunk_size > MAX_METADATA_BYTES:
                 raise _MetadataParseError
             metadata.append(data[chunk_start:chunk_end])
@@ -310,6 +317,8 @@ def _webp_text_metadata(data: bytes) -> list[bytes]:
         position = padded_end
     if not found_image:
         raise _InvalidMediaError
+    if found_exif:
+        raise _UnsupportedBinaryMetadataError
     return metadata
 
 
@@ -566,6 +575,11 @@ def audit_showcase(root: Path) -> list[str]:
                     continue
                 try:
                     metadata = _webp_text_metadata(data)
+                except _UnsupportedBinaryMetadataError:
+                    findings.append(
+                        f"unsupported-binary-metadata: {relative_path}"
+                    )
+                    continue
                 except _MetadataParseError:
                     findings.append(f"metadata-parse-error: {relative_path}")
                     continue

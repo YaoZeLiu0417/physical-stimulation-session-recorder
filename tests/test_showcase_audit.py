@@ -361,12 +361,12 @@ def test_real_gif_fixtures_with_multi_sub_blocks_are_valid_and_scanned(
     assert "tavns" not in findings
 
 
-def test_real_webp_fixture_with_xmp_and_exif_is_valid_and_scanned(
+def test_real_webp_fixture_with_benign_exif_is_rejected(
     tmp_path: Path,
 ) -> None:
     _write_safe_tree(tmp_path)
     exif = Image.Exif()
-    exif[0x010E] = "public-exif tavns"
+    exif[0x010E] = "public-exif"
     data = _webp_bytes(
         metadata=b"<?xml version='1.0' encoding='UTF-8'?><x>public</x>",
         additional_metadata=((b"EXIF", exif.tobytes()),),
@@ -376,36 +376,45 @@ def test_real_webp_fixture_with_xmp_and_exif_is_valid_and_scanned(
 
     findings = _joined_findings(tmp_path)
 
-    assert "forbidden-term: assets/step-01-access.webp" in findings
-    assert "metadata-decode-error" not in findings
-    assert "tavns" not in findings
+    assert findings == "unsupported-binary-metadata: assets/step-01-access.webp"
+    assert "public-exif" not in findings
 
 
 @pytest.mark.parametrize(
     "sensitive_text",
     [
-        "tavns",
+        *(term for term in FORBIDDEN_TERMS if not term.isascii()),
         r"C:\Users\Alice\private.txt",
         "https://example.test/private",
         "https://example.test/private?token=value",
     ],
-    ids=["forbidden-term", "absolute-path", "url", "credential"],
+    ids=[
+        "non-ascii-term-1",
+        "non-ascii-term-2",
+        "non-ascii-term-3",
+        "non-ascii-term-4",
+        "non-ascii-term-5",
+        "absolute-path",
+        "url",
+        "credential",
+    ],
 )
-def test_ambiguous_utf16_exif_metadata_fails_closed_without_echoing_content(
-    tmp_path: Path, sensitive_text: str
+@pytest.mark.parametrize(
+    "encoding", ["utf-16-le", "utf-16-be"], ids=["little-endian", "big-endian"]
+)
+def test_opaque_utf16_exif_metadata_fails_closed_without_echoing_content(
+    tmp_path: Path, sensitive_text: str, encoding: str
 ) -> None:
     _write_safe_tree(tmp_path)
     relative_path = "assets/step-01-access.webp"
-    exif = _tiff_with_raw_description(
-        sensitive_text.encode("utf-16-le") + b"\x00\x00"
-    )
+    exif = _tiff_with_raw_description(sensitive_text.encode(encoding) + b"\x00\x00")
     data = _webp_bytes(metadata=exif, metadata_type=b"EXIF")
     _assert_pillow_valid(data)
     (tmp_path / relative_path).write_bytes(data)
 
     findings = audit_showcase(tmp_path)
 
-    assert findings == [f"metadata-decode-error: {relative_path}"]
+    assert findings == [f"unsupported-binary-metadata: {relative_path}"]
     assert sensitive_text not in "\n".join(findings)
 
 
@@ -442,7 +451,7 @@ def test_declared_metadata_encodings_are_strictly_decoded_and_scanned(
     assert "tavns" not in findings
 
 
-def test_utf16_exif_metadata_is_scanned(tmp_path: Path) -> None:
+def test_bom_utf16_exif_metadata_is_rejected_as_opaque(tmp_path: Path) -> None:
     _write_safe_tree(tmp_path)
     relative_path = "assets/step-01-access.webp"
     metadata = b"\xff\xfe" + "tavns".encode("utf-16-le")
@@ -452,7 +461,7 @@ def test_utf16_exif_metadata_is_scanned(tmp_path: Path) -> None:
 
     findings = _joined_findings(tmp_path)
 
-    assert f"forbidden-term: {relative_path}" in findings
+    assert findings == f"unsupported-binary-metadata: {relative_path}"
     assert "tavns" not in findings
 
 
@@ -972,7 +981,7 @@ def test_metadata_size_limit_boundary_is_allowed(
             _webp_bytes(
                 metadata=b"a" * (EXPECTED_MAX_METADATA_BYTES // 2 + 1),
                 additional_metadata=(
-                    (b"EXIF", b"b" * (EXPECTED_MAX_METADATA_BYTES // 2)),
+                    (b"XMP ", b"b" * (EXPECTED_MAX_METADATA_BYTES // 2)),
                 ),
             ),
         ),
