@@ -563,6 +563,7 @@ class FakeElement {
     this.hidden = false;
     this.srcObject = null;
     this.state = "";
+    this.scrollIntoViewCalls = [];
     Object.assign(this, properties);
   }
 
@@ -592,6 +593,10 @@ class FakeElement {
 
   play() {
     return Promise.resolve();
+  }
+
+  scrollIntoView(options) {
+    this.scrollIntoViewCalls.push(options);
   }
 }
 
@@ -1147,11 +1152,13 @@ test("local completion panel follows finalized output through confirmation and r
   const harness = await recorderAppHarness();
   try {
     assert.equal(harness.elements["save-panel"].hidden, true);
+    assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
 
     await harness.render("long");
     harness.elements["record-button"].emit("click");
     await settleRecorderApp();
     assert.equal(harness.elements["save-panel"].hidden, true);
+    assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
 
     const recorder = harness.recorderInstances[0];
     recorder.emitData(numberedBlob(4));
@@ -1160,6 +1167,9 @@ test("local completion panel follows finalized output through confirmation and r
     await settleRecorderApp();
 
     assert.equal(harness.elements["save-panel"].hidden, false);
+    assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, [
+      { block: "nearest", behavior: "auto" },
+    ]);
     assert.equal(
       harness.elements.status.textContent,
       "Recording stopped. Complete the three local-save steps below to continue.",
@@ -1187,6 +1197,7 @@ test("local completion panel follows finalized output through confirmation and r
       error_code: null,
     });
     assert.equal(harness.elements["save-panel"].hidden, false);
+    assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
     assert.equal(
       harness.elements.status.textContent,
       "Local recording saved and checked. Continuing to the next step.",
@@ -1195,6 +1206,7 @@ test("local completion panel follows finalized output through confirmation and r
     harness.elements["rerecord-button"].emit("click");
     await settleRecorderApp();
     assert.equal(harness.elements["save-panel"].hidden, true);
+    assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
   } finally {
     await harness.dispose();
   }

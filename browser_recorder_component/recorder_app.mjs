@@ -158,7 +158,11 @@ function renderControls(message = null) {
   elements.rerecordButton.hidden = !canRecordAgain;
   elements.rerecordButton.disabled = cleaningUp;
   elements.skipButton.disabled = !canStart;
+  const shouldRevealSavePanel = localCompletionReady && elements.savePanel.hidden;
   elements.savePanel.hidden = !localCompletionReady;
+  if (shouldRevealSavePanel) {
+    elements.savePanel.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }
   elements.saveConfirmation.disabled =
     cleaningUp || !localCompletionReady || status.state === "saved";
   elements.saveConfirmation.checked = status.saved_confirmed;
