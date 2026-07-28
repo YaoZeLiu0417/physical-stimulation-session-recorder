@@ -2,6 +2,7 @@ import ast
 import hashlib
 import re
 import tomllib
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -342,6 +343,7 @@ EXPECTED_SHOWCASE_CALL_INVENTORY = {
     "streamlit.warning",
 }
 ALLOWED_SHOWCASE_CALLS = EXPECTED_SHOWCASE_CALL_INVENTORY | {"str.replace"}
+EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY = Counter({"os.getenv": 1})
 
 
 def _app_with_password(app_path: Path = APP) -> AppTest:
@@ -1684,7 +1686,11 @@ def test_showcase_has_no_probe_split_or_legacy_media_hooks():
 
 def _showcase_ast_inventory(
     source: str,
-) -> tuple[tuple[tuple[str, str, str], ...], set[str]]:
+) -> tuple[
+    tuple[tuple[str, str, str], ...],
+    set[str],
+    Counter[str],
+]:
     tree = ast.parse(source)
     import_inventory: list[tuple[str, str, str]] = []
     bindings: dict[str, str] = {}
@@ -1700,6 +1706,7 @@ def _showcase_ast_inventory(
                 bindings[local_name] = qualified_name
         elif isinstance(node, ast.ImportFrom):
             module_name = "." * node.level + (node.module or "")
+            assert module_name != "os"
             for alias in node.names:
                 assert alias.name != "*"
                 qualified_name = (
@@ -1728,13 +1735,28 @@ def _showcase_ast_inventory(
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
     }
-    return tuple(sorted(import_inventory)), call_inventory
+    os_attribute_inventory: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            qualified_name = qualified_expression(node)
+            if qualified_name.startswith("os."):
+                os_attribute_inventory[qualified_name] += 1
+    return (
+        tuple(sorted(import_inventory)),
+        call_inventory,
+        os_attribute_inventory,
+    )
 
 
 def _assert_showcase_ast_boundary(source: str) -> set[str]:
-    import_inventory, call_inventory = _showcase_ast_inventory(source)
+    import_inventory, call_inventory, os_attribute_inventory = (
+        _showcase_ast_inventory(source)
+    )
     assert import_inventory == EXPECTED_SHOWCASE_IMPORT_BINDINGS
     assert call_inventory <= ALLOWED_SHOWCASE_CALLS
+    assert (
+        os_attribute_inventory == EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY
+    )
     return call_inventory
 
 
@@ -1753,6 +1775,34 @@ def test_showcase_ast_boundary_rejects_os_replace_and_aliases(mutation):
 
     with pytest.raises(AssertionError):
         _assert_showcase_ast_boundary(f"{source}\n{mutation}\n")
+
+
+def test_showcase_ast_boundary_rejects_os_attribute_assignment_alias():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nstr = os.replace\nstr("source", "target")\n'
+        )
+
+
+def test_showcase_ast_boundary_rejects_os_attribute_callback_alias():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nmove_file = os.replace\n'
+            'if False:\n    st.button("unused", on_click=move_file)\n'
+        )
+
+
+def test_showcase_ast_boundary_rejects_duplicate_os_getenv_reference():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nos.getenv("SHOWCASE_SECOND_SECRET")\n'
+        )
 
 
 def test_showcase_ast_boundary_allows_string_replace() -> None:
