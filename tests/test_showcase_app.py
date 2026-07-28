@@ -1953,8 +1953,8 @@ def test_streamlit_theme_and_app_palette_are_exact_and_green_free():
     assert tomllib.loads(config_text) == {
         "theme": {
             "primaryColor": "#DD1D86",
-            "backgroundColor": "#FFFFFF",
-            "secondaryBackgroundColor": "#F4F4F4",
+            "backgroundColor": "#F4F5F7",
+            "secondaryBackgroundColor": "#FFFFFF",
             "textColor": "#000035",
             "font": "sans serif",
         }
