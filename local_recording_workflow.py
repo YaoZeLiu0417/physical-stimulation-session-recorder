@@ -1,6 +1,19 @@
 from browser_recorder import RecorderStatus
 
 
+def confirm_local_recording_saved(status: RecorderStatus) -> RecorderStatus:
+    if status.__class__ is not RecorderStatus or status.state != "stopped":
+        raise ValueError("only a stopped recording can be confirmed")
+    return RecorderStatus(
+        mode=status.mode,
+        state="saved",
+        duration_seconds=status.duration_seconds,
+        camera_ready=status.camera_ready,
+        microphone_ready=status.microphone_ready,
+        saved_confirmed=True,
+    )
+
+
 def local_recording_metadata(status: RecorderStatus) -> dict[str, object]:
     return {
         "version": 2,

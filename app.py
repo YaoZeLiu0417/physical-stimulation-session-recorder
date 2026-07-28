@@ -32,6 +32,7 @@ from link_auth import (
 )
 from local_export_bundle import LocalExportBundle
 from local_recording_workflow import (
+    confirm_local_recording_saved,
     local_recording_metadata,
     recording_gate_satisfied,
 )
@@ -630,6 +631,19 @@ else:
         key=recorder_key,
         initial_mode="long",
     )
+    if recorder_status.state == "stopped":
+        st.warning(
+            "请先下载录像，在本机打开文件并确认画面与声音均可正常播放。"
+        )
+        if st.button(
+            "我已下载并检查录像，继续填写问卷",
+            type="primary",
+            key=f"operational_recorder::host_confirm::{session_token}",
+        ):
+            record["recording"] = local_recording_metadata(
+                confirm_local_recording_saved(recorder_status)
+            )
+            st.rerun()
     terminal_status = None
     if recorder_status.state in {"skipped", "failed"}:
         terminal_status = recorder_status

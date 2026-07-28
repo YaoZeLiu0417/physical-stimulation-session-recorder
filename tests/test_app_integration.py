@@ -1604,6 +1604,59 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
     assert "刷新或关闭页面" in visible
 
 
+def test_stopped_recording_host_confirmation_enters_formal_questionnaire(
+    monkeypatch,
+):
+    questionnaire_calls = []
+
+    def incomplete_questionnaire(**kwargs):
+        questionnaire_calls.append(kwargs)
+        return kwargs["answers"], False
+
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(
+            mode="long",
+            state="stopped",
+            duration_seconds=1250,
+            camera_ready=False,
+            microphone_ready=False,
+        ),
+        render_questionnaire=incomplete_questionnaire,
+    )
+
+    assert not app.exception
+    assert questionnaire_calls == []
+    assert app.session_state["operational_record"]["recording"] == {}
+    confirmation = _element_by_label(
+        app.button,
+        "我已下载并检查录像，继续填写问卷",
+    )
+
+    confirmation.click().run()
+
+    assert not app.exception
+    assert len(questionnaire_calls) == 1
+    assert len(recorder_calls) == 2
+    assert app.session_state["operational_record"]["recording"] == {
+        "version": 2,
+        "storage": "browser_local",
+        "status": "saved",
+        "mode": "long",
+        "duration_seconds": 1250,
+        "camera_ready": False,
+        "microphone_ready": False,
+        "saved_confirmed": True,
+    }
+    visible = _visible_app_text(app)
+    assert "录制已确认保存在本机，现已进入问卷。" in visible
+    assert "③ 正式问卷" in visible
+
+    app.run()
+
+    assert len(recorder_calls) == 2
+
+
 def test_accepted_saved_recording_locks_component_phase_on_questionnaire_rerun(
     monkeypatch,
 ):

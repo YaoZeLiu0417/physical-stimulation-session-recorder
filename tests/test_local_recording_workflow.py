@@ -5,6 +5,7 @@ import pytest
 
 from browser_recorder import RecorderStatus
 from local_recording_workflow import (
+    confirm_local_recording_saved,
     local_recording_metadata,
     recording_gate_satisfied,
 )
@@ -117,6 +118,36 @@ def test_failed_or_skipped_requires_explicit_continuation(state: str) -> None:
     assert recording_gate_satisfied(status, True) is True
 
 
+def test_stopped_recording_can_be_explicitly_confirmed_on_host() -> None:
+    status = RecorderStatus(
+        mode="long",
+        state="stopped",
+        duration_seconds=1250,
+        camera_ready=False,
+        microphone_ready=False,
+    )
+
+    confirmed = confirm_local_recording_saved(status)
+
+    assert confirmed == RecorderStatus(
+        mode="long",
+        state="saved",
+        duration_seconds=1250,
+        camera_ready=False,
+        microphone_ready=False,
+        saved_confirmed=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["idle", "ready", "recording", "saved", "skipped", "failed"],
+)
+def test_host_confirmation_rejects_any_non_stopped_state(state: str) -> None:
+    with pytest.raises(ValueError, match="stopped recording"):
+        confirm_local_recording_saved(RecorderStatus(state=state))
+
+
 @pytest.mark.parametrize("state", ["idle", "ready", "stopped"])
 @pytest.mark.parametrize("continue_without_recording", [False, True])
 def test_incomplete_states_never_pass(
@@ -150,7 +181,12 @@ def test_workflow_imports_only_recorder_status() -> None:
     assert [(alias.name, alias.asname) for alias in imports[0].names] == [
         ("RecorderStatus", None)
     ]
-    assert [node for node in ast.walk(tree) if isinstance(node, ast.Call)] == []
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    assert all(isinstance(call.func, ast.Name) for call in calls)
+    assert sorted(call.func.id for call in calls) == [
+        "RecorderStatus",
+        "ValueError",
+    ]
 
 
 def test_workflow_source_has_no_external_capability() -> None:
