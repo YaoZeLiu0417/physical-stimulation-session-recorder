@@ -14,6 +14,75 @@ from session_record_workflow import (
 )
 
 
+def resolve_operational_stage(
+    *,
+    access_granted: bool,
+    context_confirmed: bool,
+    recording_complete: bool,
+    questionnaire_complete: bool,
+    session_complete: bool,
+) -> int:
+    """Resolve the earliest incomplete operational session gate."""
+
+    flags = (
+        access_granted,
+        context_confirmed,
+        recording_complete,
+        questionnaire_complete,
+        session_complete,
+    )
+    if any(type(flag) is not bool for flag in flags):
+        raise ValueError("operational stage flags must be boolean")
+    if not access_granted:
+        return 1
+    if session_complete:
+        return 6
+    if not context_confirmed:
+        return 2
+    if not recording_complete:
+        return 3
+    if not questionnaire_complete:
+        return 4
+    return 5
+
+
+def build_daily_context_confirmation(
+    record: Mapping[str, Any], *, auth_source: str
+) -> dict[str, Any]:
+    """Build the identity-bound confirmation for the current daily context."""
+
+    if type(auth_source) is not str or auth_source not in {"admin", "signed_link"}:
+        raise ValueError("auth source must be admin or signed_link")
+
+    identity_fields = (
+        "record_id",
+        "subject_id",
+        "record_date",
+        "intervention_day",
+        "visit",
+    )
+    if not isinstance(record, Mapping) or any(field not in record for field in identity_fields):
+        raise ValueError("daily context identity is incomplete")
+
+    return {
+        "auth_source": auth_source,
+        **{field: record[field] for field in identity_fields},
+    }
+
+
+def daily_context_confirmation_matches(
+    value: object, record: Mapping[str, Any], *, auth_source: str
+) -> bool:
+    """Return whether a stored daily-context confirmation is exact and current."""
+
+    if type(value) is not dict:
+        return False
+    try:
+        return value == build_daily_context_confirmation(record, auth_source=auth_source)
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_intervention_day(value: object) -> int:
     if type(value) is not int:
         raise ValueError("intervention day must be an integer from 1 to 28")
