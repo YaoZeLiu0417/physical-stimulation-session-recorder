@@ -83,12 +83,6 @@ flowchart LR
 
 The two boundaries matter: audiovisual bytes stay inside Chrome until the user saves the WebM, while context and questionnaire values pass to transient Streamlit session memory so the local response package can be generated. This application does not treat the server as a durable recording or response archive.
 
-## Operational Palette
-
-![Operational palette showing deep navy, violet, rose, cyan, and peach](assets/readme/operational-palette.webp)
-
-Deep navy `#000035` anchors navigation and text; violet `#2D2674` structures progress; rose `#DD1D86` marks the current action; cyan `#33B0E4` communicates readiness; and peach `#FFBC7D` marks quiet checkpoints. White and mist keep the workspace readable.
-
 ## Chrome Guide
 
 1. Open the controlled application in current desktop Chrome.
