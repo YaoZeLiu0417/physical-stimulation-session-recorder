@@ -1111,6 +1111,7 @@ test("long recording rejects a successful close with zero nonempty output", asyn
     assert.equal(harness.latestStatus().error_code, "write_failed");
     assert.equal(harness.latestStatus().saved_confirmed, false);
     assert.equal(harness.elements["save-confirmation"].disabled, true);
+    assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
   } finally {
     await harness.dispose();
   }
@@ -1170,6 +1171,10 @@ test("local completion panel follows finalized output through confirmation and r
     assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, [
       { block: "nearest", behavior: "auto" },
     ]);
+
+    await harness.render("long");
+    assert.equal(harness.elements["save-panel"].hidden, false);
+    assert.equal(harness.elements["save-panel"].scrollIntoViewCalls.length, 1);
     assert.equal(
       harness.elements.status.textContent,
       "Recording stopped. Complete the three local-save steps below to continue.",
@@ -1330,6 +1335,7 @@ test("skip cleanup gates record until a pending audio close completes", async ()
     audioCloseGate.resolve();
     await settleRecorderApp();
     assert.equal(harness.latestStatus().state, "skipped");
+    assert.deepEqual(harness.elements["save-panel"].scrollIntoViewCalls, []);
     assert.equal(
       harness.stream.tracks.every((track) => track.stopCalls === 1),
       true,
