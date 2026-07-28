@@ -1,9 +1,11 @@
+import io
 import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 import showcase_audit
 from showcase_audit import FORBIDDEN_TERMS, audit_showcase
@@ -33,6 +35,10 @@ EXPECTED_WEBP_FILES = frozenset(
 EXPECTED_PUBLIC_FILES = tuple(
     sorted(EXPECTED_TEXT_FILES | EXPECTED_GIF_FILES | EXPECTED_WEBP_FILES)
 )
+EXPECTED_MAX_GIF_FILE_BYTES = 8 * 1024 * 1024 - 1
+EXPECTED_MAX_GIF_TOTAL_BYTES = 14 * 1024 * 1024 - 1
+EXPECTED_MAX_WEBP_FILE_BYTES = 350 * 1024 - 1
+EXPECTED_MAX_METADATA_BYTES = 64 * 1024
 EXPECTED_FORBIDDEN_TERMS = (
     "tavns",
     "nssi",
@@ -47,36 +53,71 @@ EXPECTED_FORBIDDEN_TERMS = (
 )
 
 
-def _gif_bytes(metadata: bytes = b"", image_data: bytes = b"\x44\x01") -> bytes:
-    comment = b""
+def _sub_blocks(payload: bytes, block_size: int = 255) -> bytes:
+    assert 1 <= block_size <= 255
+    return b"".join(
+        bytes([len(payload[offset : offset + block_size])])
+        + payload[offset : offset + block_size]
+        for offset in range(0, len(payload), block_size)
+    ) + b"\x00"
+
+
+def _gif_bytes(
+    metadata: bytes = b"",
+    image_data: bytes = b"\x44\x01",
+    metadata_kind: str = "comment",
+    metadata_block_size: int = 255,
+) -> bytes:
+    extension = b""
     if metadata:
-        assert len(metadata) <= 255
-        comment = b"\x21\xfe" + bytes([len(metadata)]) + metadata + b"\x00"
+        metadata_blocks = _sub_blocks(metadata, metadata_block_size)
+        if metadata_kind == "comment":
+            extension = b"\x21\xfe" + metadata_blocks
+        elif metadata_kind == "application":
+            extension = b"\x21\xff\x0bXMP DataXMP" + metadata_blocks
+        elif metadata_kind == "plain-text":
+            extension = b"\x21\x01\x0c" + (b"\x00" * 12) + metadata_blocks
+        else:
+            raise ValueError(f"unsupported metadata kind: {metadata_kind}")
     return (
         b"GIF89a"
         b"\x01\x00\x01\x00\x80\x00\x00"
         b"\x00\x00\x00\xff\xff\xff"
-        + comment
+        + extension
         + b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
         b"\x02"
-        + bytes([len(image_data)])
-        + image_data
-        + b"\x00\x3b"
+        + _sub_blocks(image_data)
+        + b"\x3b"
     )
+
+
+def _riff_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    padding = b"\x00" if len(payload) % 2 else b""
+    return chunk_type + len(payload).to_bytes(4, "little") + payload + padding
 
 
 def _webp_bytes(
     metadata: bytes = b"",
-    image_data: bytes = b"\x2f\x00\x00\x00\x00\x88\x88\xfe\x07",
+    image_data: bytes = b"\x2f\x00\x00\x00\x00\x07\xd0\xff\xfe\xf7\xbf\xff\x81\x88\xe8\x7f\x00",
+    metadata_type: bytes = b"XMP ",
+    additional_metadata: tuple[tuple[bytes, bytes], ...] = (),
 ) -> bytes:
-    chunks = b""
+    metadata_chunks: list[tuple[bytes, bytes]] = []
     if metadata:
-        chunks += b"XMP " + len(metadata).to_bytes(4, "little") + metadata
-        if len(metadata) % 2:
-            chunks += b"\x00"
-    chunks += b"VP8L" + len(image_data).to_bytes(4, "little") + image_data
-    if len(image_data) % 2:
-        chunks += b"\x00"
+        metadata_chunks.append((metadata_type, metadata))
+    metadata_chunks.extend(additional_metadata)
+
+    chunks = b""
+    if metadata_chunks:
+        flags = 0
+        if any(chunk_type == b"EXIF" for chunk_type, _ in metadata_chunks):
+            flags |= 0x08
+        if any(chunk_type == b"XMP " for chunk_type, _ in metadata_chunks):
+            flags |= 0x04
+        chunks += _riff_chunk(b"VP8X", bytes([flags]) + (b"\x00" * 9))
+    chunks += _riff_chunk(b"VP8L", image_data)
+    for chunk_type, payload in metadata_chunks:
+        chunks += _riff_chunk(chunk_type, payload)
     return b"RIFF" + (len(chunks) + 4).to_bytes(4, "little") + b"WEBP" + chunks
 
 
@@ -96,6 +137,13 @@ def _write_safe_tree(root: Path) -> None:
 
 def _joined_findings(root: Path) -> str:
     return "\n".join(audit_showcase(root))
+
+
+def _assert_pillow_valid(data: bytes) -> None:
+    with Image.open(io.BytesIO(data)) as image:
+        image.verify()
+    with Image.open(io.BytesIO(data)) as image:
+        image.load()
 
 
 def _with_file_type(result: os.stat_result, file_type: int) -> os.stat_result:
@@ -128,6 +176,10 @@ def test_public_file_inventory_matches_fancy_showcase_contract() -> None:
     assert showcase_audit.GIF_FILES == EXPECTED_GIF_FILES
     assert showcase_audit.WEBP_FILES == EXPECTED_WEBP_FILES
     assert showcase_audit.PUBLIC_FILES == EXPECTED_PUBLIC_FILES
+    assert showcase_audit.MAX_GIF_FILE_BYTES == EXPECTED_MAX_GIF_FILE_BYTES
+    assert showcase_audit.MAX_GIF_TOTAL_BYTES == EXPECTED_MAX_GIF_TOTAL_BYTES
+    assert showcase_audit.MAX_WEBP_FILE_BYTES == EXPECTED_MAX_WEBP_FILE_BYTES
+    assert showcase_audit.MAX_METADATA_BYTES == EXPECTED_MAX_METADATA_BYTES
 
 
 def test_approved_markdown_url_passes(tmp_path: Path) -> None:
@@ -273,6 +325,169 @@ def test_binary_text_metadata_is_privacy_scanned_without_echoing_bytes(
     assert metadata.decode("ascii") not in findings
 
 
+@pytest.mark.parametrize("metadata_kind", ["comment", "application", "plain-text"])
+def test_real_gif_fixtures_with_multi_sub_blocks_are_valid_and_scanned(
+    tmp_path: Path, metadata_kind: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    data = _gif_bytes(
+        metadata=b"public-prefix tavns public-suffix",
+        metadata_kind=metadata_kind,
+        metadata_block_size=3,
+    )
+    _assert_pillow_valid(data)
+    (tmp_path / "assets" / "workflow-demo.gif").write_bytes(data)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "forbidden-term: assets/workflow-demo.gif" in findings
+    assert "tavns" not in findings
+
+
+def test_real_webp_fixture_with_xmp_and_exif_is_valid_and_scanned(
+    tmp_path: Path,
+) -> None:
+    _write_safe_tree(tmp_path)
+    exif = Image.Exif()
+    exif[0x010E] = "public-exif tavns"
+    data = _webp_bytes(
+        metadata=b"<?xml version='1.0' encoding='UTF-8'?><x>public</x>",
+        additional_metadata=((b"EXIF", exif.tobytes()),),
+    )
+    _assert_pillow_valid(data)
+    (tmp_path / "assets" / "step-01-access.webp").write_bytes(data)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "forbidden-term: assets/step-01-access.webp" in findings
+    assert "tavns" not in findings
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        b"\xef\xbb\xbf" + "tavns".encode("utf-8"),
+        b"\xff\xfe" + "tavns".encode("utf-16-le"),
+        b"\xfe\xff" + "tavns".encode("utf-16-be"),
+        "<?xml version='1.0' encoding='UTF-16LE'?><x>tavns</x>".encode(
+            "utf-16-le"
+        ),
+        b"<?xml version='1.0' encoding='UTF-8'?><x>tavns</x>",
+    ],
+    ids=["utf8-bom", "utf16le-bom", "utf16be-bom", "xml-utf16le", "xml-utf8"],
+)
+@pytest.mark.parametrize(
+    ("relative_path", "writer"),
+    [
+        ("assets/workflow-demo.gif", _gif_bytes),
+        ("assets/step-01-access.webp", _webp_bytes),
+    ],
+)
+def test_declared_metadata_encodings_are_strictly_decoded_and_scanned(
+    tmp_path: Path, relative_path: str, writer, metadata: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(writer(metadata=metadata))
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"forbidden-term: {relative_path}" in findings
+    assert "metadata-decode-error" not in findings
+    assert "tavns" not in findings
+
+
+def test_utf16_exif_metadata_is_scanned(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    relative_path = "assets/step-01-access.webp"
+    metadata = b"\xff\xfe" + "tavns".encode("utf-16-le")
+    (tmp_path / relative_path).write_bytes(
+        _webp_bytes(metadata=metadata, metadata_type=b"EXIF")
+    )
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"forbidden-term: {relative_path}" in findings
+    assert "tavns" not in findings
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        b"invalid-utf8-\xff-DO_NOT_LOG_THIS",
+        b"<?xml version='1.0' encoding='ISO-8859-1'?><x>DO_NOT_LOG_THIS</x>",
+        b"<?xml version='1.0' encoding='UTF-16LE'?><x>truncated\x00",
+    ],
+    ids=["invalid-utf8", "unknown-xml-encoding", "invalid-declared-encoding"],
+)
+@pytest.mark.parametrize(
+    ("relative_path", "writer"),
+    [
+        ("assets/workflow-demo.gif", _gif_bytes),
+        ("assets/step-01-access.webp", _webp_bytes),
+    ],
+)
+def test_undecodable_metadata_fails_closed_without_echoing_content(
+    tmp_path: Path, relative_path: str, writer, metadata: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(writer(metadata=metadata))
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"metadata-decode-error: {relative_path}" in findings
+    assert "DO_NOT_LOG_THIS" not in findings
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"GIF89a",
+        b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00",
+        _gif_bytes()[:-1],
+        _gif_bytes()[:19] + b"\x00" + _gif_bytes()[20:],
+        (
+            b"GIF89a\x01\x00\x01\x00\x80\x00\x00"
+            b"\x00\x00\x00\xff\xff\xff\x21\xfe\x05abc"
+        ),
+    ],
+    ids=["header-only", "truncated-color-table", "missing-trailer", "bad-marker", "truncated-sub-block"],
+)
+def test_malformed_gif_container_fails_closed(tmp_path: Path, data: bytes) -> None:
+    _write_safe_tree(tmp_path)
+    relative_path = "assets/workflow-demo.gif"
+    (tmp_path / relative_path).write_bytes(data)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"invalid-media: {relative_path}" in findings
+
+
+def _riff(chunks: bytes, declared_size: int | None = None) -> bytes:
+    size = len(chunks) + 4 if declared_size is None else declared_size
+    return b"RIFF" + size.to_bytes(4, "little") + b"WEBP" + chunks
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _riff(b""),
+        _webp_bytes()[:4] + (999).to_bytes(4, "little") + _webp_bytes()[8:],
+        _riff(b"VP8L\x11\x00\x00\x00short"),
+        _riff(b"VP8L\x01\x00\x00\x00x"),
+        _riff(_riff_chunk(b"XMP ", b"public")),
+    ],
+    ids=["header-only", "wrong-riff-size", "truncated-chunk", "missing-padding", "no-image-payload"],
+)
+def test_malformed_webp_container_fails_closed(tmp_path: Path, data: bytes) -> None:
+    _write_safe_tree(tmp_path)
+    relative_path = "assets/step-01-access.webp"
+    (tmp_path / relative_path).write_bytes(data)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"invalid-media: {relative_path}" in findings
+
+
 def test_forbidden_term_inventory_matches_canonical_contract() -> None:
     assert FORBIDDEN_TERMS == EXPECTED_FORBIDDEN_TERMS
 
@@ -362,6 +577,15 @@ def test_each_text_file_receives_full_privacy_audit(
     assert f"absolute-path: {relative_path}" in findings
     assert f"credential-param: {relative_path}" in findings
     assert f"unapproved-url: {relative_path}" in findings
+
+
+def _with_size(result: os.stat_result, size: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        st_mode=result.st_mode,
+        st_file_attributes=getattr(result, "st_file_attributes", 0),
+        st_nlink=result.st_nlink,
+        st_size=size,
+    )
 
 
 @pytest.mark.parametrize(
@@ -567,6 +791,181 @@ def test_read_text_oserror_is_reported(
     findings = _joined_findings(tmp_path)
 
     assert "read-error: README.md" in findings
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "size_limit"),
+    [
+        ("assets/workflow-demo.gif", EXPECTED_MAX_GIF_FILE_BYTES),
+        ("assets/step-01-access.webp", EXPECTED_MAX_WEBP_FILE_BYTES),
+    ],
+)
+def test_binary_file_size_limit_boundary_is_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    size_limit: int,
+) -> None:
+    _write_safe_tree(tmp_path)
+    target = tmp_path / relative_path
+    real_lstat = os.lstat
+
+    def lstat_at_boundary(path):
+        result = real_lstat(path)
+        if Path(path) == target:
+            return _with_size(result, size_limit)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_at_boundary)
+
+    assert audit_showcase(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "size_limit"),
+    [
+        ("assets/workflow-demo.gif", EXPECTED_MAX_GIF_FILE_BYTES),
+        ("assets/step-01-access.webp", EXPECTED_MAX_WEBP_FILE_BYTES),
+    ],
+)
+def test_oversized_binary_file_is_rejected_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    size_limit: int,
+) -> None:
+    _write_safe_tree(tmp_path)
+    target = tmp_path / relative_path
+    real_lstat = os.lstat
+    real_open = Path.open
+
+    def lstat_over_limit(path):
+        result = real_lstat(path)
+        if Path(path) == target:
+            return _with_size(result, size_limit + 1)
+        return result
+
+    def fail_if_target_is_read(path: Path, *args, **kwargs):
+        if path == target:
+            raise AssertionError("oversized file was read")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat_over_limit)
+    monkeypatch.setattr(Path, "open", fail_if_target_is_read)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"file-too-large: {relative_path}" in findings
+
+
+@pytest.mark.parametrize("total_size", [EXPECTED_MAX_GIF_TOTAL_BYTES, EXPECTED_MAX_GIF_TOTAL_BYTES + 1])
+def test_gif_total_size_limit_is_checked_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, total_size: int
+) -> None:
+    _write_safe_tree(tmp_path)
+    gif_paths = [tmp_path / name for name in sorted(EXPECTED_GIF_FILES)]
+    first_size = total_size // 2
+    sizes = {gif_paths[0]: first_size, gif_paths[1]: total_size - first_size}
+    real_lstat = os.lstat
+    real_open = Path.open
+
+    def lstat_with_gif_sizes(path):
+        result = real_lstat(path)
+        if Path(path) in sizes:
+            return _with_size(result, sizes[Path(path)])
+        return result
+
+    def fail_if_over_total_is_read(path: Path, *args, **kwargs):
+        if total_size > EXPECTED_MAX_GIF_TOTAL_BYTES and path in sizes:
+            raise AssertionError("GIF was read after aggregate limit failed")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat_with_gif_sizes)
+    monkeypatch.setattr(Path, "open", fail_if_over_total_is_read)
+
+    findings = audit_showcase(tmp_path)
+
+    if total_size == EXPECTED_MAX_GIF_TOTAL_BYTES:
+        assert findings == []
+    else:
+        assert "gif-total-too-large: ." in findings
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "data"),
+    [
+        (
+            "assets/workflow-demo.gif",
+            _gif_bytes(metadata=b" " * EXPECTED_MAX_METADATA_BYTES),
+        ),
+        (
+            "assets/step-01-access.webp",
+            _webp_bytes(metadata=b" " * EXPECTED_MAX_METADATA_BYTES),
+        ),
+    ],
+    ids=["gif-boundary", "webp-boundary"],
+)
+def test_metadata_size_limit_boundary_is_allowed(
+    tmp_path: Path, relative_path: str, data: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(data)
+
+    assert audit_showcase(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "data"),
+    [
+        (
+            "assets/workflow-demo.gif",
+            _gif_bytes(metadata=b"a" * (EXPECTED_MAX_METADATA_BYTES + 1)),
+        ),
+        (
+            "assets/step-01-access.webp",
+            _webp_bytes(
+                metadata=b"a" * (EXPECTED_MAX_METADATA_BYTES // 2 + 1),
+                additional_metadata=(
+                    (b"EXIF", b"b" * (EXPECTED_MAX_METADATA_BYTES // 2)),
+                ),
+            ),
+        ),
+    ],
+    ids=["gif-over-limit", "webp-cumulative-over-limit"],
+)
+def test_cumulative_metadata_over_limit_fails_closed(
+    tmp_path: Path, relative_path: str, data: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(data)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"metadata-parse-error: {relative_path}" in findings
+
+
+@pytest.mark.parametrize("error_type", [OSError, MemoryError])
+def test_binary_read_errors_fail_closed_without_echoing_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    _write_safe_tree(tmp_path)
+    relative_path = "assets/workflow-demo.gif"
+    target = tmp_path / relative_path
+    real_open = Path.open
+
+    def open_with_error(path: Path, *args, **kwargs):
+        if path == target:
+            raise error_type("DO_NOT_LOG_THIS")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_with_error)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"read-error: {relative_path}" in findings
+    assert "DO_NOT_LOG_THIS" not in findings
 
 
 @pytest.mark.parametrize(

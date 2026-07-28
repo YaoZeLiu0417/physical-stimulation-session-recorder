@@ -27,6 +27,10 @@ WEBP_FILES = frozenset(
     }
 )
 PUBLIC_FILES = tuple(sorted(TEXT_FILES | GIF_FILES | WEBP_FILES))
+MAX_GIF_FILE_BYTES = 8 * 1024 * 1024 - 1
+MAX_GIF_TOTAL_BYTES = 14 * 1024 * 1024 - 1
+MAX_WEBP_FILE_BYTES = 350 * 1024 - 1
+MAX_METADATA_BYTES = 64 * 1024
 APPROVED_URLS = {
     "https://physical-stimulation-session-recorder.streamlit.app",
 }
@@ -53,6 +57,26 @@ UNIX_PATH_PATTERN = re.compile(r"(?i)(?<![a-z0-9])/(?:users|home)/[^\s<>\"']*")
 CREDENTIAL_PATTERN = re.compile(
     r"[?&](sid|sig|exp|token|secret|password)\s*=", re.IGNORECASE
 )
+XML_ENCODING_PATTERN = re.compile(
+    r"\A<\?xml\s+[^?]*?\bencoding\s*=\s*(['\"])([^'\"]+)\1",
+    re.IGNORECASE,
+)
+
+
+class _InvalidMediaError(ValueError):
+    pass
+
+
+class _MetadataParseError(ValueError):
+    pass
+
+
+class _MetadataDecodeError(ValueError):
+    pass
+
+
+class _FileTooLargeError(ValueError):
+    pass
 
 
 def _relative_name(path: Path, root: Path) -> str:
@@ -117,107 +141,251 @@ def _audit_text(relative_path: str, text: str) -> list[str]:
     return findings
 
 
-def _read_sub_blocks(data: bytes, position: int) -> tuple[bytes, int]:
-    parts: list[bytes] = []
-    while position < len(data):
+def _read_sub_blocks(
+    data: bytes,
+    position: int,
+    *,
+    collect: bool = False,
+    metadata_used: int = 0,
+) -> tuple[bytes, int, int]:
+    payload = bytearray()
+    payload_size = 0
+    while True:
+        if position >= len(data):
+            raise _InvalidMediaError
         block_size = data[position]
         position += 1
         if block_size == 0:
-            break
-        expected_end = position + block_size
-        block_end = min(expected_end, len(data))
-        parts.append(data[position:block_end])
+            return bytes(payload), position, payload_size
+        block_end = position + block_size
+        if block_end > len(data):
+            raise _InvalidMediaError
+        payload_size += block_size
+        if collect:
+            if metadata_used + payload_size > MAX_METADATA_BYTES:
+                raise _MetadataParseError
+            payload.extend(data[position:block_end])
         position = block_end
-        if block_end < expected_end:
-            break
-    return b"".join(parts), position
 
 
 def _gif_text_metadata(data: bytes) -> list[bytes]:
     if len(data) < 13:
-        return []
+        raise _InvalidMediaError
 
     packed_fields = data[10]
     position = 13
     if packed_fields & 0x80:
         position += 3 * (2 ** ((packed_fields & 0x07) + 1))
+    if position > len(data) or data[6:8] == b"\x00\x00" or data[8:10] == b"\x00\x00":
+        raise _InvalidMediaError
 
     metadata: list[bytes] = []
-    while position < len(data):
+    metadata_used = 0
+    found_image = False
+    while True:
+        if position >= len(data):
+            raise _InvalidMediaError
         marker = data[position]
         position += 1
         if marker == 0x3B:
-            break
+            if position != len(data) or not found_image:
+                raise _InvalidMediaError
+            return metadata
         if marker == 0x2C:
             if position + 9 > len(data):
-                break
+                raise _InvalidMediaError
+            if data[position + 4 : position + 6] == b"\x00\x00":
+                raise _InvalidMediaError
+            if data[position + 6 : position + 8] == b"\x00\x00":
+                raise _InvalidMediaError
             image_fields = data[position + 8]
             position += 9
             if image_fields & 0x80:
                 position += 3 * (2 ** ((image_fields & 0x07) + 1))
             if position >= len(data):
-                break
+                raise _InvalidMediaError
+            lzw_code_size = data[position]
+            if not 2 <= lzw_code_size <= 8:
+                raise _InvalidMediaError
             position += 1
-            _, position = _read_sub_blocks(data, position)
+            _, position, image_data_size = _read_sub_blocks(data, position)
+            if image_data_size == 0:
+                raise _InvalidMediaError
+            found_image = True
             continue
         if marker != 0x21 or position >= len(data):
-            break
+            raise _InvalidMediaError
 
         extension_type = data[position]
         position += 1
         if extension_type == 0xFE:
-            text, position = _read_sub_blocks(data, position)
+            text, position, text_size = _read_sub_blocks(
+                data, position, collect=True, metadata_used=metadata_used
+            )
+            metadata_used += text_size
             metadata.append(text)
         elif extension_type == 0x01:
-            if position >= len(data):
-                break
+            if position >= len(data) or data[position] != 12:
+                raise _InvalidMediaError
             header_size = data[position]
-            position = min(position + 1 + header_size, len(data))
-            text, position = _read_sub_blocks(data, position)
+            position += 1 + header_size
+            if position > len(data):
+                raise _InvalidMediaError
+            text, position, text_size = _read_sub_blocks(
+                data, position, collect=True, metadata_used=metadata_used
+            )
+            metadata_used += text_size
             metadata.append(text)
         elif extension_type == 0xFF:
-            if position >= len(data):
-                break
+            if position >= len(data) or data[position] != 11:
+                raise _InvalidMediaError
             identifier_size = data[position]
             position += 1
-            identifier_end = min(position + identifier_size, len(data))
+            identifier_end = position + identifier_size
+            if identifier_end > len(data):
+                raise _InvalidMediaError
             identifier = data[position:identifier_end]
             position = identifier_end
-            application_data, position = _read_sub_blocks(data, position)
-            if identifier.startswith(b"XMP"):
+            is_metadata = identifier.startswith(b"XMP")
+            application_data, position, payload_size = _read_sub_blocks(
+                data,
+                position,
+                collect=is_metadata,
+                metadata_used=metadata_used,
+            )
+            if is_metadata:
+                metadata_used += payload_size
                 metadata.append(application_data)
+        elif extension_type == 0xF9:
+            if position + 6 > len(data) or data[position] != 4:
+                raise _InvalidMediaError
+            if data[position + 5] != 0:
+                raise _InvalidMediaError
+            position += 6
         else:
-            _, position = _read_sub_blocks(data, position)
-
-    return metadata
+            _, position, _ = _read_sub_blocks(data, position)
 
 
 def _webp_text_metadata(data: bytes) -> list[bytes]:
+    if len(data) < 12 or int.from_bytes(data[4:8], "little") != len(data) - 8:
+        raise _InvalidMediaError
+
     metadata: list[bytes] = []
+    metadata_used = 0
+    found_image = False
     position = 12
-    while position + 8 <= len(data):
+    while position < len(data):
+        if position + 8 > len(data):
+            raise _InvalidMediaError
         chunk_type = data[position : position + 4]
+        if any(byte < 0x20 or byte > 0x7E for byte in chunk_type):
+            raise _InvalidMediaError
         chunk_size = int.from_bytes(data[position + 4 : position + 8], "little")
         chunk_start = position + 8
-        chunk_end = min(chunk_start + chunk_size, len(data))
+        chunk_end = chunk_start + chunk_size
+        padded_end = chunk_end + (chunk_size % 2)
+        if padded_end > len(data):
+            raise _InvalidMediaError
+        if chunk_size % 2 and data[chunk_end] != 0:
+            raise _InvalidMediaError
         if chunk_type in {b"EXIF", b"XMP "}:
+            if metadata_used + chunk_size > MAX_METADATA_BYTES:
+                raise _MetadataParseError
             metadata.append(data[chunk_start:chunk_end])
-        if chunk_end < chunk_start + chunk_size:
-            break
-        position = chunk_end + (chunk_size % 2)
+            metadata_used += chunk_size
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if chunk_size == 0:
+                raise _InvalidMediaError
+            found_image = True
+        elif chunk_type == b"ANMF":
+            if chunk_size < 16:
+                raise _InvalidMediaError
+            found_image = True
+        elif chunk_type == b"VP8X" and chunk_size != 10:
+            raise _InvalidMediaError
+        position = padded_end
+    if not found_image:
+        raise _InvalidMediaError
     return metadata
+
+
+def _decode_metadata(payload: bytes) -> str:
+    bom_encoding: str | None = None
+    if payload.startswith(b"\xef\xbb\xbf"):
+        bom_encoding = "utf-8-sig"
+    elif payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        bom_encoding = "utf-16"
+
+    observed_utf16: str | None = None
+    if payload.startswith(b"<\x00?\x00x\x00m\x00l\x00"):
+        observed_utf16 = "utf-16-le"
+    elif payload.startswith(b"\x00<\x00?\x00x\x00m\x00l"):
+        observed_utf16 = "utf-16-be"
+
+    encoding = bom_encoding or observed_utf16 or "utf-8"
+    try:
+        text = payload.decode(encoding, errors="strict")
+    except (LookupError, UnicodeError) as error:
+        raise _MetadataDecodeError from error
+
+    declaration = XML_ENCODING_PATTERN.search(text)
+    if declaration is None:
+        if observed_utf16 is not None:
+            raise _MetadataDecodeError
+        return text
+
+    declared = declaration.group(2).casefold().replace("_", "-")
+    aliases = {
+        "utf-8": "utf-8",
+        "utf8": "utf-8",
+        "utf-16": "utf-16",
+        "utf16": "utf-16",
+        "utf-16le": "utf-16-le",
+        "utf16le": "utf-16-le",
+        "utf-16be": "utf-16-be",
+        "utf16be": "utf-16-be",
+    }
+    canonical = aliases.get(declared)
+    if canonical is None:
+        raise _MetadataDecodeError
+
+    actual = encoding
+    if actual == "utf-8-sig":
+        actual = "utf-8"
+    elif actual == "utf-16":
+        actual = "utf-16-le" if payload.startswith(b"\xff\xfe") else "utf-16-be"
+    if canonical == "utf-16":
+        if actual not in {"utf-16-le", "utf-16-be"}:
+            raise _MetadataDecodeError
+    elif canonical != actual:
+        raise _MetadataDecodeError
+    return text
 
 
 def _audit_binary_metadata(relative_path: str, payloads: list[bytes]) -> list[str]:
     findings: list[str] = []
     for payload in payloads:
-        text = payload.decode("utf-8", errors="ignore")
+        try:
+            text = _decode_metadata(payload)
+        except (_MetadataDecodeError, MemoryError):
+            finding = f"metadata-decode-error: {relative_path}"
+            if finding not in findings:
+                findings.append(finding)
+            continue
         for finding in _audit_text(relative_path, text):
             category = finding.partition(":")[0]
             redacted_finding = f"{category}: {relative_path}"
             if redacted_finding not in findings:
                 findings.append(redacted_finding)
     return findings
+
+
+def _read_limited_file(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise _FileTooLargeError
+    return data
 
 
 def audit_showcase(root: Path) -> list[str]:
@@ -242,7 +410,7 @@ def audit_showcase(root: Path) -> list[str]:
         return ["invalid-root: .: showcase root is missing or is not a directory"]
 
     findings: list[str] = []
-    entries_by_name: dict[str, tuple[Path, int, bool, int]] = {}
+    entries_by_name: dict[str, tuple[Path, int, bool, int, int]] = {}
     entry_errors: list[str] = []
     walk_errors: list[OSError] = []
     try:
@@ -271,6 +439,7 @@ def audit_showcase(root: Path) -> list[str]:
                     mode,
                     is_reparse,
                     getattr(file_info, "st_nlink", 1),
+                    getattr(file_info, "st_size", 0),
                 )
                 if stat.S_ISDIR(mode) and not is_reparse:
                     traversable_directories.append(directory_name)
@@ -291,6 +460,7 @@ def audit_showcase(root: Path) -> list[str]:
                     file_info.st_mode,
                     _is_reparse_point(file_info),
                     getattr(file_info, "st_nlink", 1),
+                    getattr(file_info, "st_size", 0),
                 )
     except OSError as error:
         walk_errors.append(error)
@@ -315,8 +485,8 @@ def audit_showcase(root: Path) -> list[str]:
     ):
         findings.append("missing-directory: assets")
 
-    regular_files: list[tuple[str, Path]] = []
-    for relative_path, (path, mode, is_reparse, link_count) in sorted(
+    regular_files: list[tuple[str, Path, int]] = []
+    for relative_path, (path, mode, is_reparse, link_count, file_size) in sorted(
         entries_by_name.items()
     ):
         expected_file = relative_path in PUBLIC_FILES
@@ -329,18 +499,40 @@ def audit_showcase(root: Path) -> list[str]:
             elif link_count > 1:
                 findings.append(f"hardlink: {relative_path}")
             else:
-                regular_files.append((relative_path, path))
+                regular_files.append((relative_path, path, file_size))
         elif stat.S_ISDIR(mode):
             if not expected_directory:
                 findings.append(f"extra-entry: {relative_path}")
         else:
             findings.append(f"special-entry: {relative_path}")
 
-    for relative_path, path in regular_files:
+    gif_total_size = sum(
+        file_size
+        for relative_path, _, file_size in regular_files
+        if relative_path in GIF_FILES
+    )
+    gif_total_too_large = gif_total_size > MAX_GIF_TOTAL_BYTES
+    if gif_total_too_large:
+        findings.append("gif-total-too-large: .")
+
+    for relative_path, path, file_size in regular_files:
         if relative_path in GIF_FILES or relative_path in WEBP_FILES:
+            if relative_path in GIF_FILES and gif_total_too_large:
+                continue
+            file_limit = (
+                MAX_GIF_FILE_BYTES
+                if relative_path in GIF_FILES
+                else MAX_WEBP_FILE_BYTES
+            )
+            if file_size < 0 or file_size > file_limit:
+                findings.append(f"file-too-large: {relative_path}")
+                continue
             try:
-                data = path.read_bytes()
-            except OSError:
+                data = _read_limited_file(path, file_limit)
+            except _FileTooLargeError:
+                findings.append(f"file-too-large: {relative_path}")
+                continue
+            except (OSError, MemoryError):
                 findings.append(f"read-error: {relative_path}")
                 continue
 
@@ -348,7 +540,14 @@ def audit_showcase(root: Path) -> list[str]:
                 if not data.startswith((b"GIF87a", b"GIF89a")):
                     findings.append(f"invalid-signature: {relative_path}")
                     continue
-                metadata = _gif_text_metadata(data)
+                try:
+                    metadata = _gif_text_metadata(data)
+                except _MetadataParseError:
+                    findings.append(f"metadata-parse-error: {relative_path}")
+                    continue
+                except (_InvalidMediaError, MemoryError):
+                    findings.append(f"invalid-media: {relative_path}")
+                    continue
             else:
                 if not (
                     len(data) >= 12
@@ -357,7 +556,14 @@ def audit_showcase(root: Path) -> list[str]:
                 ):
                     findings.append(f"invalid-signature: {relative_path}")
                     continue
-                metadata = _webp_text_metadata(data)
+                try:
+                    metadata = _webp_text_metadata(data)
+                except _MetadataParseError:
+                    findings.append(f"metadata-parse-error: {relative_path}")
+                    continue
+                except (_InvalidMediaError, MemoryError):
+                    findings.append(f"invalid-media: {relative_path}")
+                    continue
 
             findings.extend(_audit_binary_metadata(relative_path, metadata))
             continue
