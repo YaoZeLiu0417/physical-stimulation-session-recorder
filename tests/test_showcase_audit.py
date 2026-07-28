@@ -21,6 +21,7 @@ EXPECTED_WEBP_FILES = frozenset(
     {
         "assets/workflow-demo-static.webp",
         "assets/local-recording-static.webp",
+        "assets/palette.webp",
         "assets/step-01-access.webp",
         "assets/step-02-overview.webp",
         "assets/step-03-permissions.webp",

@@ -236,6 +236,8 @@ quiet Alto Neuroscience-inspired direction without claiming affiliation:
 - violet `#2D2674` for secondary structure;
 - pink `#DD1D86` for primary and active commands;
 - blue `#33B0E4` and peach `#FFBC7D` for restrained status accents;
+- a sanitized lossless five-swatch palette strip presents those exact colors
+  without text, metadata, external sources, or decorative framing;
 - white and neutral gray surfaces;
 - stable 16:9 recorder layout;
 - compact step headings and slider controls;
@@ -254,7 +256,8 @@ It includes:
 - demonstration and long-recording mode guidance;
 - a Mermaid data-flow diagram showing local video and questionnaire export;
 - Chrome permissions, recording, download, and troubleshooting instructions;
-- the palette and low-cognitive-load design rationale;
+- a sanitized five-color palette strip, accessible hex/role text, and the
+  low-cognitive-load design rationale;
 - a controlled-demo link without a password;
 - clear statements that participant scores are not displayed and the public
   materials contain no real study questions.

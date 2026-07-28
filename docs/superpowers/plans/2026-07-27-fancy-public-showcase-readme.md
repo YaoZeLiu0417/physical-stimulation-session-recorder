@@ -28,6 +28,7 @@ assets/workflow-demo.gif
 assets/workflow-demo-static.webp
 assets/local-recording.gif
 assets/local-recording-static.webp
+assets/palette.webp
 assets/step-01-access.webp
 assets/step-02-overview.webp
 assets/step-03-permissions.webp
@@ -78,6 +79,7 @@ GIF_FILES = frozenset({"assets/workflow-demo.gif", "assets/local-recording.gif"}
 WEBP_FILES = frozenset({
     "assets/workflow-demo-static.webp",
     "assets/local-recording-static.webp",
+    "assets/palette.webp",
     "assets/step-01-access.webp",
     "assets/step-02-overview.webp",
     "assets/step-03-permissions.webp",
@@ -265,6 +267,7 @@ git commit -m "docs: add synthetic workflow animations"
 
 **Files:**
 - Modify: `README.md`
+- Create: `assets/palette.webp`
 
 - [ ] **Step 1: Write the first viewport**
 
@@ -311,11 +314,14 @@ for support.
 
 - [ ] **Step 6: Add design rationale and controlled access**
 
-Show the approved navy/violet/pink/blue/peach swatches, quiet step flow,
-sliders, stable 16:9 recorder, focus states, and no-score boundary. State that
-the visual direction is inspired by restrained neuroscience product design and
-does not claim affiliation. Link the controlled demonstration without a
-password or private repository URL.
+Create a sanitized lossless `assets/palette.webp` strip with five equal solid
+swatches in exact navy/violet/pink/blue/peach order. Embed it full-width and
+unframed with meaningful bilingual alt text immediately before the accessible
+hex/role table. Also explain the quiet step flow, sliders, stable 16:9 recorder,
+focus states, and no-score boundary. State that the visual direction is
+inspired by restrained neuroscience product design and does not claim
+affiliation. Link the controlled demonstration without a password or private
+repository URL.
 
 - [ ] **Step 7: Run README gates and commit**
 
