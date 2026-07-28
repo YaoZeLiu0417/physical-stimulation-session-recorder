@@ -295,54 +295,56 @@ EXPECTED_SHOWCASE_IMPORT_BINDINGS = (
     ("import", "os", "os"),
     ("import", "streamlit", "st"),
 )
-EXPECTED_SHOWCASE_CALL_INVENTORY = {
-    "ValueError",
-    "_build_cached_synthetic_archive",
-    "_clear_showcase_session_state",
-    "_consume_recorder_status",
-    "_go",
-    "_preserve_completed_ratings",
-    "_recording_export_state",
-    "_render_export_retry",
-    "_render_local_recorder",
-    "_render_synthetic_download",
-    "_require_access",
-    "_return_to_overview",
-    "_secret",
-    "browser_recorder.RecorderStatus",
-    "browser_recorder.render_browser_recorder",
-    "completed_ratings.items",
-    "datetime.datetime.now",
-    "datetime.datetime.now().replace",
-    "isinstance",
-    "os.getenv",
-    "showcase_export.build_synthetic_showcase_zip",
-    "showcase_workflow.advance_step",
-    "showcase_workflow.password_matches",
-    "str",
-    "streamlit.button",
-    "streamlit.caption",
-    "streamlit.checkbox",
-    "streamlit.container",
-    "streamlit.download_button",
-    "streamlit.error",
-    "streamlit.info",
-    "streamlit.markdown",
-    "streamlit.rerun",
-    "streamlit.session_state.get",
-    "streamlit.session_state.pop",
-    "streamlit.session_state.setdefault",
-    "streamlit.set_page_config",
-    "streamlit.sidebar.caption",
-    "streamlit.sidebar.markdown",
-    "streamlit.slider",
-    "streamlit.stop",
-    "streamlit.subheader",
-    "streamlit.text_input",
-    "streamlit.title",
-    "streamlit.warning",
-}
-ALLOWED_SHOWCASE_CALLS = EXPECTED_SHOWCASE_CALL_INVENTORY | {"str.replace"}
+EXPECTED_SHOWCASE_CALL_INVENTORY = Counter(
+    {
+        "ValueError": 2,
+        "_build_cached_synthetic_archive": 1,
+        "_clear_showcase_session_state": 2,
+        "_consume_recorder_status": 1,
+        "_go": 6,
+        "_preserve_completed_ratings": 1,
+        "_recording_export_state": 1,
+        "_render_export_retry": 2,
+        "_render_local_recorder": 1,
+        "_render_synthetic_download": 1,
+        "_require_access": 1,
+        "_return_to_overview": 1,
+        "_secret": 1,
+        "browser_recorder.RecorderStatus": 1,
+        "browser_recorder.render_browser_recorder": 1,
+        "completed_ratings.items": 1,
+        "datetime.datetime.now": 1,
+        "datetime.datetime.now().replace": 1,
+        "isinstance": 3,
+        "os.getenv": 1,
+        "showcase_export.build_synthetic_showcase_zip": 1,
+        "showcase_workflow.advance_step": 1,
+        "showcase_workflow.password_matches": 1,
+        "str": 1,
+        "streamlit.button": 9,
+        "streamlit.caption": 5,
+        "streamlit.checkbox": 1,
+        "streamlit.container": 1,
+        "streamlit.download_button": 1,
+        "streamlit.error": 2,
+        "streamlit.info": 6,
+        "streamlit.markdown": 5,
+        "streamlit.rerun": 3,
+        "streamlit.session_state.get": 7,
+        "streamlit.session_state.pop": 10,
+        "streamlit.session_state.setdefault": 1,
+        "streamlit.set_page_config": 1,
+        "streamlit.sidebar.caption": 1,
+        "streamlit.sidebar.markdown": 1,
+        "streamlit.slider": 4,
+        "streamlit.stop": 2,
+        "streamlit.subheader": 4,
+        "streamlit.text_input": 1,
+        "streamlit.title": 1,
+        "streamlit.warning": 2,
+    }
+)
+ALLOWED_SHOWCASE_CALLS = set(EXPECTED_SHOWCASE_CALL_INVENTORY) | {"str.replace"}
 EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY = Counter({"os.getenv": 1})
 
 
@@ -1688,7 +1690,7 @@ def _showcase_ast_inventory(
     source: str,
 ) -> tuple[
     tuple[tuple[str, str, str], ...],
-    set[str],
+    Counter[str],
     Counter[str],
 ]:
     tree = ast.parse(source)
@@ -1717,6 +1719,23 @@ def _showcase_ast_inventory(
                 assert bindings.get(local_name, qualified_name) == qualified_name
                 bindings[local_name] = qualified_name
 
+    parents = {
+        child: node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+    os_binding_names = {
+        local_name
+        for local_name, qualified_name in bindings.items()
+        if qualified_name == "os"
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in os_binding_names:
+            parent = parents[node]
+            assert isinstance(parent, ast.Attribute)
+            assert parent.value is node
+            assert parent.attr == "getenv"
+
     def qualified_expression(node: ast.AST) -> str:
         if isinstance(node, ast.Name):
             return bindings.get(node.id, node.id)
@@ -1730,11 +1749,11 @@ def _showcase_ast_inventory(
             return f"{qualified_expression(node.value)}[]"
         return f"<{type(node).__name__}>"
 
-    call_inventory = {
+    call_inventory = Counter(
         qualified_expression(node.func)
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-    }
+    )
     os_attribute_inventory: Counter[str] = Counter()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
@@ -1748,12 +1767,16 @@ def _showcase_ast_inventory(
     )
 
 
-def _assert_showcase_ast_boundary(source: str) -> set[str]:
+def _assert_showcase_ast_boundary(source: str) -> Counter[str]:
     import_inventory, call_inventory, os_attribute_inventory = (
         _showcase_ast_inventory(source)
     )
     assert import_inventory == EXPECTED_SHOWCASE_IMPORT_BINDINGS
-    assert call_inventory <= ALLOWED_SHOWCASE_CALLS
+    assert set(call_inventory) <= ALLOWED_SHOWCASE_CALLS
+    assert call_inventory in (
+        EXPECTED_SHOWCASE_CALL_INVENTORY,
+        EXPECTED_SHOWCASE_CALL_INVENTORY + Counter({"str.replace": 1}),
+    )
     assert (
         os_attribute_inventory == EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY
     )
@@ -1793,6 +1816,35 @@ def test_showcase_ast_boundary_rejects_os_attribute_callback_alias():
         _assert_showcase_ast_boundary(
             f'{source}\nmove_file = os.replace\n'
             'if False:\n    st.button("unused", on_click=move_file)\n'
+        )
+
+
+def test_showcase_ast_boundary_rejects_rebound_os_module_assignment_alias():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nfilesystem = os\nstr = filesystem.replace\n'
+            'str("source", "target")\n'
+        )
+
+
+def test_showcase_ast_boundary_rejects_rebound_os_module_callback_alias():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nfilesystem = os\nmove_file = filesystem.replace\n'
+            'if False:\n    st.button("unused", on_click=move_file)\n'
+        )
+
+
+def test_showcase_ast_boundary_rejects_getattr_os_reflection():
+    source = APP.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(
+            f'{source}\nstr = getattr\nstr(os, "replace")\n'
         )
 
 
