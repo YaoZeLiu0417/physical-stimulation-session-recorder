@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import operational_ui
@@ -57,6 +59,21 @@ def test_stage_shell_escapes_hostile_context_values() -> None:
     assert '<b>2</b>' not in markup
 
 
+def test_stage_shell_escapes_hostile_stage_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    hostile_stages = (
+        operational_ui.OperationalStage(1, '<img onerror="bad">', '<script>bad</script>'),
+        *operational_ui.STAGES[1:],
+    )
+    monkeypatch.setattr(operational_ui, "STAGES", hostile_stages)
+
+    markup = operational_ui.stage_shell_markup(1)
+
+    assert markup.count('&lt;img onerror=&quot;bad&quot;&gt;') == 2
+    assert markup.count('&lt;script&gt;bad&lt;/script&gt;') == 2
+    assert '<img onerror' not in markup
+    assert '<script>' not in markup
+
+
 def test_checkpoint_status_returns_exact_escaped_markup() -> None:
     assert operational_ui.operational_status_markup("checkpoint", '<ready "now">') == (
         '<div class="operational-status operational-status--checkpoint" role="status">'
@@ -67,6 +84,12 @@ def test_checkpoint_status_returns_exact_escaped_markup() -> None:
 def test_status_markup_rejects_unknown_kind() -> None:
     with pytest.raises(ValueError, match="status kind"):
         operational_ui.operational_status_markup("unknown", "message")
+
+
+@pytest.mark.parametrize("kind", [[], {}, 1, None])
+def test_status_markup_rejects_non_string_kind(kind: object) -> None:
+    with pytest.raises(ValueError, match="status kind"):
+        operational_ui.operational_status_markup(kind, "message")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("active_stage", [True, "1", 0, 7])
@@ -95,8 +118,36 @@ def test_css_meets_operational_visual_contract() -> None:
     assert "letter-spacing: 0" in css
     assert "white-space: normal" in css
     assert "@media (prefers-reduced-motion: reduce)" in css
+    assert ".operational-rail {\n  box-sizing: border-box;" in css
+    assert ".block-container {\n  margin-left: 252px; width: calc(100% - 252px);" in css
+    assert ".operational-stage--active .operational-stage__number { background: var(--operational-rose);" in css
+    assert '[data-testid="stHorizontalBlock"]' in css
+    assert '[data-testid="column"]' in css
+    assert "flex-direction: column" in css
+    assert ".operational-status { display: inline-block; padding: 8px 12px; border-radius: 6px; background: var(--operational-violet); color: var(--operational-white); }" in css
+    assert ".block-container { margin-left: 0; width: auto; }" in css
     for forbidden in ("gradient", "vw", "https://", "http://", "@import", "url("):
         assert forbidden not in css.lower()
+
+
+def test_stage_shell_has_no_custom_workspace_wrapper() -> None:
+    markup = operational_ui.stage_shell_markup(1)
+
+    assert "operational-workspace" not in markup
+    assert "<main" not in markup
+
+
+def test_streamlit_theme_values_are_exact() -> None:
+    config = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+
+    assert config == (
+        '[theme]\n'
+        'primaryColor = "#DD1D86"\n'
+        'backgroundColor = "#F4F5F7"\n'
+        'secondaryBackgroundColor = "#FFFFFF"\n'
+        'textColor = "#000035"\n'
+        'font = "sans serif"\n'
+    )
 
 
 def test_renderer_emits_css_then_stage_shell(monkeypatch: pytest.MonkeyPatch) -> None:

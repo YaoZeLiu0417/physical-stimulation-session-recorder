@@ -48,8 +48,11 @@ OPERATIONAL_CSS = """<style>
 }
 .stApp { background: var(--operational-mist); color: var(--operational-navy); }
 .operational-rail {
-  position: fixed; inset: 0 auto 0 0; width: 252px; padding: 28px 22px;
+  box-sizing: border-box; position: fixed; inset: 0 auto 0 0; width: 252px; padding: 28px 22px;
   background: var(--operational-navy); color: var(--operational-white); z-index: 10;
+}
+.block-container {
+  margin-left: 252px; width: calc(100% - 252px); max-width: none; box-sizing: border-box;
 }
 .operational-brand { margin: 0 0 32px; font-size: 12px; font-weight: 700; letter-spacing: 0; line-height: 1.5; }
 .operational-brand span { display: block; color: var(--operational-cyan); }
@@ -61,8 +64,7 @@ OPERATIONAL_CSS = """<style>
 .operational-stage--completed { color: var(--operational-cyan); }
 .operational-stage--completed .operational-stage__number { color: var(--operational-cyan); }
 .operational-stage--active { background: var(--operational-rose); color: var(--operational-white); }
-.operational-stage--active .operational-stage__number { color: var(--operational-white); }
-.operational-workspace { margin-left: 252px; min-height: 100vh; padding: 32px; }
+.operational-stage--active .operational-stage__number { background: var(--operational-rose); border: 2px solid var(--operational-rose); color: var(--operational-white); outline: 2px solid var(--operational-white); outline-offset: 2px; }
 .operational-heading { display: grid; gap: 8px; max-width: 960px; margin: 0 auto 24px; }
 .operational-heading__counter { color: var(--operational-violet); font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .operational-heading h1 { margin: 0; color: var(--operational-navy); font-size: 28px; letter-spacing: 0; }
@@ -84,13 +86,19 @@ iframe { aspect-ratio: 16 / 9; max-width: 100%; }
   .operational-progress__segment { height: 6px; border-radius: 6px; background: var(--operational-violet); }
   .operational-progress__segment--completed { background: var(--operational-cyan); }
   .operational-progress__segment--active { background: var(--operational-rose); }
-  .operational-workspace { margin-left: 0; padding: 20px 16px; }
+  .block-container { margin-left: 0; width: auto; }
+  [data-testid="stHorizontalBlock"] { flex-direction: column; }
+  [data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
   .stButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 </style>"""
+
+
+def _escape(value: object) -> str:
+    return escape(str(value), quote=True)
 
 
 def _stage(active_stage: int) -> OperationalStage:
@@ -103,9 +111,9 @@ def _stage_row(stage: OperationalStage, active_stage: int) -> str:
     state = "active" if stage.number == active_stage else "completed" if stage.number < active_stage else "future"
     current = ' aria-current="step"' if state == "active" else ""
     return (
-        f'<div class="operational-stage operational-stage--{state}"{current}>'
-        f'<span class="operational-stage__number">{stage.number:02d}</span>'
-        f'<span class="operational-stage__label">{stage.english}<small>{stage.chinese}</small></span>'
+        f'<div class="operational-stage operational-stage--{_escape(state)}"{current}>'
+        f'<span class="operational-stage__number">{_escape(f"{stage.number:02d}")}</span>'
+        f'<span class="operational-stage__label">{_escape(stage.english)}<small>{_escape(stage.chinese)}</small></span>'
         "</div>"
     )
 
@@ -113,7 +121,7 @@ def _stage_row(stage: OperationalStage, active_stage: int) -> str:
 def _progress_segment(stage: OperationalStage, active_stage: int) -> str:
     state = "active" if stage.number == active_stage else "completed" if stage.number < active_stage else "future"
     current = ' aria-current="step"' if state == "active" else ""
-    return f'<span class="operational-progress__segment operational-progress__segment--{state}"{current}></span>'
+    return f'<span class="operational-progress__segment operational-progress__segment--{_escape(state)}"{current}></span>'
 
 
 def stage_shell_markup(
@@ -124,9 +132,9 @@ def stage_shell_markup(
     if subject_id is not None or intervention_day is not None:
         values = []
         if subject_id is not None:
-            values.append(f"<span>{escape(str(subject_id), quote=True)}</span>")
+            values.append(f"<span>{_escape(subject_id)}</span>")
         if intervention_day is not None:
-            values.append(f"<span>第 {escape(str(intervention_day), quote=True)} 天</span>")
+            values.append(f"<span>第 {_escape(intervention_day)} 天</span>")
         context = f'<div class="questionnaire-context">{"".join(values)}</div>'
     rows = "".join(_stage_row(stage, active_stage) for stage in STAGES)
     progress = "".join(_progress_segment(stage, active_stage) for stage in STAGES)
@@ -134,17 +142,15 @@ def stage_shell_markup(
 <p class="operational-brand">SESSION COMPANION<span>GUIDED LOCAL-FIRST FLOW</span></p>
 <div class="operational-stages">{rows}</div>
 </aside>
-<header class="operational-mobile"><span>SESSION COMPANION</span><span>{active_stage:02d} / 06</span></header>
+<header class="operational-mobile"><span>SESSION COMPANION</span><span>{_escape(f"{active_stage:02d}")} / 06</span></header>
 <div class="operational-progress" aria-label="Session progress">{progress}</div>
-<main class="operational-workspace">
-<section class="operational-heading"><span class="operational-heading__counter">{active_stage:02d} / 06</span><h1>{current_stage.english}</h1><p>{current_stage.chinese}</p>{context}</section>
-</main>'''
+<section class="operational-heading"><span class="operational-heading__counter">{_escape(f"{active_stage:02d}")} / 06</span><h1>{_escape(current_stage.english)}</h1><p>{_escape(current_stage.chinese)}</p>{context}</section>'''
 
 
 def operational_status_markup(kind: str, message: object) -> str:
-    if kind not in {"neutral", "ready", "checkpoint", "blocking"}:
+    if not isinstance(kind, str) or kind not in {"neutral", "ready", "checkpoint", "blocking"}:
         raise ValueError("status kind must be neutral, ready, checkpoint, or blocking")
-    return f'<div class="operational-status operational-status--{kind}" role="status">{escape(str(message), quote=True)}</div>'
+    return f'<div class="operational-status operational-status--{_escape(kind)}" role="status">{_escape(message)}</div>'
 
 
 def render_operational_stage(
