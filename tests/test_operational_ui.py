@@ -147,7 +147,27 @@ def test_css_meets_operational_visual_contract() -> None:
     assert '[data-testid="column"]' in css
     assert "flex-direction: column" in css
     assert ".operational-status { display: inline-block; padding: 8px 12px; border-radius: 6px; background: var(--operational-violet); color: var(--operational-white); }" in css
-    assert ".block-container { margin-left: 0; width: auto; padding: 1rem 1rem 3rem; }" in css
+    assert (
+        ".block-container {\n"
+        "    margin-left: 0;\n"
+        "    margin-right: 0;\n"
+        "    width: 100%;\n"
+        "    max-width: none;\n"
+        "    box-sizing: border-box;\n"
+        "    padding: 1rem 1rem 3rem;\n"
+        "  }"
+    ) in css
+    assert (
+        ".operational-mobile__row {\n"
+        "    align-items: flex-start;\n"
+        "    box-sizing: border-box;\n"
+        "    display: flex;\n"
+        "    flex-wrap: wrap;\n"
+        "    gap: 12px;\n"
+        "    justify-content: space-between;\n"
+        "    width: 100%;\n"
+        "  }"
+    ) in css
     assert (
         '[data-testid="stHeader"], [data-testid="stDecoration"], '
         '[data-testid="stToolbar"] {\n'

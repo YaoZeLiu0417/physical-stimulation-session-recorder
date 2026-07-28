@@ -138,17 +138,33 @@ iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; hei
     background: var(--operational-navy);
     color: var(--operational-white);
   }
-  .operational-mobile__row { align-items: flex-start; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+  .operational-mobile__row {
+    align-items: flex-start;
+    box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: space-between;
+    width: 100%;
+  }
   .operational-mobile__brand, .operational-mobile__current { min-width: 0; }
   .operational-mobile__brand strong { display: block; font-size: 13px; }
   .operational-mobile__brand span, .operational-mobile__current span { color: var(--operational-cyan); display: block; font-size: 11px; line-height: 1.25; margin-top: 3px; overflow-wrap: anywhere; }
+  .operational-mobile__brand { flex: 1 1 45%; }
   .operational-mobile__current { flex: 1 1 45%; max-width: 60%; text-align: right; }
   .operational-mobile__current strong { display: block; font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; }
   .operational-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; padding: 10px 16px; background: var(--operational-white); }
   .operational-progress__segment { height: 6px; border-radius: 6px; background: var(--operational-violet); }
   .operational-progress__segment--completed { background: var(--operational-cyan); }
   .operational-progress__segment--active { background: var(--operational-rose); }
-  .block-container { margin-left: 0; width: auto; padding: 1rem 1rem 3rem; }
+  .block-container {
+    margin-left: 0;
+    margin-right: 0;
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    padding: 1rem 1rem 3rem;
+  }
   [data-testid="stHorizontalBlock"] { flex-direction: column; }
   [data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
   .stButton > button, .stDownloadButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }
