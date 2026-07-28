@@ -91,4 +91,3 @@ Retry transient push failures without force.
 Confirm every relative README image exists, the approved app URL is the only
 external URL, both worktrees are clean, and GitHub APIs report the pushed SHA
 for each `main` branch.
-

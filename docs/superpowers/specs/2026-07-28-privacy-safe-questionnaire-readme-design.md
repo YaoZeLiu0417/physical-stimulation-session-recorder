@@ -73,4 +73,3 @@ tests so the first viewport contains the complete six-stage story and approved
 questionnaire concepts while forbidden private terms and real questionnaire
 content remain absent. Render the README or inspect its GitHub-compatible
 Markdown structure, links, images, and Mermaid block before publication.
-

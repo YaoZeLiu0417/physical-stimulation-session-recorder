@@ -62,4 +62,3 @@ Tests must prove that:
 4. Clicking the host confirmation persists exact version-2 metadata, removes
    the recorder on rerun, and renders the formal questionnaire.
 5. The full Python and recorder JavaScript suites remain green.
-

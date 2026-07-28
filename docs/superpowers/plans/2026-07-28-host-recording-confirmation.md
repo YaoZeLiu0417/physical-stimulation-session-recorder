@@ -125,4 +125,3 @@ Expected: zero failures and zero diff-check output.
 - [ ] **Step 2: Fast-forward private `main`**
 
 Run `git push origin HEAD:main`, retrying transient failures without force.
-
