@@ -19,10 +19,10 @@ A calm, Chrome-first companion for guided home sessions: controlled entry, local
 | --- | --- | --- |
 | 01 · Controlled access | Open the guided session / 进入受控会话 | Access accepted / 进入成功 |
 | 02 · Daily context | Confirm today’s context / 确认当日状态 | Required context complete / 必填信息完成 |
-| 03 · Browser-local recording | Record and review locally / 本地录制并检查 | Local WebM checked / 已检查本地录像 |
+| 03 · Browser-local recording | Record and review locally / 本地录制并检查 | Local WebM checked or no-save path confirmed / 本地录像已检查，或已确认不保存 |
 | 04 · Stepwise questionnaire | Complete one focused step at a time / 分步结构化作答 | Required steps complete / 必答步骤完成 |
-| 05 · Local response package | Save the response archive / 保存本地资料包 | ZIP checked locally / 已检查本地资料包 |
-| 06 · Completion confirmation | Close the guided session / 确认会话完成 | Both local saves confirmed / 两类文件均已确认 |
+| 05 · Local response package | Save the response archive / 保存本地资料包 | ZIP save confirmed locally / 已确认 ZIP 保存到本地 |
+| 06 · Completion confirmation | Close the guided session / 确认会话完成 | Recording outcome and ZIP save confirmed / 录制结果与 ZIP 保存均已确认 |
 
 ## Questionnaire Experience
 
@@ -42,13 +42,15 @@ Current desktop Chrome captures a browser-local WebM with audio. Preview, record
 
 The host must open the saved file, check both picture and sound, and then use the host-level confirmation concept **“我已下载并检查录像，继续填写问卷”**. A browser download event alone is not treated as proof that the file was saved correctly.
 
+If recording is skipped or unavailable, the host instead confirms **“我确认继续填写问卷，不保存本次录制”**. This no-save path records the recording outcome without claiming that a media file exists, and then allows the questionnaire to continue.
+
 Questionnaire and context values live only in transient Streamlit session memory while the flow is active. They are separate from the WebM and do not create a durable server-side response record.
 
 ## Local Response Export
 
 ![Local JSON and Excel response package with save confirmation](assets/readme/local-response-export.webp)
 
-The response export is a local **JSON + Excel ZIP**: JSON provides a structured copy and Excel provides a readable workbook copy of the same response record. The user downloads the ZIP, opens it locally, and explicitly confirms that the response package was saved and checked. Recording confirmation and response-package confirmation remain separate so neither file can silently stand in for the other.
+The response export is a local **JSON + Excel ZIP**: JSON provides a structured copy and Excel provides a readable workbook copy of the same response record. The user downloads the ZIP, locates it in Chrome downloads, and explicitly confirms the package was saved locally with **“我确认问卷 ZIP 已保存到本地”**. Recording-outcome confirmation and response-package confirmation remain separate so a no-save recording path can never be mistaken for a saved media file.
 
 ## Privacy And Data Boundary
 
@@ -59,10 +61,13 @@ flowchart LR
         REC --> WEBM[Locally saved WebM with audio]
         REC -. media boundary .-> LOCAL_ONLY[No media upload path]
         WEBM --> MEDIA_OK[Host checks picture + sound]
+        REC --> NO_SAVE[No-save path confirmed when recording is skipped or unavailable]
+        MEDIA_OK --> RECORDING_OK[Recording outcome confirmed]
+        NO_SAVE --> RECORDING_OK
         UI[Guided context + questionnaire UI]
         DOWNLOAD[Browser download]
         DOWNLOAD --> ZIP[Locally saved JSON + Excel ZIP]
-        ZIP --> RESPONSE_OK[User checks response package]
+        ZIP --> RESPONSE_OK[User confirms ZIP saved locally]
     end
 
     subgraph SESSION[Streamlit session boundary]
@@ -82,16 +87,16 @@ The two boundaries matter: audiovisual bytes stay inside Chrome until the user s
 
 ![Operational palette showing deep navy, violet, rose, cyan, and peach](assets/readme/operational-palette.webp)
 
-Deep navy `#000035` anchors navigation and text; rose `#DD1D86` marks the current action. Violet structures progress, cyan communicates readiness, and peach marks quiet checkpoints. White and mist keep the workspace readable.
+Deep navy `#000035` anchors navigation and text; violet `#2D2674` structures progress; rose `#DD1D86` marks the current action; cyan `#33B0E4` communicates readiness; and peach `#FFBC7D` marks quiet checkpoints. White and mist keep the workspace readable.
 
 ## Chrome Guide
 
 1. Open the controlled application in current desktop Chrome.
 2. Allow camera and microphone access when Chrome asks.
 3. Confirm the daily context, then preview and record the session.
-4. Stop, play back, download, and inspect the WebM with audio before continuing.
+4. If recording succeeds, stop, play back, download, and inspect the WebM with audio. If it is skipped or unavailable, explicitly confirm the no-save path before continuing.
 5. Complete each questionnaire step and any applicable follow-up.
-6. Download and inspect the JSON + Excel ZIP, then confirm completion.
+6. Download the JSON + Excel ZIP, locate it in Chrome downloads, confirm it was saved locally, then confirm completion.
 
 ## Troubleshooting
 
@@ -130,7 +135,7 @@ TRUSTED_INTERVENTION_DAYS = { }
 SAFETY_CONTACT = "<configured support copy>"
 ```
 
-After updating settings, reboot the app and verify controlled entry, browser permissions, local recording, questionnaire progression, and both save confirmations.
+After updating settings, reboot the app and verify controlled entry, browser permissions, the saved-or-no-save recording outcome, questionnaire progression, and local ZIP confirmation.
 
 </details>
 

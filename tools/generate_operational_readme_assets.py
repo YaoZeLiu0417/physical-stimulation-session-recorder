@@ -208,6 +208,29 @@ def _status_row(
     draw.text((x + 76, y + 47), subtitle, font=font(14), fill=COLORS["muted"])
 
 
+def _handoff_row(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    width: int,
+    number: str,
+    label: str,
+    detail: str,
+    accent: str,
+) -> None:
+    rounded_box(
+        draw,
+        (x, y, x + width, y + 88),
+        fill=COLORS["paper"],
+        outline=COLORS["line"],
+        radius=10,
+    )
+    draw.ellipse((x + 18, y + 22, x + 62, y + 66), fill=accent)
+    _check(draw, x + 29, y + 34, COLORS["paper"])
+    draw.text((x + 78, y + 16), f"{number}  {label}", font=font(14, True), fill=COLORS["navy"])
+    draw.text((x + 78, y + 49), detail, font=font(13), fill=COLORS["muted"])
+
+
 def _draw_access(draw: ImageDraw.ImageDraw) -> None:
     rounded_box(draw, (454, 324, 956, 674), fill=COLORS["paper"], outline=COLORS["line"])
     draw.text((494, 362), "Controlled session entry", font=font(24, True), fill=COLORS["navy"])
@@ -239,21 +262,56 @@ def _draw_daily_context(draw: ImageDraw.ImageDraw) -> None:
 
 
 def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
-    rounded_box(draw, (454, 324, 1028, 650), fill=COLORS["navy"], radius=12)
-    draw.rectangle((476, 346, 1006, 628), outline="#4D4A78", width=2)
-    draw.ellipse((668, 395, 814, 541), outline=COLORS["cyan"], width=6)
-    draw.arc((620, 493, 862, 603), 200, 340, fill=COLORS["cyan"], width=6)
+    rounded_box(draw, (454, 324, 930, 664), fill=COLORS["navy"], radius=12)
+    draw.rectangle((476, 346, 908, 556), outline="#4D4A78", width=2)
+    draw.ellipse((612, 376, 750, 514), outline=COLORS["cyan"], width=5)
+    draw.arc((570, 466, 792, 552), 202, 338, fill=COLORS["cyan"], width=5)
     draw.text((486, 362), "LOCAL PREVIEW", font=font(13, True), fill="#BFC0D6")
-    draw.ellipse((928, 360, 944, 376), fill=COLORS["rose"])
-    draw.text((954, 357), "Ready", font=font(14), fill=COLORS["paper"])
+    rounded_box(draw, (722, 358, 884, 386), fill=COLORS["rose"], radius=14)
+    _centered_text(
+        draw,
+        (722, 358, 884, 386),
+        "STOPPED / 已停止",
+        face=font(12, True),
+        fill=COLORS["paper"],
+    )
+    rounded_box(draw, (476, 580, 676, 630), fill="#17134F", outline="#4D4A78", radius=8)
+    draw.text((494, 595), "Camera + microphone ready", font=font(13), fill=COLORS["paper"])
+    rounded_box(draw, (696, 580, 908, 630), fill="#17134F", outline="#4D4A78", radius=8)
+    draw.polygon(((718, 594), (718, 616), (738, 605)), fill=COLORS["cyan"])
+    draw.text((750, 595), "Ready to review", font=font(13, True), fill=COLORS["paper"])
 
-    _status_row(draw, 1058, 324, 288, "Camera", "Ready", COLORS["cyan"])
-    _status_row(draw, 1058, 420, 288, "Microphone", "Ready", COLORS["cyan"])
-    rounded_box(draw, (1058, 516, 1346, 650), fill=COLORS["paper"], outline=COLORS["line"], radius=10)
-    draw.text((1082, 542), "Browser-local WebM", font=font(17, True), fill=COLORS["navy"])
-    draw.text((1082, 576), "音视频保留在浏览器本地", font=font(14), fill=COLORS["violet"])
-    draw_button(draw, (1082, 604, 1322, 638), "Record / 开始录制", fill=COLORS["rose"])
-    draw_footer(draw, "Preview, record, review, download, then confirm the local save")
+    _handoff_row(
+        draw,
+        956,
+        324,
+        390,
+        "1",
+        "Playback / 回放",
+        "Review picture and sound",
+        COLORS["cyan"],
+    )
+    _handoff_row(
+        draw,
+        956,
+        430,
+        390,
+        "2",
+        "Download WebM + audio / 下载含音频录像",
+        "Save the browser-local recording",
+        COLORS["cyan"],
+    )
+    _handoff_row(
+        draw,
+        956,
+        536,
+        390,
+        "3",
+        "Downloaded and checked / 已下载并检查",
+        "Host confirmation unlocks the questionnaire",
+        COLORS["rose"],
+    )
+    draw_footer(draw, "WebM stays browser-local through review and confirmed download")
 
 
 def _draw_questionnaire(draw: ImageDraw.ImageDraw) -> None:
@@ -276,50 +334,80 @@ def _draw_questionnaire(draw: ImageDraw.ImageDraw) -> None:
     draw.text((944, 620), "参与者页面不显示分数", font=font(14), fill=COLORS["violet"])
 
 
-def _file_tile(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    label: str,
-    subtitle: str,
-    accent: str,
-) -> None:
-    rounded_box(draw, (x, y, x + 260, y + 230), fill=COLORS["paper"], outline=COLORS["line"], radius=12)
-    rounded_box(draw, (x + 28, y + 28, x + 108, y + 112), fill=accent, radius=8)
-    draw.rectangle((x + 50, y + 49, x + 86, y + 92), outline=COLORS["paper"], width=3)
-    draw.line((x + 57, y + 63, x + 79, y + 63), fill=COLORS["paper"], width=2)
-    draw.line((x + 57, y + 76, x + 79, y + 76), fill=COLORS["paper"], width=2)
-    draw.text((x + 28, y + 136), label, font=font(21, True), fill=COLORS["navy"])
-    draw.text((x + 28, y + 173), subtitle, font=font(14), fill=COLORS["muted"])
-
-
 def _draw_export(draw: ImageDraw.ImageDraw) -> None:
-    draw.text((454, 326), "Prepare the local response package", font=font(23, True), fill=COLORS["navy"])
-    draw.text((454, 365), "生成并保存本地资料包", font=font(18), fill=COLORS["violet"])
-    _file_tile(draw, 454, 418, "JSON record", "Structured local copy", COLORS["violet"])
-    _file_tile(draw, 736, 418, "Excel record", "Readable local copy", COLORS["cyan"])
-    rounded_box(draw, (1018, 418, 1346, 648), fill="#FCEAF4", outline="#F4C3DD", radius=12)
-    draw.text((1050, 452), "ZIP package", font=font(22, True), fill=COLORS["navy"])
-    draw.text((1050, 490), "JSON + Excel", font=font(18, True), fill=COLORS["rose"])
-    draw.text((1050, 530), "Saved by the user\nto a local folder", font=font(15), fill=COLORS["muted"], spacing=8)
-    draw_button(draw, (1050, 588, 1314, 632), "Save locally / 本地保存", fill=COLORS["rose"])
+    rounded_box(draw, (454, 324, 824, 664), fill=COLORS["paper"], outline=COLORS["line"], radius=12)
+    draw.text((486, 354), "LOCAL RESPONSE PACKAGE", font=font(14, True), fill=COLORS["violet"])
+    rounded_box(draw, (486, 400, 616, 530), fill=COLORS["violet"], radius=12)
+    _centered_text(
+        draw,
+        (486, 400, 616, 530),
+        "ZIP",
+        face=font(30, True),
+        fill=COLORS["paper"],
+    )
+    draw.text((644, 402), "JSON + Excel", font=font(23, True), fill=COLORS["navy"])
+    draw.text((644, 448), "Two local views of the\nsame response record", font=font(15), fill=COLORS["muted"], spacing=8)
+    rounded_box(draw, (486, 560, 630, 614), fill="#F8F7FC", outline=COLORS["line"], radius=8)
+    _centered_text(draw, (486, 560, 630, 614), "JSON record", face=font(14, True), fill=COLORS["navy"])
+    rounded_box(draw, (646, 560, 790, 614), fill="#E7F7FD", outline=COLORS["line"], radius=8)
+    _centered_text(draw, (646, 560, 790, 614), "Excel record", face=font(14, True), fill=COLORS["navy"])
+
+    _handoff_row(
+        draw,
+        852,
+        306,
+        494,
+        "1",
+        "Save JSON + Excel ZIP / 保存资料包",
+        "Download the package to a local folder",
+        COLORS["cyan"],
+    )
+    _handoff_row(
+        draw,
+        852,
+        400,
+        494,
+        "2",
+        "Locate local ZIP / 找到本地资料包",
+        "Find the saved package in Chrome downloads",
+        COLORS["cyan"],
+    )
+    _handoff_row(
+        draw,
+        852,
+        494,
+        494,
+        "3",
+        "Saved locally / 已保存到本地",
+        "Confirm the archive is saved on this device",
+        COLORS["cyan"],
+    )
+    _handoff_row(
+        draw,
+        852,
+        588,
+        494,
+        "4",
+        "Continue to completion / 进入完成确认",
+        "The completed-session state is now available",
+        COLORS["rose"],
+    )
 
 
 def _draw_completion(draw: ImageDraw.ImageDraw) -> None:
     rounded_box(draw, (454, 324, 1346, 682), fill="#F8F7FC", outline=COLORS["line"])
     draw.ellipse((550, 404, 750, 604), fill=COLORS["cyan"])
     _check(draw, 606, 466, COLORS["paper"], scale=4)
-    draw.text((816, 400), "Local files confirmed", font=font(28, True), fill=COLORS["navy"])
-    draw.text((816, 448), "本地文件已检查", font=font(21), fill=COLORS["violet"])
-    draw.text(
-        (816, 510),
-        "Recording and response package\nhave separate save confirmations.",
-        font=font(17),
-        fill=COLORS["muted"],
-        spacing=10,
-    )
-    rounded_box(draw, (816, 594, 1266, 636), fill="#E7F7FD", radius=8)
-    draw.text((840, 604), "Session complete / 会话完成", font=font(16, True), fill=COLORS["navy"])
+    draw.text((816, 400), "Completion checks confirmed", font=font(28, True), fill=COLORS["navy"])
+    draw.text((816, 448), "完成条件已确认", font=font(21), fill=COLORS["violet"])
+    rounded_box(draw, (816, 500, 1266, 544), fill=COLORS["paper"], outline=COLORS["line"], radius=8)
+    _check(draw, 838, 514, COLORS["cyan"])
+    draw.text((874, 510), "Recording outcome confirmed", font=font(15, True), fill=COLORS["navy"])
+    rounded_box(draw, (816, 558, 1266, 602), fill=COLORS["paper"], outline=COLORS["line"], radius=8)
+    _check(draw, 838, 572, COLORS["cyan"])
+    draw.text((874, 568), "Response ZIP saved locally", font=font(15, True), fill=COLORS["navy"])
+    rounded_box(draw, (816, 620, 1266, 658), fill="#E7F7FD", radius=8)
+    draw.text((840, 629), "Session complete / 会话完成", font=font(15, True), fill=COLORS["navy"])
 
 
 def draw_scene(stage_index: int) -> Image.Image:
