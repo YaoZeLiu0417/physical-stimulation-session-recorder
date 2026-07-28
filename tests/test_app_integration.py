@@ -20,13 +20,18 @@ import browser_recorder
 import questionnaire_export
 import questionnaire_ui
 from app_workflow import (
+    build_daily_context_confirmation,
     confirm_admin_intervention_day,
+    daily_context_confirmation_matches,
+    daily_context_values,
+    resolve_operational_stage,
     resolve_trusted_intervention_day,
     support_needed,
 )
 from browser_recorder import RecorderStatus
 from link_auth import sign_subject_link
 from local_export_bundle import LocalExportBundle, build_local_export_bundle
+from operational_ui import OPERATIONAL_CSS, PALETTE, STAGES
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
 from questionnaire_ui import ALTO_COLORS, ALTO_CSS, validate_submission
 from session_record_workflow import (
@@ -462,6 +467,28 @@ def _element_by_label(elements, label: str):
     return next(element for element in elements if element.label == label)
 
 
+def _operational_shell_markup(app: AppTest) -> str:
+    shells = [
+        str(element.value)
+        for element in app.markdown
+        if '<section class="operational-heading">' in str(element.value)
+        and (
+            "operational-heading__chip" in str(element.value)
+            or "operational-heading__counter" in str(element.value)
+        )
+    ]
+    assert len(shells) == 1
+    return shells[0]
+
+
+def _assert_active_stage(app: AppTest, stage_number: int) -> str:
+    markup = _operational_shell_markup(app)
+    assert markup.count("operational-stage--active") == 1
+    assert f"{stage_number:02d} / 06" in markup
+    assert STAGES[stage_number - 1].chinese in markup
+    return markup
+
+
 def _daily_context_widget_state(app: AppTest) -> dict[str, object]:
     return {
         str(key): copy.deepcopy(value)
@@ -593,6 +620,163 @@ def _admin_app(
     app.session_state["subject_id"] = "sub-001"
     app.run()
     return app
+
+
+def test_password_gate_uses_stage_one_and_hides_later_controls():
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.secrets["APP_PASSWORD_SHA256"] = hashlib.sha256(
+        b"admin-password"
+    ).hexdigest()
+
+    app.run()
+
+    assert not app.exception
+    _assert_active_stage(app, 1)
+    assert _element_by_label(app.text_input, "访问密码")
+    assert not [item for item in app.text_input if item.label.startswith("来访者编号")]
+    assert not app.slider
+    assert not app.text_area
+    assert not app.get("download_button")
+
+
+def test_invalid_signed_link_remains_fail_closed_at_stage_one():
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.secrets["LINK_SIGNING_KEY"] = "operational-app-test-key"
+    app.query_params["sid"] = "sub-001"
+    app.query_params["exp"] = str(int(time.time()) + 3600)
+    app.query_params["sig"] = "invalid-signature"
+    app.query_params["visit"] = "daily"
+
+    app.run()
+
+    assert not app.exception
+    _assert_active_stage(app, 1)
+    assert "链接未锁定" in _visible_app_text(app)
+    assert not app.text_input
+    assert not app.slider
+    assert not app.get("download_button")
+
+
+def test_each_operational_gate_renders_only_its_stage_controls(monkeypatch):
+    current_status = {
+        "value": RecorderStatus(mode="long", state="recording")
+    }
+    questionnaire_complete = {"value": False}
+    questionnaire_calls: list[dict[str, object]] = []
+    bundle = _valid_bundle(json_data=b'{"stages":"complete"}')
+    export_calls: list[dict[str, object]] = []
+
+    def status():
+        return current_status["value"]
+
+    def render(**kwargs):
+        questionnaire_calls.append(kwargs)
+        answers = _minimal_daily_answers()
+        if questionnaire_complete["value"]:
+            kwargs["save_draft"](answers, set(answers))
+        return answers, questionnaire_complete["value"]
+
+    def build_export(record, *, visit, exported_at):
+        export_calls.append(copy.deepcopy(record))
+        return bundle
+
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=status,
+        render_questionnaire=render,
+        build_export=build_export,
+        confirm_daily_context=False,
+    )
+
+    _assert_active_stage(app, 2)
+    assert recorder_calls == []
+    assert _element_by_label(app.button, "确认当日状态，进入本地录制")
+    assert not app.get("download_button")
+
+    _element_by_label(
+        app.button,
+        "确认当日状态，进入本地录制",
+    ).click().run()
+    app.run()
+
+    _assert_active_stage(app, 3)
+    assert len(recorder_calls) == 2
+    assert questionnaire_calls == []
+    assert not [item for item in app.text_input if item.label.startswith("来访者编号")]
+    assert not [item for item in app.slider if "当前心境" in item.label]
+    assert not app.get("download_button")
+
+    current_status["value"] = _saved_status()
+    app.run()
+
+    _assert_active_stage(app, 4)
+    assert len(questionnaire_calls) == 1
+    assert not [item for item in app.text_input if item.label.startswith("来访者编号")]
+    assert not [item for item in app.slider if "当前心境" in item.label]
+    assert not app.get("download_button")
+    assert "录制已确认保存在本机，现已进入问卷。" not in _visible_app_text(app)
+
+    questionnaire_complete["value"] = True
+    app.run()
+
+    _assert_active_stage(app, 5)
+    assert len(questionnaire_calls) == 2
+    assert len(export_calls) == 1
+    assert len(app.get("download_button")) == 1
+    assert not [item for item in app.text_input if item.label.startswith("来访者编号")]
+    assert not [item for item in app.slider if "当前心境" in item.label]
+
+    _element_by_label(
+        app.checkbox,
+        "我确认问卷 ZIP 已保存到本地",
+    ).check().run()
+    _element_by_label(app.button, "完成本次会话").click().run()
+
+    _assert_active_stage(app, 6)
+    assert "本次会话已完成。" in _visible_app_text(app)
+    assert not app.get("download_button")
+
+
+def test_app_routes_through_the_shared_operational_stage_shell():
+    tree = _tree()
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    assert any(
+        isinstance(call.func, ast.Name)
+        and call.func.id == "render_operational_stage"
+        for call in calls
+    )
+    page_config = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+        and call.func.attr == "set_page_config"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in page_config.keywords}
+    assert ast.literal_eval(keywords["page_title"]) == "Session Companion"
+    assert ast.literal_eval(keywords["layout"]) == "wide"
+    source = _source()
+    assert 'st.title("问卷会话")' not in source
+    assert 'st.subheader("① 当日状态")' not in source
+    assert 'st.subheader("② 本地录制")' not in source
+    assert 'st.subheader("③ 正式问卷")' not in source
+
+
+def test_operational_stage_shell_uses_shared_local_style_contract():
+    assert PALETTE == {
+        "navy": "#000035",
+        "violet": "#2D2674",
+        "rose": "#DD1D86",
+        "cyan": "#33B0E4",
+        "peach": "#FFBC7D",
+        "mist": "#F4F5F7",
+        "white": "#FFFFFF",
+    }
+    assert all(color in OPERATIONAL_CSS for color in PALETTE.values())
+    assert "http://" not in OPERATIONAL_CSS
+    assert "https://" not in OPERATIONAL_CSS
+    assert "ymh" not in OPERATIONAL_CSS.casefold()
 
 
 @pytest.mark.parametrize("button_count", (0, 2))
@@ -1063,6 +1247,10 @@ def test_app_imports_only_the_browser_local_session_runtime_interfaces():
     }
 
     assert {
+        "build_daily_context_confirmation",
+        "daily_context_confirmation_matches",
+        "daily_context_values",
+        "resolve_operational_stage",
         "render_browser_recorder",
         "local_recording_metadata",
         "recording_gate_satisfied",
@@ -1072,6 +1260,8 @@ def test_app_imports_only_the_browser_local_session_runtime_interfaces():
         "build_participant_export",
         "questionnaire_state_keys",
         "render_questionnaire",
+        "render_operational_stage",
+        "render_operational_status",
     } <= imported
     forbidden = {
         "DailyRecordStore",
@@ -1131,6 +1321,7 @@ def test_operational_import_closure_has_no_server_upload_or_history_capability()
         "link_auth",
         "local_export_bundle",
         "local_recording_workflow",
+        "operational_ui",
         "participant_identity",
         "questionnaire_export",
         "questionnaire_scoring",
@@ -1436,7 +1627,7 @@ def test_app_and_workflow_have_no_obsolete_server_media_symbols():
     assert all(fragment not in source for fragment in forbidden_fragments)
 
 
-def test_runtime_call_order_is_context_then_recorder_then_questionnaire_then_export():
+def test_runtime_stage_router_precedes_stage_specific_controls():
     tree = _tree()
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
@@ -1450,6 +1641,7 @@ def test_runtime_call_order_is_context_then_recorder_then_questionnaire_then_exp
     recorder = named_call("render_browser_recorder")
     questionnaire = named_call("render_questionnaire")
     export = named_call("build_participant_export")
+    resolver = named_call("resolve_operational_stage")
     context_assignment = next(
         node
         for node in ast.walk(tree)
@@ -1460,7 +1652,31 @@ def test_runtime_call_order_is_context_then_recorder_then_questionnaire_then_exp
         )
     )
 
-    assert context_assignment.lineno < recorder.lineno < questionnaire.lineno < export.lineno
+    assert context_assignment.lineno < resolver.lineno
+    assert resolver.lineno < recorder.lineno
+    assert resolver.lineno < questionnaire.lineno
+    assert resolver.lineno < export.lineno
+    stage_three = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "active_stage == 3"
+    )
+    stage_five = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "active_stage == 5"
+    )
+    assert recorder in ast.walk(stage_three)
+    assert export in ast.walk(stage_five)
+    assert questionnaire.lineno > stage_five.end_lineno
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "st"
+        and node.func.attr == "stop"
+        for node in ast.walk(stage_five)
+    )
     assert any(
         keyword.arg == "initial_mode"
         and isinstance(keyword.value, ast.Constant)
@@ -1890,8 +2106,8 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
     assert "camera_ready" not in visible
     assert "microphone_ready" not in visible
     assert "filename" not in visible.casefold()
-    assert "录制已确认保存在本机，现已进入问卷。" in visible
-    assert "③ 正式问卷" in visible
+    _assert_active_stage(app, 4)
+    assert "录制已确认保存在本机，现已进入问卷。" not in visible
     assert "刷新或关闭页面" in visible
 
 
@@ -1940,8 +2156,8 @@ def test_stopped_recording_host_confirmation_enters_formal_questionnaire(
         "saved_confirmed": True,
     }
     visible = _visible_app_text(app)
-    assert "录制已确认保存在本机，现已进入问卷。" in visible
-    assert "③ 正式问卷" in visible
+    _assert_active_stage(app, 4)
+    assert "录制已确认保存在本机，现已进入问卷。" not in visible
 
     app.run()
 
@@ -2331,15 +2547,21 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
     frozen_record = copy.deepcopy(app.session_state["operational_record"])
     session_token = str(frozen_record["record_id"]).rsplit("_", 1)[-1]
     sleep_key = f"operational_daily_context::{session_token}::sleep_hours"
-    answer_control = _element_by_label(app.slider, "answer mutation probe")
+    answer_key = questionnaire_ui.questionnaire_state_keys(
+        f"operational_questionnaire::{session_token}",
+        "daily",
+    ).widget("nssi_urge_now")
+    _assert_active_stage(app, 5)
+    assert not [item for item in app.slider if item.label == "answer mutation probe"]
     assert frozen_record["daily_context"]["sleep_hours"] == 7.0
     assert export_snapshots[0]["daily_context"]["sleep_hours"] == 7.0
 
     app.session_state[sleep_key] = 8.0
-    answer_control.set_value(9)
+    app.session_state[answer_key] = 9
     app.run()
 
     assert not app.exception
+    _assert_active_stage(app, 5)
     assert app.session_state["operational_record"] == frozen_record
     assert export_snapshots[0]["daily_context"]["sleep_hours"] == 7.0
     assert len(export_snapshots) == 1
@@ -2652,7 +2874,16 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
         app,
         context_widget_state,
     )
+    # AppTest serializes the previous stage's widgets once more before the
+    # clean stage-5 run; restore their values only for that handoff.
+    app.session_state["participant_identifier"] = "sub-001"
+    app.session_state["operational_visit_selection"] = "daily"
+    app.run()
+    for stale_key in ("participant_identifier", "operational_visit_selection"):
+        if stale_key in app.session_state:
+            del app.session_state[stale_key]
     assert not app.exception
+    _assert_active_stage(app, 5)
     assert app.session_state["auth_source"] == "admin"
     assert app.session_state["subject_id"] == "sub-001"
     assert app.session_state["visit"] == "daily"
@@ -2915,7 +3146,7 @@ def test_visible_titles_and_generated_timestamps_are_neutral_and_utc_aware():
         and call.args
         and isinstance(call.args[0], ast.Constant)
     ]
-    assert sorted(titles) == ["问卷会话", "问卷会话准入"]
+    assert titles == []
     assert all("tavns" not in title.casefold() for title in titles)
     source = _source()
     assert "datetime.now().isoformat" not in source

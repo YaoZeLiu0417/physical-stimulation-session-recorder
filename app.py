@@ -23,6 +23,7 @@ from app_workflow import (
     confirm_admin_intervention_day,
     daily_context_confirmation_matches,
     daily_context_values,
+    resolve_operational_stage,
     resolve_trusted_intervention_day,
     support_needed,
 )
@@ -39,6 +40,7 @@ from local_recording_workflow import (
     local_recording_metadata,
     recording_gate_satisfied,
 )
+from operational_ui import render_operational_stage, render_operational_status
 from participant_identity import validate_subject_id
 from questionnaire_export import build_participant_export
 from questionnaire_specs import VISIT_INSTRUMENT_IDS
@@ -183,9 +185,9 @@ def _valid_export_bundle(value: object) -> bool:
 
 
 st.set_page_config(
-    page_title="问卷会话",
+    page_title="Session Companion",
     page_icon="📝",
-    layout="centered",
+    layout="wide",
 )
 
 
@@ -267,11 +269,13 @@ if auth_role_changed or signed_identity_changed:
 def require_app_password() -> None:
     if verified_link is not None:
         return
+
+    expected_hash = _safe_secret("APP_PASSWORD_SHA256", "")
     if invalid_signed_link:
+        render_operational_stage(1)
         st.error(f"链接未锁定：{why_not}")
         st.stop()
 
-    expected_hash = _safe_secret("APP_PASSWORD_SHA256", "")
     if not expected_hash:
         return
     if (
@@ -280,8 +284,8 @@ def require_app_password() -> None:
     ):
         return
 
-    st.title("问卷会话准入")
-    st.warning("请输入访问密码以继续")
+    render_operational_stage(1)
+    render_operational_status("checkpoint", "请输入访问密码以继续")
     password = st.text_input("访问密码", type="password", key="admin_password")
     if st.button("登录", type="primary", key="admin_login"):
         supplied_hash = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
@@ -386,7 +390,10 @@ def _finish_current_session() -> None:
 
 
 def _render_export_finalization(bundle: LocalExportBundle) -> None:
-    st.warning("下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。")
+    render_operational_status(
+        "checkpoint",
+        "下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。",
+    )
     st.download_button(
         label="下载问卷记录（JSON + Excel）",
         data=bundle.data,
@@ -448,6 +455,7 @@ def _stored_recorder_status(value: object):
 require_app_password()
 
 if st.session_state.get(_COMPLETE_KEY) is True:
+    render_operational_stage(6)
     st.success("本次会话已完成。")
     st.stop()
 
@@ -474,9 +482,8 @@ if confirmed_record is None:
     ):
         st.session_state.pop(key, None)
 
-st.title("问卷会话")
 if confirmed_record is None:
-    st.subheader("① 当日状态")
+    render_operational_stage(2)
 
 locked_link = verified_link
 if confirmed_record is not None:
@@ -535,7 +542,7 @@ else:
     ):
         st.session_state[admin_confirmation_key] = int(intervention_day)
     if st.session_state.get(admin_confirmation_key) != int(intervention_day):
-        st.info("请确认本次日期后继续。")
+        render_operational_status("checkpoint", "请确认本次日期后继续。")
         st.stop()
     intervention_day = confirm_admin_intervention_day(
         intervention_day,
@@ -729,11 +736,7 @@ cached_bundle_is_valid = _valid_export_bundle(cached_bundle)
 if cached_bundle is not None and not cached_bundle_is_valid:
     st.session_state.pop(_EXPORT_KEY, None)
     st.session_state.pop(_SAVED_LOCALLY_KEY, None)
-elif cached_bundle_is_valid:
-    _render_export_finalization(cached_bundle)
-    st.stop()
 
-st.subheader("② 本地录制")
 pending_terminal_key = f"operational_recorder::pending::{session_token}"
 continue_without_key = f"operational_recording_continue::{session_token}"
 stored_status = _stored_recorder_status(record.get("recording"))
@@ -745,21 +748,32 @@ recording_locked = (
     stored_status is not None
     and recording_gate_satisfied(stored_status, stored_continue)
 )
-recording_phase_complete = recording_locked
-if recording_locked:
-    gate_status = stored_status
-    st.session_state.pop(pending_terminal_key, None)
-    st.session_state.pop(continue_without_key, None)
-    if gate_status.state == "saved" and gate_status.saved_confirmed:
-        st.success("录制已确认保存在本机，现已进入问卷。")
-else:
+questionnaire_complete = cached_bundle_is_valid or questionnaire_visit_complete(
+    record,
+    visit,
+)
+active_stage = resolve_operational_stage(
+    access_granted=True,
+    context_confirmed=True,
+    recording_complete=cached_bundle_is_valid or recording_locked,
+    questionnaire_complete=questionnaire_complete,
+    session_complete=False,
+)
+render_operational_stage(
+    active_stage,
+    subject_id=safe_subject_id,
+    intervention_day=int(record["intervention_day"]),
+)
+
+if active_stage == 3:
     recorder_key = f"operational_recorder::{session_token}"
     recorder_status = render_browser_recorder(
         key=recorder_key,
         initial_mode="long",
     )
     if recorder_status.state == "stopped":
-        st.warning(
+        render_operational_status(
+            "checkpoint",
             "请先下载录像，在本机打开文件并确认画面与声音均可正常播放。"
         )
         if st.button(
@@ -807,17 +821,53 @@ else:
         gate_status,
         continue_without_recording,
     )
-if not recording_phase_complete:
-    st.info("请先完成本地录制保存，或在无法录制时明确确认继续。")
+if active_stage == 3 and not recording_phase_complete:
+    render_operational_status(
+        "checkpoint",
+        "请先完成本地录制保存，或在无法录制时明确确认继续。",
+    )
     st.stop()
-if not recording_locked:
+if active_stage == 3:
     st.session_state.pop(pending_terminal_key, None)
     record["recording"] = local_recording_metadata(gate_status)
-    if gate_status.state == "saved" and gate_status.saved_confirmed:
-        st.rerun()
+    st.rerun()
 
-st.subheader("③ 正式问卷")
-st.warning("进入问卷后请勿刷新或关闭页面，否则当前问卷内容将丢失。")
+if active_stage == 5:
+    bundle = cached_bundle if cached_bundle_is_valid else None
+    if bundle is None and st.session_state.get(_EXPORT_ERROR_KEY) is True:
+        st.error("下载文件暂时无法生成，请重试。")
+        if st.button("重试生成下载文件", key="operational_export_retry"):
+            st.session_state.pop(_EXPORT_ERROR_KEY, None)
+            st.rerun()
+        st.stop()
+
+    if bundle is None:
+        record_snapshot = copy.deepcopy(record)
+        try:
+            bundle = build_participant_export(
+                record_snapshot,
+                visit=visit,
+                exported_at=_utc_now(),
+            )
+            if not _valid_export_bundle(bundle):
+                raise TypeError("export builder returned an invalid bundle")
+        except Exception:
+            st.session_state[_EXPORT_ERROR_KEY] = True
+            st.error("下载文件暂时无法生成，请重试。")
+            if st.button("重试生成下载文件", key="operational_export_retry"):
+                st.session_state.pop(_EXPORT_ERROR_KEY, None)
+                st.rerun()
+            st.stop()
+        st.session_state[_EXPORT_KEY] = bundle
+        st.session_state.pop(_EXPORT_ERROR_KEY, None)
+
+    _render_export_finalization(bundle)
+    st.stop()
+
+render_operational_status(
+    "checkpoint",
+    "进入问卷后请勿刷新或关闭页面，否则当前问卷内容将丢失。",
+)
 state_namespace = f"operational_questionnaire::{session_token}"
 state_keys = questionnaire_state_keys(state_namespace, visit)
 completion = record.get("completion", {})
@@ -852,76 +902,40 @@ def save_questionnaire_draft(
         )
 
 
-if not questionnaire_visit_complete(record, visit):
-    answers, questionnaire_complete = render_questionnaire(
-        subject_id=safe_subject_id,
-        intervention_day=int(record["intervention_day"]),
-        answers=answers,
-        save_draft=save_questionnaire_draft,
-        visit=visit,
-        state_namespace=state_namespace,
-        initial_answered_field_ids=answered_by_visit.get(visit, []),
-        initial_step=step_by_visit.get(visit, 0),
+answers, questionnaire_complete = render_questionnaire(
+    subject_id=safe_subject_id,
+    intervention_day=int(record["intervention_day"]),
+    answers=answers,
+    save_draft=save_questionnaire_draft,
+    visit=visit,
+    state_namespace=state_namespace,
+    initial_answered_field_ids=answered_by_visit.get(visit, []),
+    initial_step=step_by_visit.get(visit, 0),
+)
+current_answered = set(st.session_state.get(state_keys.answered, []))
+persisted_answered = record.get("completion", {}).get(
+    "answered_field_ids", {}
+)
+if isinstance(persisted_answered, dict):
+    current_answered.update(persisted_answered.get(visit, []))
+if support_needed(
+    visit,
+    answers,
+    current_answered,
+    int(record["intervention_day"]),
+):
+    _show_support_message()
+if not questionnaire_complete:
+    render_operational_status(
+        "checkpoint",
+        "请完成所有必填且适用的问题后继续。",
     )
-    current_answered = set(st.session_state.get(state_keys.answered, []))
-    persisted_answered = record.get("completion", {}).get(
-        "answered_field_ids", {}
-    )
-    if isinstance(persisted_answered, dict):
-        current_answered.update(persisted_answered.get(visit, []))
-    if support_needed(
-        visit,
-        answers,
-        current_answered,
-        int(record["intervention_day"]),
-    ):
-        _show_support_message()
-    if not questionnaire_complete:
-        st.info("请完成所有必填且适用的问题后继续。")
-        st.stop()
-
-    save_questionnaire_draft(answers, current_answered)
-    mark_questionnaire_visit_complete(
-        record,
-        visit,
-        completed_at_iso=_utc_now().isoformat(timespec="seconds"),
-    )
-else:
-    current_answered = set(answered_by_visit.get(visit, []))
-    if support_needed(
-        visit,
-        answers,
-        current_answered,
-        int(record["intervention_day"]),
-    ):
-        _show_support_message()
-
-bundle = st.session_state.get(_EXPORT_KEY)
-if bundle is None and st.session_state.get(_EXPORT_ERROR_KEY) is True:
-    st.error("下载文件暂时无法生成，请重试。")
-    if st.button("重试生成下载文件", key="operational_export_retry"):
-        st.session_state.pop(_EXPORT_ERROR_KEY, None)
-        st.rerun()
     st.stop()
 
-if bundle is None:
-    record_snapshot = copy.deepcopy(record)
-    try:
-        bundle = build_participant_export(
-            record_snapshot,
-            visit=visit,
-            exported_at=_utc_now(),
-        )
-        if not _valid_export_bundle(bundle):
-            raise TypeError("export builder returned an invalid bundle")
-    except Exception:
-        st.session_state[_EXPORT_ERROR_KEY] = True
-        st.error("下载文件暂时无法生成，请重试。")
-        if st.button("重试生成下载文件", key="operational_export_retry"):
-            st.session_state.pop(_EXPORT_ERROR_KEY, None)
-            st.rerun()
-        st.stop()
-    st.session_state[_EXPORT_KEY] = bundle
-    st.session_state.pop(_EXPORT_ERROR_KEY, None)
-
-_render_export_finalization(bundle)
+save_questionnaire_draft(answers, current_answered)
+mark_questionnaire_visit_complete(
+    record,
+    visit,
+    completed_at_iso=_utc_now().isoformat(timespec="seconds"),
+)
+st.rerun()
