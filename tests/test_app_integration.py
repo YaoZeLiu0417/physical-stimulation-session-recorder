@@ -462,6 +462,23 @@ def _element_by_label(elements, label: str):
     return next(element for element in elements if element.label == label)
 
 
+def _daily_context_widget_state(app: AppTest) -> dict[str, object]:
+    return {
+        str(key): copy.deepcopy(value)
+        for key, value in app.session_state.filtered_state.items()
+        if str(key).startswith("operational_daily_context::")
+    }
+
+
+def _restore_missing_daily_context_widget_state(
+    app: AppTest,
+    widget_state: dict[str, object],
+) -> None:
+    for key, value in widget_state.items():
+        if key not in app.session_state:
+            app.session_state[key] = copy.deepcopy(value)
+
+
 def _signed_app(
     monkeypatch,
     *,
@@ -516,8 +533,30 @@ def _signed_app(
         for button in app.button
         if button.label == "确认当日状态，进入本地录制"
     ]
-    if confirm_daily_context and confirmation_buttons:
+    session_complete = (
+        "operational_complete" in app.session_state
+        and app.session_state["operational_complete"] is True
+    )
+    should_confirm = (
+        confirm_daily_context
+        and not session_complete
+        and "operational_daily_context_confirmation" not in app.session_state
+    )
+    if should_confirm:
+        assert len(confirmation_buttons) == 1, (
+            "expected exactly one daily-context confirmation button, "
+            f"found {len(confirmation_buttons)}"
+        )
+        context_widget_state = _daily_context_widget_state(app)
         confirmation_buttons[0].click().run()
+        if any(
+            button.label == "确认当日状态，进入本地录制"
+            for button in app.button
+        ):
+            _restore_missing_daily_context_widget_state(
+                app,
+                context_widget_state,
+            )
     return app, recorder_calls
 
 
@@ -554,6 +593,40 @@ def _admin_app(
     app.session_state["subject_id"] = "sub-001"
     app.run()
     return app
+
+
+@pytest.mark.parametrize("button_count", (0, 2))
+def test_signed_app_requires_exactly_one_context_confirmation_button(
+    monkeypatch,
+    button_count,
+):
+    class FakeButton:
+        label = "确认当日状态，进入本地录制"
+
+        def click(self):
+            return self
+
+        def run(self):
+            return self
+
+    class FakeApp:
+        def __init__(self):
+            self.secrets: dict[str, object] = {}
+            self.query_params: dict[str, str] = {}
+            self.session_state: dict[str, object] = {}
+            self.button = [FakeButton() for _ in range(button_count)]
+
+        def run(self):
+            return self
+
+    monkeypatch.setattr(
+        AppTest,
+        "from_file",
+        lambda *args, **kwargs: FakeApp(),
+    )
+
+    with pytest.raises(AssertionError, match="exactly one"):
+        _signed_app(monkeypatch)
 
 
 def _saved_status() -> RecorderStatus:
@@ -1522,21 +1595,25 @@ def test_daily_context_is_a_separate_gate_before_the_recorder(monkeypatch):
     assert questionnaire_calls == []
     assert not app.get("download_button")
     assert "operational_daily_context_confirmation" not in app.session_state
-    _element_by_label(
-        app.slider,
-        "当前心境（1=很差，9=很好）",
-    ).set_value(8).run()
+    mood = _element_by_label(app.slider, "当前心境（1=很差，9=很好）")
+    narrative = _element_by_label(
+        app.text_area,
+        "当日状态叙述（自由输入，尽量详细）",
+    )
     confirmation = _element_by_label(
         app.button,
         "确认当日状态，进入本地录制",
     )
 
+    mood.set_value(8)
+    narrative.set_value("最后一次编辑")
     confirmation.click().run()
 
     assert not app.exception
     assert len(recorder_calls) == 1
     record = app.session_state["operational_record"]
     assert record["daily_context"]["mood_1to9"] == 8
+    assert record["daily_context"]["narrative"] == "最后一次编辑"
     assert app.session_state["operational_daily_context_confirmation"] == {
         "auth_source": "signed_link",
         "record_id": record["record_id"],
@@ -1545,6 +1622,11 @@ def test_daily_context_is_a_separate_gate_before_the_recorder(monkeypatch):
         "intervention_day": 6,
         "visit": "daily",
     }
+
+    app.run()
+
+    assert not app.exception
+    assert len(recorder_calls) == 2
     assert not [
         button
         for button in app.button
@@ -1555,6 +1637,56 @@ def test_daily_context_is_a_separate_gate_before_the_recorder(monkeypatch):
         for slider in app.slider
         if slider.label == "当前心境（1=很差，9=很好）"
     ]
+
+
+def test_unconfirmed_context_discards_cached_export_state_before_confirmation(
+    monkeypatch,
+):
+    app, recorder_calls = _signed_app(
+        monkeypatch,
+        status=RecorderStatus(mode="long", state="recording"),
+        confirm_daily_context=False,
+    )
+    app.session_state["operational_export_bundle"] = _valid_bundle()
+    app.session_state["operational_saved_locally"] = True
+    app.session_state["operational_export_error"] = True
+    app.session_state["operational_export_retry"] = True
+    app.session_state["operational_finish"] = True
+
+    app.run()
+
+    assert not app.exception
+    assert recorder_calls == []
+    assert not app.get("download_button")
+    for key in (
+        "operational_export_bundle",
+        "operational_saved_locally",
+        "operational_export_error",
+        "operational_export_retry",
+        "operational_finish",
+    ):
+        assert key not in app.session_state
+    _element_by_label(
+        app.slider,
+        "当前心境（1=很差，9=很好）",
+    ).set_value(8).run()
+    _element_by_label(
+        app.button,
+        "确认当日状态，进入本地录制",
+    ).click().run()
+
+    assert not app.exception
+    assert len(recorder_calls) == 1
+    assert app.session_state["operational_record"]["daily_context"][
+        "mood_1to9"
+    ] == 8
+    assert not app.get("download_button")
+    for key in (
+        "operational_export_bundle",
+        "operational_saved_locally",
+        "operational_export_error",
+    ):
+        assert key not in app.session_state
 
 
 def test_context_confirmation_is_cleared_with_record_and_auth_changes(monkeypatch):
@@ -1586,6 +1718,10 @@ def test_confirmed_context_controls_stay_absent_and_stale_widgets_cannot_mutate_
         monkeypatch,
         status=RecorderStatus(mode="long", state="recording"),
     )
+    app.run()
+
+    assert not app.exception
+    assert len(recorder_calls) == 2
     record = app.session_state["operational_record"]
     original_context = copy.deepcopy(record["daily_context"])
     session_token = str(record["record_id"]).rsplit("_", 1)[-1]
@@ -1600,7 +1736,7 @@ def test_confirmed_context_controls_stay_absent_and_stale_widgets_cannot_mutate_
     app.run()
 
     assert not app.exception
-    assert len(recorder_calls) == 2
+    assert len(recorder_calls) == 3
     assert app.session_state["operational_record"]["daily_context"] == original_context
     assert app.session_state[mood_key] == 1
     assert not [
@@ -2507,10 +2643,15 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
         build_export=lambda *args, **kwargs: bundle,
     )
     _element_by_label(app.button, "确认日期").click().run()
+    context_widget_state = _daily_context_widget_state(app)
     _element_by_label(
         app.button,
         "确认当日状态，进入本地录制",
     ).click().run()
+    _restore_missing_daily_context_widget_state(
+        app,
+        context_widget_state,
+    )
     assert not app.exception
     assert app.session_state["auth_source"] == "admin"
     assert app.session_state["subject_id"] == "sub-001"

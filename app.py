@@ -464,6 +464,15 @@ confirmed_record = _validated_confirmed_record(
 if _CONTEXT_CONFIRMED_KEY in st.session_state and confirmed_record is None:
     _clear_current_session()
     record = None
+if confirmed_record is None:
+    for key in (
+        _EXPORT_KEY,
+        _SAVED_LOCALLY_KEY,
+        _EXPORT_ERROR_KEY,
+        "operational_export_retry",
+        "operational_finish",
+    ):
+        st.session_state.pop(key, None)
 
 st.title("问卷会话")
 if confirmed_record is None:
@@ -700,8 +709,11 @@ else:
         "triggers": triggers or "",
     }
     record["daily_context"] = copy.deepcopy(daily_context)
-
-    def confirm_daily_context() -> None:
+    if st.button(
+        "确认当日状态，进入本地录制",
+        type="primary",
+        key=f"operational_daily_context::{session_token}::confirm",
+    ):
         record["daily_context"] = copy.deepcopy(daily_context)
         st.session_state[_CONTEXT_CONFIRMED_KEY] = (
             build_daily_context_confirmation(
@@ -710,13 +722,6 @@ else:
             )
         )
         st.rerun()
-
-    st.button(
-        "确认当日状态，进入本地录制",
-        type="primary",
-        key=f"operational_daily_context::{session_token}::confirm",
-        on_click=confirm_daily_context,
-    )
     st.stop()
 
 cached_bundle = st.session_state.get(_EXPORT_KEY)
