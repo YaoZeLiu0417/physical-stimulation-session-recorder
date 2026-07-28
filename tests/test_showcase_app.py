@@ -346,6 +346,23 @@ EXPECTED_SHOWCASE_CALL_INVENTORY = Counter(
 )
 ALLOWED_SHOWCASE_CALLS = set(EXPECTED_SHOWCASE_CALL_INVENTORY) | {"str.replace"}
 EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY = Counter({"os.getenv": 1})
+EXPECTED_SHOWCASE_AST_FINGERPRINT = (
+    "422f6c43b3956f140b3d8ca503d01913b8b33d9d8f34cec78aeb4bae3847c4fe"
+)
+FORBIDDEN_SHOWCASE_BUILTIN_LOADS = frozenset(
+    {
+        "__import__",
+        "breakpoint",
+        "compile",
+        "delattr",
+        "eval",
+        "exec",
+        "getattr",
+        "input",
+        "open",
+        "setattr",
+    }
+)
 
 
 def _app_with_password(app_path: Path = APP) -> AppTest:
@@ -1692,6 +1709,8 @@ def _showcase_ast_inventory(
     tuple[tuple[str, str, str], ...],
     Counter[str],
     Counter[str],
+    Counter[str],
+    str,
 ]:
     tree = ast.parse(source)
     import_inventory: list[tuple[str, str, str]] = []
@@ -1760,17 +1779,37 @@ def _showcase_ast_inventory(
             qualified_name = qualified_expression(node)
             if qualified_name.startswith("os."):
                 os_attribute_inventory[qualified_name] += 1
+    dangerous_builtin_load_inventory = Counter(
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in FORBIDDEN_SHOWCASE_BUILTIN_LOADS
+    )
+    ast_fingerprint = hashlib.sha256(
+        ast.dump(
+            tree,
+            annotate_fields=True,
+            include_attributes=False,
+        ).encode("utf-8")
+    ).hexdigest()
     return (
         tuple(sorted(import_inventory)),
         call_inventory,
         os_attribute_inventory,
+        dangerous_builtin_load_inventory,
+        ast_fingerprint,
     )
 
 
 def _assert_showcase_ast_boundary(source: str) -> Counter[str]:
-    import_inventory, call_inventory, os_attribute_inventory = (
-        _showcase_ast_inventory(source)
-    )
+    (
+        import_inventory,
+        call_inventory,
+        os_attribute_inventory,
+        dangerous_builtin_load_inventory,
+        ast_fingerprint,
+    ) = _showcase_ast_inventory(source)
     assert import_inventory == EXPECTED_SHOWCASE_IMPORT_BINDINGS
     assert set(call_inventory) <= ALLOWED_SHOWCASE_CALLS
     assert call_inventory in (
@@ -1780,6 +1819,8 @@ def _assert_showcase_ast_boundary(source: str) -> Counter[str]:
     assert (
         os_attribute_inventory == EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY
     )
+    assert not dangerous_builtin_load_inventory
+    assert ast_fingerprint == EXPECTED_SHOWCASE_AST_FINGERPRINT
     return call_inventory
 
 
@@ -1848,6 +1889,32 @@ def test_showcase_ast_boundary_rejects_getattr_os_reflection():
         )
 
 
+def test_showcase_ast_boundary_rejects_retry_button_builtin_callback():
+    source = APP.read_text(encoding="utf-8")
+    mutated_source = source.replace(
+        "        on_click=_retry_synthetic_export,\n",
+        "        on_click=open,\n        args=(__file__,),\n",
+        1,
+    )
+    normalized_source = ast.dump(
+        ast.parse(source),
+        annotate_fields=True,
+        include_attributes=False,
+    ).encode("utf-8")
+    normalized_mutation = ast.dump(
+        ast.parse(mutated_source),
+        annotate_fields=True,
+        include_attributes=False,
+    ).encode("utf-8")
+
+    assert mutated_source != source
+    assert hashlib.sha256(normalized_mutation).hexdigest() != hashlib.sha256(
+        normalized_source
+    ).hexdigest()
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(mutated_source)
+
+
 def test_showcase_ast_boundary_rejects_duplicate_os_getenv_reference():
     source = APP.read_text(encoding="utf-8")
 
@@ -1857,12 +1924,31 @@ def test_showcase_ast_boundary_rejects_duplicate_os_getenv_reference():
         )
 
 
-def test_showcase_ast_boundary_allows_string_replace() -> None:
+def test_showcase_ast_inventory_treats_string_replace_as_non_capability():
+    source = APP.read_text(encoding="utf-8")
+    mutated_source = f'{source}\n"synthetic".replace("syn", "Syn")\n'
+    (
+        _,
+        call_inventory,
+        os_attribute_inventory,
+        dangerous_builtin_load_inventory,
+        ast_fingerprint,
+    ) = _showcase_ast_inventory(mutated_source)
+
+    assert call_inventory == EXPECTED_SHOWCASE_CALL_INVENTORY + Counter(
+        {"str.replace": 1}
+    )
+    assert os_attribute_inventory == EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY
+    assert not dangerous_builtin_load_inventory
+    assert ast_fingerprint != EXPECTED_SHOWCASE_AST_FINGERPRINT
+    with pytest.raises(AssertionError):
+        _assert_showcase_ast_boundary(mutated_source)
+
+
+def test_showcase_ast_boundary_allows_comment_and_whitespace_changes() -> None:
     source = APP.read_text(encoding="utf-8")
 
-    _assert_showcase_ast_boundary(
-        f'{source}\n"synthetic".replace("syn", "Syn")\n'
-    )
+    _assert_showcase_ast_boundary(f"# AST audit note\n\n{source}\n")
 
 
 def test_showcase_source_has_no_private_or_io_capabilities():
