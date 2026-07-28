@@ -1,5 +1,6 @@
 import ast
 from dataclasses import FrozenInstanceError
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 import re
@@ -32,6 +33,7 @@ RECORDER_ELEMENT_IDS = {
     "download-link",
     "skip-button",
     "status",
+    "save-panel",
     "save-confirmation",
 }
 VALID_STATUS = {
@@ -115,6 +117,10 @@ def test_component_html_is_semantic_and_accessible() -> None:
     assert parser.elements_by_id["microphone-select"][0] == "select"
     assert parser.elements_by_id["audio-meter"][0] == "meter"
     assert parser.elements_by_id["status"][1]["aria-live"] == "polite"
+    save_panel_tag, save_panel_attributes = parser.elements_by_id["save-panel"]
+    assert save_panel_tag == "section"
+    assert "hidden" in save_panel_attributes
+    assert save_panel_attributes["aria-labelledby"] == "save-panel-title"
     assert parser.elements_by_id["save-confirmation"][1]["type"] == "checkbox"
 
     modes = {
@@ -130,6 +136,35 @@ def test_component_html_is_semantic_and_accessible() -> None:
         assert attributes.get("title")
 
 
+def test_component_html_gives_three_explicit_local_save_steps() -> None:
+    source = (COMPONENT_DIR / "index.html").read_text(encoding="utf-8")
+    match = re.search(
+        r'<section\b[^>]*\bid="save-panel"[^>]*>(.*?)</section>',
+        source,
+        flags=re.DOTALL,
+    )
+
+    assert match is not None
+    panel_source = match.group(1)
+    steps = [
+        " ".join(unescape(re.sub(r"<[^>]+>", " ", item)).split()).lower()
+        for item in re.findall(r"<li\b[^>]*>(.*?)</li>", panel_source, re.DOTALL)
+    ]
+
+    assert len(steps) == 3
+    assert "save or download" in steps[0]
+    assert "chosen local folder" in steps[0]
+    assert all(concept in steps[1] for concept in ("open", "play", "check", "video", "sound"))
+    assert all(concept in steps[2] for concept in ("confirmation", "continue", "next step"))
+    assert re.search(
+        r'<label\b[^>]*\bfor="save-confirmation"[^>]*>.*?'
+        r'<input\b[^>]*\bid="save-confirmation"[^>]*>.*?'
+        r"saved.*checked.*video.*sound",
+        panel_source,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+
 def test_component_css_has_the_approved_responsive_visual_contract() -> None:
     source = (COMPONENT_DIR / "recorder.css").read_text(encoding="utf-8")
 
@@ -141,6 +176,24 @@ def test_component_css_has_the_approved_responsive_visual_contract() -> None:
     assert "@media (max-width: 640px)" in source
     assert "gradient" not in source.lower()
     assert "green" not in source.lower()
+
+
+def test_component_css_styles_a_responsive_high_contrast_save_panel() -> None:
+    source = (COMPONENT_DIR / "recorder.css").read_text(encoding="utf-8")
+    panel_rule = re.search(r"\.save-panel\s*\{([^}]*)\}", source, re.DOTALL)
+
+    assert panel_rule is not None
+    declarations = panel_rule.group(1).lower()
+    assert "width: 100%" in declarations
+    assert "background: #000035" in declarations
+    assert "color: #ffffff" in declarations
+    assert "border-radius: 4px" in declarations
+    assert "overflow-wrap: anywhere" in declarations
+    assert re.search(
+        r"@media\s*\(max-width:\s*640px\).*?\.save-panel\s*\{",
+        source,
+        re.DOTALL,
+    )
 
 
 def test_recorder_app_uses_required_local_browser_apis() -> None:

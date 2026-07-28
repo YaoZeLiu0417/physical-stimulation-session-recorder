@@ -20,6 +20,7 @@ const elements = Object.freeze({
   downloadLink: document.getElementById("download-link"),
   skipButton: document.getElementById("skip-button"),
   status: document.getElementById("status"),
+  savePanel: document.getElementById("save-panel"),
   saveConfirmation: document.getElementById("save-confirmation"),
 });
 
@@ -117,10 +118,10 @@ function statusMessage() {
     return "Recording locally.";
   }
   if (status.state === "stopped") {
-    return "Recording stopped. Confirm the local save when ready.";
+    return "Recording stopped. Complete the three local-save steps below to continue.";
   }
   if (status.state === "saved") {
-    return "Local save confirmed.";
+    return "Local recording saved and checked. Continuing to the next step.";
   }
   if (status.state === "skipped") {
     return "Recording skipped.";
@@ -157,6 +158,7 @@ function renderControls(message = null) {
   elements.rerecordButton.hidden = !canRecordAgain;
   elements.rerecordButton.disabled = cleaningUp;
   elements.skipButton.disabled = !canStart;
+  elements.savePanel.hidden = !localCompletionReady;
   elements.saveConfirmation.disabled =
     cleaningUp || !localCompletionReady || status.state === "saved";
   elements.saveConfirmation.checked = status.saved_confirmed;

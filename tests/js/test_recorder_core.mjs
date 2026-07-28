@@ -708,6 +708,7 @@ async function recorderAppHarness({
     "download-link",
     "skip-button",
     "status",
+    "save-panel",
     "save-confirmation",
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement(id)]));
@@ -1137,6 +1138,63 @@ test("final nonempty data drains before close and explicit confirmation", async 
     harness.elements["save-confirmation"].emit("change");
     assert.equal(harness.latestStatus().state, "saved");
     assert.equal(harness.latestStatus().saved_confirmed, true);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("local completion panel follows finalized output through confirmation and reset", async () => {
+  const harness = await recorderAppHarness();
+  try {
+    assert.equal(harness.elements["save-panel"].hidden, true);
+
+    await harness.render("long");
+    harness.elements["record-button"].emit("click");
+    await settleRecorderApp();
+    assert.equal(harness.elements["save-panel"].hidden, true);
+
+    const recorder = harness.recorderInstances[0];
+    recorder.emitData(numberedBlob(4));
+    await settleRecorderApp();
+    recorder.emitStop();
+    await settleRecorderApp();
+
+    assert.equal(harness.elements["save-panel"].hidden, false);
+    assert.equal(
+      harness.elements.status.textContent,
+      "Recording stopped. Complete the three local-save steps below to continue.",
+    );
+    assert.deepEqual(harness.latestStatus(), {
+      mode: "long",
+      state: "stopped",
+      duration_seconds: 0,
+      camera_ready: false,
+      microphone_ready: false,
+      saved_confirmed: false,
+      error_code: null,
+    });
+
+    harness.elements["save-confirmation"].checked = true;
+    harness.elements["save-confirmation"].emit("change");
+
+    assert.deepEqual(harness.latestStatus(), {
+      mode: "long",
+      state: "saved",
+      duration_seconds: 0,
+      camera_ready: false,
+      microphone_ready: false,
+      saved_confirmed: true,
+      error_code: null,
+    });
+    assert.equal(harness.elements["save-panel"].hidden, false);
+    assert.equal(
+      harness.elements.status.textContent,
+      "Local recording saved and checked. Continuing to the next step.",
+    );
+
+    harness.elements["rerecord-button"].emit("click");
+    await settleRecorderApp();
+    assert.equal(harness.elements["save-panel"].hidden, true);
   } finally {
     await harness.dispose();
   }

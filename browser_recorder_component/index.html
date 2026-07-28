@@ -95,10 +95,26 @@
 
       <section class="status-band">
         <p id="status" role="status" aria-live="polite">Ready to record locally.</p>
-        <label class="save-confirmation" for="save-confirmation">
-          <input id="save-confirmation" type="checkbox" disabled />
-          <span>I confirm the recording is saved locally.</span>
-        </label>
+      </section>
+
+      <section
+        id="save-panel"
+        class="save-panel"
+        aria-labelledby="save-panel-title"
+        hidden
+      >
+        <h2 id="save-panel-title">Finish your local save</h2>
+        <ol>
+          <li>Save or download the recording to your chosen local folder.</li>
+          <li>Open and play the local result to check its video and sound.</li>
+          <li>
+            Check the confirmation below to continue to the next step.
+            <label class="save-confirmation" for="save-confirmation">
+              <input id="save-confirmation" type="checkbox" disabled />
+              <span>I confirm I saved the recording locally and checked its video and sound.</span>
+            </label>
+          </li>
+        </ol>
       </section>
     </main>
 
