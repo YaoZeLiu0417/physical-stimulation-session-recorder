@@ -1599,6 +1599,8 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
     assert "camera_ready" not in visible
     assert "microphone_ready" not in visible
     assert "filename" not in visible.casefold()
+    assert "录制已确认保存在本机，现已进入问卷。" in visible
+    assert "③ 正式问卷" in visible
     assert "刷新或关闭页面" in visible
 
 

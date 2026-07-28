@@ -622,6 +622,8 @@ if recording_locked:
     gate_status = stored_status
     st.session_state.pop(pending_terminal_key, None)
     st.session_state.pop(continue_without_key, None)
+    if gate_status.state == "saved" and gate_status.saved_confirmed:
+        st.success("录制已确认保存在本机，现已进入问卷。")
 else:
     recorder_key = f"operational_recorder::{session_token}"
     recorder_status = render_browser_recorder(
@@ -670,7 +672,10 @@ if not recording_phase_complete:
 if not recording_locked:
     st.session_state.pop(pending_terminal_key, None)
     record["recording"] = local_recording_metadata(gate_status)
+    if gate_status.state == "saved" and gate_status.saved_confirmed:
+        st.rerun()
 
+st.subheader("③ 正式问卷")
 st.warning("进入问卷后请勿刷新或关闭页面，否则当前问卷内容将丢失。")
 state_namespace = f"operational_questionnaire::{session_token}"
 state_keys = questionnaire_state_keys(state_namespace, visit)

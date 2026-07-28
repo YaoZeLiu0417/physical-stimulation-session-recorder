@@ -296,14 +296,8 @@ def _render_local_recorder() -> None:
     elif status.state == "stopped":
         st.info("录制已停止。请保存并确认后继续。")
     elif status.state == "saved" and status.saved_confirmed:
-        st.info("录像已保存在本机，可以继续后续流程。")
-        if st.button(
-            "继续后续流程",
-            type="primary",
-            key="finish_capture",
-        ):
-            st.session_state["showcase_camera_started"] = True
-            _go("finish_capture")
+        st.session_state["showcase_camera_started"] = True
+        _go("finish_capture")
     elif status.state == "saved":
         st.info("请先确认录像已保存在本机。")
     elif status.state in {"skipped", "failed"}:

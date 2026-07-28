@@ -135,17 +135,6 @@ EXPECTED_OVERVIEW_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     ),
     ("button", "label", "开始演示"),
 )
-EXPECTED_CAPTURE_SAVED_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
-    ("subheader", "value", "本机录制"),
-    (
-        "caption",
-        "value",
-        "视频和声音仅保存在本机，不会上传。请勿录入可识别身份的信息。",
-    ),
-    ("button", "label", "返回流程概览"),
-    ("info", "value", "录像已保存在本机，可以继续后续流程。"),
-    ("button", "label", "继续后续流程"),
-)
 EXPECTED_CAPTURE_NO_RECORDING_INVENTORY = AUTHENTICATED_INVENTORY_PREFIX + (
     ("subheader", "value", "本机录制"),
     (
@@ -321,13 +310,13 @@ EXPECTED_SHOWCASE_CALL_INVENTORY = Counter(
         "showcase_workflow.advance_step": 1,
         "showcase_workflow.password_matches": 1,
         "str": 1,
-        "streamlit.button": 9,
+        "streamlit.button": 8,
         "streamlit.caption": 5,
         "streamlit.checkbox": 1,
         "streamlit.container": 1,
         "streamlit.download_button": 1,
         "streamlit.error": 2,
-        "streamlit.info": 6,
+        "streamlit.info": 5,
         "streamlit.markdown": 5,
         "streamlit.rerun": 3,
         "streamlit.session_state.get": 7,
@@ -347,7 +336,7 @@ EXPECTED_SHOWCASE_CALL_INVENTORY = Counter(
 ALLOWED_SHOWCASE_CALLS = set(EXPECTED_SHOWCASE_CALL_INVENTORY) | {"str.replace"}
 EXPECTED_SHOWCASE_OS_ATTRIBUTE_INVENTORY = Counter({"os.getenv": 1})
 EXPECTED_SHOWCASE_AST_FINGERPRINT = (
-    "422f6c43b3956f140b3d8ca503d01913b8b33d9d8f34cec78aeb4bae3847c4fe"
+    "7d8fd98c7aba72baff8db2d2459331b38e9459de18ff953c5f009161bd5adfcd"
 )
 FORBIDDEN_SHOWCASE_BUILTIN_LOADS = frozenset(
     {
@@ -519,12 +508,8 @@ def _advance_to_download(
     responses: dict[str, int],
 ) -> AppTest:
     app, _ = _capture_app(monkeypatch, status)
-    continue_key = (
-        "finish_capture"
-        if status.state == "saved" and status.saved_confirmed
-        else "continue_without_recording"
-    )
-    _element_by_key(app.button, continue_key).click().run()
+    if status.state in {"skipped", "failed"}:
+        _element_by_key(app.button, "continue_without_recording").click().run()
     for key, value in responses.items():
         _element_by_key(app.slider, key).set_value(value)
     app.run()
@@ -800,8 +785,13 @@ def test_registered_recorder_component_discards_raw_and_preserves_identity():
     assert "showcase_session_recorder" not in app.session_state
     assert app.session_state["showcase_recorder_status"] == saved_status
     third_components = app.get("component_instance")
-    assert len(third_components) == 1
-    assert third_components[0].proto.id == component_id
+    assert not third_components
+    assert app.session_state["showcase_step"] == "reflection"
+    assert app.session_state["showcase_camera_started"] is True
+    assert tuple(slider.key for slider in app.slider) == tuple(
+        SYNTHETIC_RESPONSES
+    )
+    assert not [button for button in app.button if button.key == "finish_capture"]
 
 
 def test_registered_recorder_component_discards_private_raw_fields():
@@ -826,7 +816,7 @@ def test_registered_recorder_component_discards_private_raw_fields():
 
 
 @pytest.mark.parametrize(
-    ("raw_status", "expected_status", "continue_available"),
+    ("raw_status", "expected_status", "auto_advance"),
     (
         (
             {
@@ -869,7 +859,7 @@ def test_registered_recorder_component_discards_private_raw_fields():
     ids=("recording", "saved"),
 )
 def test_recorder_consumes_raw_events_and_preserves_status_on_plain_rerun(
-    monkeypatch, raw_status, expected_status, continue_available
+    monkeypatch, raw_status, expected_status, auto_advance
 ):
     component_values = [raw_status, None]
     component_calls = []
@@ -890,27 +880,27 @@ def test_recorder_consumes_raw_events_and_preserves_status_on_plain_rerun(
     assert not app.exception
     assert app.session_state["showcase_recorder_status"] == expected_status
     assert "showcase_session_recorder" not in app.session_state
+    assert app.session_state["showcase_step"] == (
+        "reflection" if auto_advance else "capture"
+    )
 
     app.run()
 
     assert not app.exception
     assert app.session_state["showcase_recorder_status"] == expected_status
     assert "showcase_session_recorder" not in app.session_state
-    assert bool(
-        [button for button in app.button if button.key == "finish_capture"]
-    ) is continue_available
-    assert component_calls == [
-        {
-            "key": "showcase_session_recorder",
-            "initial_mode": "demo",
-            "default": None,
-        },
-        {
-            "key": "showcase_session_recorder",
-            "initial_mode": "demo",
-            "default": None,
-        },
-    ]
+    assert not [button for button in app.button if button.key == "finish_capture"]
+    expected_component_call = {
+        "key": "showcase_session_recorder",
+        "initial_mode": "demo",
+        "default": None,
+    }
+    assert component_calls == [expected_component_call] * (1 if auto_advance else 2)
+    if auto_advance:
+        assert app.session_state["showcase_camera_started"] is True
+        assert tuple(slider.key for slider in app.slider) == tuple(
+            SYNTHETIC_RESPONSES
+        )
 
 
 @pytest.mark.parametrize(
@@ -953,12 +943,9 @@ def test_recorder_confirmed_save_continues_with_camera_feedback(
     )
     app, _ = _capture_app(monkeypatch, status)
 
-    continue_button = _element_by_key(app.button, "finish_capture")
-    assert "继续" in continue_button.label
-    continue_button.click().run()
-
     assert app.session_state["showcase_step"] == "reflection"
     assert app.session_state["showcase_camera_started"] is True
+    assert not [button for button in app.button if button.key == "finish_capture"]
     assert tuple(slider.key for slider in app.slider) == tuple(
         SYNTHETIC_RESPONSES
     )
@@ -1397,7 +1384,6 @@ def test_download_uses_none_camera_rating_without_saved_recording(
     (
         ("access", None, EXPECTED_ACCESS_INVENTORY),
         ("overview", None, EXPECTED_OVERVIEW_INVENTORY),
-        ("capture", "saved", EXPECTED_CAPTURE_SAVED_INVENTORY),
         ("capture", "skipped", EXPECTED_CAPTURE_NO_RECORDING_INVENTORY),
         ("capture", "failed", EXPECTED_CAPTURE_NO_RECORDING_INVENTORY),
         ("reflection", "saved", EXPECTED_REFLECTION_SAVED_INVENTORY),
@@ -1421,7 +1407,6 @@ def test_download_uses_none_camera_rating_without_saved_recording(
     ids=(
         "access",
         "overview",
-        "capture-saved",
         "capture-skipped",
         "capture-failed",
         "reflection-saved",
@@ -1487,13 +1472,9 @@ def test_showcase_completes_and_restarts_session_only_flow(tmp_path, monkeypatch
     _assert_progress(app, "1 安全进入")
     _element_by_key(app.button, "begin_demo").click().run()
 
-    capture_text = _visible_text(app)
-    assert "本机录制" in capture_text
-    assert "视频和声音仅保存在本机" in capture_text
-    assert "不会上传" in capture_text
-    _assert_progress(app, "2 会话记录")
-    _element_by_key(app.button, "finish_capture").click().run()
-
+    assert app.session_state["showcase_step"] == "reflection"
+    assert app.session_state["showcase_camera_started"] is True
+    assert not [button for button in app.button if button.key == "finish_capture"]
     for key in SYNTHETIC_RESPONSES:
         slider = _element_by_key(app.slider, key)
         assert slider.value == 2
