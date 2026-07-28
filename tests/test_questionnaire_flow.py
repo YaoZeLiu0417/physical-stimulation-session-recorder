@@ -206,6 +206,30 @@ def test_question_context_is_local_and_html_escaped(monkeypatch):
     ]
 
 
+def test_question_context_html_escapes_runtime_counter_values(monkeypatch):
+    rendered = []
+
+    def capture(body, **kwargs):
+        rendered.append((body, kwargs))
+
+    monkeypatch.setattr("questionnaire_ui.st.markdown", capture)
+    render_question_context(
+        "当前",
+        current='<img src=x onerror="bad()">',
+        total='<script id="total">bad()</script>',
+    )
+
+    assert rendered == [
+        (
+            '<div class="questionnaire-context">'
+            "当前 · &lt;img src=x onerror=&quot;bad()&quot;&gt; / "
+            "&lt;script id=&quot;total&quot;&gt;bad()&lt;/script&gt;"
+            "</div>",
+            {"unsafe_allow_html": True},
+        )
+    ]
+
+
 def test_questionnaire_source_has_no_competing_global_shell():
     source = (
         Path(__file__).resolve().parents[1] / "questionnaire_ui.py"
