@@ -42,8 +42,8 @@ def test_saved_local_recording_metadata_contains_no_media_location() -> None:
         mode="long",
         state="saved",
         duration_seconds=1250,
-        camera_ready=True,
-        microphone_ready=True,
+        camera_ready=False,
+        microphone_ready=False,
         saved_confirmed=True,
     )
 
@@ -55,8 +55,8 @@ def test_saved_local_recording_metadata_contains_no_media_location() -> None:
         "status": "saved",
         "mode": "long",
         "duration_seconds": 1250,
-        "camera_ready": True,
-        "microphone_ready": True,
+        "camera_ready": False,
+        "microphone_ready": False,
         "saved_confirmed": True,
     }
     assert set(metadata) == METADATA_KEYS
@@ -80,20 +80,20 @@ def test_active_recording_blocks_continuation(
 
 
 @pytest.mark.parametrize(
-    ("camera_ready", "microphone_ready", "saved_confirmed", "expected"),
+    ("camera_ready", "microphone_ready"),
     [
-        (True, True, True, True),
-        (False, True, True, False),
-        (True, False, True, False),
-        (True, True, False, False),
+        (True, True),
+        (False, True),
+        (True, False),
+        (False, False),
     ],
 )
+@pytest.mark.parametrize("saved_confirmed", [False, True])
 @pytest.mark.parametrize("continue_without_recording", [False, True])
-def test_saved_requires_confirmation_and_ready_tracks(
+def test_saved_requires_only_explicit_confirmation(
     camera_ready: bool,
     microphone_ready: bool,
     saved_confirmed: bool,
-    expected: bool,
     continue_without_recording: bool,
 ) -> None:
     status = RecorderStatus(
@@ -103,7 +103,10 @@ def test_saved_requires_confirmation_and_ready_tracks(
         saved_confirmed=saved_confirmed,
     )
 
-    assert recording_gate_satisfied(status, continue_without_recording) is expected
+    assert (
+        recording_gate_satisfied(status, continue_without_recording)
+        is saved_confirmed
+    )
 
 
 @pytest.mark.parametrize("state", ["failed", "skipped"])

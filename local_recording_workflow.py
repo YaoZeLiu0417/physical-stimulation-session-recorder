@@ -18,11 +18,7 @@ def recording_gate_satisfied(
     status: RecorderStatus, continue_without_recording: bool
 ) -> bool:
     if status.state == "saved":
-        return (
-            status.saved_confirmed
-            and status.camera_ready
-            and status.microphone_ready
-        )
+        return status.saved_confirmed is True
     if status.state in {"failed", "skipped"}:
         return continue_without_recording is True
     return False

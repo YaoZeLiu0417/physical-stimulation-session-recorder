@@ -78,8 +78,8 @@ def _recording(status: str = "saved") -> dict[str, object]:
         "status": status,
         "mode": "long" if saved else "demo",
         "duration_seconds": 1250 if saved else 0,
-        "camera_ready": saved,
-        "microphone_ready": saved,
+        "camera_ready": False,
+        "microphone_ready": False,
         "saved_confirmed": saved,
     }
 
@@ -459,6 +459,21 @@ def test_terminal_recording_states_are_sanitized_and_ordered(status: str) -> Non
 
     assert tuple(key for key, _ in snapshot.recording) == RECORDING_KEYS
     assert dict(snapshot.recording) == _recording(status)
+
+
+def test_saved_recording_with_released_devices_builds_valid_export() -> None:
+    record = _completed_record()
+
+    bundle = build_participant_export(
+        record,
+        visit="daily",
+        exported_at=EXPORTED_AT,
+    )
+
+    assert record["recording"]["saved_confirmed"] is True
+    assert record["recording"]["camera_ready"] is False
+    assert record["recording"]["microphone_ready"] is False
+    assert bundle.data
 
 
 def test_json_and_workbook_are_canonical_views_of_the_same_snapshot() -> None:

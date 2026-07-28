@@ -784,7 +784,7 @@ def _recording(record: Mapping[str, object]) -> tuple[tuple[str, RawExportValue]
         or type(microphone_ready) is not bool
         or type(saved_confirmed) is not bool
         or status == "saved"
-        and not (saved_confirmed and camera_ready and microphone_ready)
+        and saved_confirmed is not True
         or status != "saved"
         and saved_confirmed
     ):

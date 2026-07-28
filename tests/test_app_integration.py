@@ -552,8 +552,8 @@ def _saved_status() -> RecorderStatus:
         mode="long",
         state="saved",
         duration_seconds=1250,
-        camera_ready=True,
-        microphone_ready=True,
+        camera_ready=False,
+        microphone_ready=False,
         saved_confirmed=True,
     )
 
@@ -1590,8 +1590,8 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
         "status": "saved",
         "mode": "long",
         "duration_seconds": 1250,
-        "camera_ready": True,
-        "microphone_ready": True,
+        "camera_ready": False,
+        "microphone_ready": False,
         "saved_confirmed": True,
     }
     visible = _visible_app_text(app)

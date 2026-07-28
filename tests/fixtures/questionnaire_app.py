@@ -44,8 +44,8 @@ def recorder_metadata(status):
         "status": status,
         "mode": "long" if saved else "demo",
         "duration_seconds": 60 if saved else 0,
-        "camera_ready": saved,
-        "microphone_ready": saved,
+        "camera_ready": False,
+        "microphone_ready": False,
         "saved_confirmed": saved,
     }
 
