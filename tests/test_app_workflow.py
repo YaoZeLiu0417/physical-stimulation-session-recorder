@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from copy import deepcopy
 from datetime import date
 
@@ -15,11 +16,11 @@ from app_workflow import (
 from session_record_workflow import create_session_record
 
 
-def _record() -> dict[str, object]:
+def _record(intervention_day: int = 6) -> dict[str, object]:
     return create_session_record(
         "sub-001",
         date(2026, 7, 29),
-        6,
+        intervention_day,
         "daily",
         token="deadbeef",
         now_iso="2026-07-29T08:00:00+00:00",
@@ -35,6 +36,7 @@ def _record() -> dict[str, object]:
         (True, True, True, False, False, 4),
         (True, True, True, True, False, 5),
         (True, False, False, False, True, 6),
+        (False, False, False, False, True, 1),
     ],
 )
 def test_resolve_operational_stage_follows_gate_order(
@@ -105,6 +107,36 @@ def test_daily_context_confirmation_matches_only_the_exact_mapping() -> None:
 
     assert daily_context_confirmation_matches(
         confirmation, record, auth_source="signed_link"
+    )
+
+
+def test_daily_context_confirmation_rejects_bool_for_integer_identity_value() -> None:
+    record = _record(intervention_day=1)
+    confirmation = build_daily_context_confirmation(record, auth_source="admin")
+    confirmation["intervention_day"] = True
+
+    assert not daily_context_confirmation_matches(
+        confirmation, record, auth_source="admin"
+    )
+
+
+class HostileMapping(Mapping[str, object]):
+    def __contains__(self, key: object) -> bool:
+        return True
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+def test_daily_context_confirmation_rejects_hostile_mapping_record() -> None:
+    assert not daily_context_confirmation_matches(
+        {}, HostileMapping(), auth_source="admin"
     )
 
 

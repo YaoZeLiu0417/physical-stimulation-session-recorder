@@ -78,8 +78,12 @@ def daily_context_confirmation_matches(
     if type(value) is not dict:
         return False
     try:
-        return value == build_daily_context_confirmation(record, auth_source=auth_source)
-    except (TypeError, ValueError):
+        expected = build_daily_context_confirmation(record, auth_source=auth_source)
+        return value.keys() == expected.keys() and all(
+            type(value[key]) is type(expected[key]) and value[key] == expected[key]
+            for key in expected
+        )
+    except Exception:
         return False
 
 
