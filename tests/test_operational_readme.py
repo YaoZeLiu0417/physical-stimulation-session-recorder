@@ -22,6 +22,11 @@ EXPECTED_ASSETS = {
     "local-response-export.webp": (1440, 810),
     "operational-palette.webp": (1440, 160),
 }
+EXPECTED_README_IMAGE_TARGETS = {
+    f"assets/readme/{name}"
+    for name in EXPECTED_ASSETS
+    if name != "operational-palette.webp"
+}
 EXPECTED_STAGE_LABELS = (
     ("Controlled access", "受控进入"),
     ("Daily context", "当日状态"),
@@ -294,12 +299,11 @@ def test_generator_is_deterministic_and_never_mutates_committed_assets(
     }
 
 
-def test_readme_uses_exact_local_inventory_and_showcase_is_final_text_only() -> None:
+def test_readme_uses_exact_presentation_inventory_and_showcase_is_final_text_only() -> None:
     readme = _readme()
     image_targets = _image_targets(readme)
-    expected_targets = {f"assets/readme/{name}" for name in EXPECTED_ASSETS}
 
-    assert image_targets == expected_targets
+    assert image_targets == EXPECTED_README_IMAGE_TARGETS
     assert all((ROOT / target).is_file() for target in image_targets)
     assert "raw.githubusercontent.com" not in readme.casefold()
     assert all("showcase" not in target.casefold() for target in image_targets)
@@ -312,7 +316,7 @@ def test_readme_uses_exact_local_inventory_and_showcase_is_final_text_only() -> 
     assert readme.rstrip().endswith(").")
 
 
-def test_readme_leads_questionnaire_first_and_lists_complete_palette() -> None:
+def test_readme_leads_with_stage_overview_and_prioritizes_questionnaire() -> None:
     readme = _readme()
     first_viewport = readme.split("## Questionnaire Experience", 1)[0]
 
@@ -329,7 +333,7 @@ def test_readme_leads_questionnaire_first_and_lists_complete_palette() -> None:
     assert "No participant-facing scores" in readme
     assert "browser-local" in readme.casefold()
     assert "JSON + Excel" in readme
-    assert all(value in readme for value in EXPECTED_PALETTE)
+    assert "## Operational Palette" not in readme
 
 
 def test_readme_documents_recording_export_and_privacy_handoffs() -> None:
