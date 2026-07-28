@@ -5,12 +5,34 @@ from types import SimpleNamespace
 
 import pytest
 
+import showcase_audit
 from showcase_audit import FORBIDDEN_TERMS, audit_showcase
 
 
 APP_URL = "https://physical-stimulation-session-recorder.streamlit.app"
-SVG_URL = "http://www.w3.org/2000/svg"
 REPARSE_POINT = 0x400
+EXPECTED_TEXT_FILES = frozenset({".gitignore", "README.md"})
+EXPECTED_GIF_FILES = frozenset(
+    {"assets/workflow-demo.gif", "assets/local-recording.gif"}
+)
+EXPECTED_WEBP_FILES = frozenset(
+    {
+        "assets/workflow-demo-static.webp",
+        "assets/local-recording-static.webp",
+        "assets/step-01-access.webp",
+        "assets/step-02-overview.webp",
+        "assets/step-03-permissions.webp",
+        "assets/step-04-mode.webp",
+        "assets/step-05-recording.webp",
+        "assets/step-06-local-video-save.webp",
+        "assets/step-07-synthetic-feedback.webp",
+        "assets/step-08-local-zip-download.webp",
+        "assets/step-09-confirmation.webp",
+    }
+)
+EXPECTED_PUBLIC_FILES = tuple(
+    sorted(EXPECTED_TEXT_FILES | EXPECTED_GIF_FILES | EXPECTED_WEBP_FILES)
+)
 EXPECTED_FORBIDDEN_TERMS = (
     "tavns",
     "nssi",
@@ -25,6 +47,39 @@ EXPECTED_FORBIDDEN_TERMS = (
 )
 
 
+def _gif_bytes(metadata: bytes = b"", image_data: bytes = b"\x44\x01") -> bytes:
+    comment = b""
+    if metadata:
+        assert len(metadata) <= 255
+        comment = b"\x21\xfe" + bytes([len(metadata)]) + metadata + b"\x00"
+    return (
+        b"GIF89a"
+        b"\x01\x00\x01\x00\x80\x00\x00"
+        b"\x00\x00\x00\xff\xff\xff"
+        + comment
+        + b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+        b"\x02"
+        + bytes([len(image_data)])
+        + image_data
+        + b"\x00\x3b"
+    )
+
+
+def _webp_bytes(
+    metadata: bytes = b"",
+    image_data: bytes = b"\x2f\x00\x00\x00\x00\x88\x88\xfe\x07",
+) -> bytes:
+    chunks = b""
+    if metadata:
+        chunks += b"XMP " + len(metadata).to_bytes(4, "little") + metadata
+        if len(metadata) % 2:
+            chunks += b"\x00"
+    chunks += b"VP8L" + len(image_data).to_bytes(4, "little") + image_data
+    if len(image_data) % 2:
+        chunks += b"\x00"
+    return b"RIFF" + (len(chunks) + 4).to_bytes(4, "little") + b"WEBP" + chunks
+
+
 def _write_safe_tree(root: Path) -> None:
     (root / "assets").mkdir(parents=True)
     (root / ".gitignore").write_text(
@@ -33,9 +88,10 @@ def _write_safe_tree(root: Path) -> None:
     (root / "README.md").write_text(
         f"# Public demo\n\n[Open the demo]({APP_URL}).\n", encoding="utf-8"
     )
-    (root / "assets" / "session-recorder-preview.svg").write_text(
-        f'<svg xmlns="{SVG_URL}"></svg>\n', encoding="utf-8"
-    )
+    for relative_path in EXPECTED_GIF_FILES:
+        (root / relative_path).write_bytes(_gif_bytes())
+    for relative_path in EXPECTED_WEBP_FILES:
+        (root / relative_path).write_bytes(_webp_bytes())
 
 
 def _joined_findings(root: Path) -> str:
@@ -67,7 +123,14 @@ def test_safe_tree_passes_and_git_contents_are_ignored(tmp_path: Path) -> None:
     assert audit_showcase(tmp_path) == []
 
 
-def test_approved_markdown_and_svg_urls_pass(tmp_path: Path) -> None:
+def test_public_file_inventory_matches_fancy_showcase_contract() -> None:
+    assert showcase_audit.TEXT_FILES == EXPECTED_TEXT_FILES
+    assert showcase_audit.GIF_FILES == EXPECTED_GIF_FILES
+    assert showcase_audit.WEBP_FILES == EXPECTED_WEBP_FILES
+    assert showcase_audit.PUBLIC_FILES == EXPECTED_PUBLIC_FILES
+
+
+def test_approved_markdown_url_passes(tmp_path: Path) -> None:
     _write_safe_tree(tmp_path)
     (tmp_path / "README.md").write_text(
         f"[demo]({APP_URL})\n", encoding="utf-8"
@@ -114,9 +177,100 @@ def test_reports_every_missing_allowlisted_file(tmp_path: Path) -> None:
 
     findings = _joined_findings(tmp_path)
 
-    assert "missing-file: .gitignore" in findings
-    assert "missing-file: README.md" in findings
-    assert "missing-file: assets/session-recorder-preview.svg" in findings
+    for relative_path in EXPECTED_PUBLIC_FILES:
+        assert f"missing-file: {relative_path}" in findings
+
+
+def test_wrong_extension_is_extra_and_does_not_replace_required_asset(
+    tmp_path: Path,
+) -> None:
+    _write_safe_tree(tmp_path)
+    required_path = tmp_path / "assets" / "workflow-demo.gif"
+    required_path.rename(required_path.with_suffix(".webp"))
+
+    findings = _joined_findings(tmp_path)
+
+    assert "missing-file: assets/workflow-demo.gif" in findings
+    assert "extra-file: assets/workflow-demo.webp" in findings
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("assets/workflow-demo.gif", b"NOTGIF"),
+        ("assets/step-01-access.webp", b"RIFF\x04\x00\x00\x00NOPE"),
+    ],
+)
+def test_binary_asset_signature_must_match_declared_type(
+    tmp_path: Path, relative_path: str, content: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(content)
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"invalid-signature: {relative_path}" in findings
+    assert content.decode("ascii") not in findings
+
+
+@pytest.mark.parametrize("gif_signature", [b"GIF87a", b"GIF89a"])
+def test_both_valid_gif_signatures_pass(
+    tmp_path: Path, gif_signature: bytes
+) -> None:
+    _write_safe_tree(tmp_path)
+    gif_path = tmp_path / "assets" / "workflow-demo.gif"
+    gif_path.write_bytes(gif_signature + _gif_bytes()[6:])
+
+    assert audit_showcase(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "writer"),
+    [
+        ("assets/workflow-demo.gif", _gif_bytes),
+        ("assets/step-01-access.webp", _webp_bytes),
+    ],
+)
+def test_binary_image_payload_is_not_decoded_or_privacy_scanned(
+    tmp_path: Path, relative_path: str, writer
+) -> None:
+    _write_safe_tree(tmp_path)
+    image_payload = b"\xff\xfe\x00https://evil.example/?token=tavns C:\\Users\\Secret"
+    (tmp_path / relative_path).write_bytes(writer(image_data=image_payload))
+
+    assert audit_showcase(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("metadata", "category"),
+    [
+        (b"tavns", "forbidden-term"),
+        (b"C:\\Users\\Alice\\private.txt", "absolute-path"),
+        (b"https://example.test/private?token=value", "credential-param"),
+        (b"https://example.test/private", "unapproved-url"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("relative_path", "writer"),
+    [
+        ("assets/workflow-demo.gif", _gif_bytes),
+        ("assets/step-01-access.webp", _webp_bytes),
+    ],
+)
+def test_binary_text_metadata_is_privacy_scanned_without_echoing_bytes(
+    tmp_path: Path,
+    relative_path: str,
+    writer,
+    metadata: bytes,
+    category: str,
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_bytes(writer(metadata=metadata))
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"{category}: {relative_path}" in findings
+    assert metadata.decode("ascii") not in findings
 
 
 def test_forbidden_term_inventory_matches_canonical_contract() -> None:
@@ -166,22 +320,48 @@ def test_credential_query_parameters_are_case_insensitive(
     assert "credential-param: README.md" in findings
 
 
-def test_invalid_utf8_fails_closed_instead_of_crashing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("relative_path", sorted(EXPECTED_TEXT_FILES))
+def test_invalid_utf8_text_file_fails_closed_instead_of_crashing(
+    tmp_path: Path, relative_path: str
+) -> None:
     _write_safe_tree(tmp_path)
-    (tmp_path / "README.md").write_bytes(b"\xff\xfe\x00private")
+    (tmp_path / relative_path).write_bytes(b"\xff\xfe\x00private")
 
     findings = _joined_findings(tmp_path)
 
-    assert "decode-error: README.md" in findings
+    assert f"decode-error: {relative_path}" in findings
 
 
-def test_binary_control_bytes_fail_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("relative_path", sorted(EXPECTED_TEXT_FILES))
+def test_binary_control_bytes_in_text_file_fail_closed(
+    tmp_path: Path, relative_path: str
+) -> None:
     _write_safe_tree(tmp_path)
-    (tmp_path / "README.md").write_bytes(b"public\x00\x01text")
+    (tmp_path / relative_path).write_bytes(b"public\x00\x01text")
 
     findings = _joined_findings(tmp_path)
 
-    assert "binary-content: README.md" in findings
+    assert f"binary-content: {relative_path}" in findings
+
+
+@pytest.mark.parametrize("relative_path", sorted(EXPECTED_TEXT_FILES))
+def test_each_text_file_receives_full_privacy_audit(
+    tmp_path: Path, relative_path: str
+) -> None:
+    _write_safe_tree(tmp_path)
+    (tmp_path / relative_path).write_text(
+        "tavns and \u81ea\u4f24\n"
+        "C:\\Users\\Alice\\private.txt\n"
+        "https://example.test/private?token=value\n",
+        encoding="utf-8",
+    )
+
+    findings = _joined_findings(tmp_path)
+
+    assert f"forbidden-term: {relative_path}" in findings
+    assert f"absolute-path: {relative_path}" in findings
+    assert f"credential-param: {relative_path}" in findings
+    assert f"unapproved-url: {relative_path}" in findings
 
 
 @pytest.mark.parametrize(
@@ -416,6 +596,17 @@ def test_allowlisted_file_must_be_regular(
     assert "special-entry: README.md" in findings
 
 
+def test_allowlisted_hardlink_is_rejected(tmp_path: Path) -> None:
+    _write_safe_tree(tmp_path)
+    hidden_link = tmp_path / ".git" / "README-copy"
+    hidden_link.parent.mkdir()
+    os.link(tmp_path / "README.md", hidden_link)
+
+    findings = _joined_findings(tmp_path)
+
+    assert "hardlink: README.md" in findings
+
+
 def test_root_symlink_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -515,7 +706,8 @@ def test_assets_reparse_point_is_reported_and_not_traversed(
     findings = _joined_findings(tmp_path)
 
     assert "special-entry: assets" in findings
-    assert "missing-file: assets/session-recorder-preview.svg" in findings
+    for relative_path in EXPECTED_GIF_FILES | EXPECTED_WEBP_FILES:
+        assert f"missing-file: {relative_path}" in findings
 
 
 def test_allowlisted_file_reparse_point_is_not_read(
