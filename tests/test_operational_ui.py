@@ -78,8 +78,8 @@ def test_stage_shell_escapes_hostile_stage_values(monkeypatch: pytest.MonkeyPatc
 
     markup = operational_ui.stage_shell_markup(1)
 
-    assert markup.count('&lt;img onerror=&quot;bad&quot;&gt;') == 2
-    assert markup.count('&lt;script&gt;bad&lt;/script&gt;') == 2
+    assert markup.count('&lt;img onerror=&quot;bad&quot;&gt;') == 3
+    assert markup.count('&lt;script&gt;bad&lt;/script&gt;') == 3
     assert '<img onerror' not in markup
     assert '<script>' not in markup
 
@@ -140,8 +140,9 @@ def test_css_meets_operational_visual_contract() -> None:
     assert ".operational-rail {\n  box-sizing: border-box;" in css
     assert "overflow-y: auto" in css
     assert ".block-container {\n  margin-left: 252px; width: calc(100% - 252px);" in css
-    assert ".operational-stage--active .operational-stage__number { background: var(--operational-rose);" in css
-    assert ".operational-stage--future .operational-stage__number { background: var(--operational-violet); border: 2px solid var(--operational-white); color: var(--operational-white); }" in css
+    assert ".operational-stage--active {" in css
+    assert ".operational-stage--active .operational-stage__number {" in css
+    assert ".operational-stage--future .operational-stage__number {" in css
     assert '[data-testid="stHorizontalBlock"]' in css
     assert '[data-testid="column"]' in css
     assert "flex-direction: column" in css
@@ -156,6 +157,105 @@ def test_css_meets_operational_visual_contract() -> None:
     assert "padding: 1rem 1rem 3rem;" in css
     for forbidden in ("gradient", "vw", "https://", "http://", "@import", "url("):
         assert forbidden not in css.lower()
+
+
+def test_stage_markers_have_stable_circular_geometry_and_state_surfaces() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert (
+        ".operational-stage__number {\n"
+        "  align-items: center;\n"
+        "  border: 2px solid var(--operational-violet);\n"
+        "  border-radius: 50%;\n"
+        "  box-sizing: border-box;\n"
+        "  display: flex;\n"
+        "  font-weight: 700;\n"
+        "  height: 30px;\n"
+        "  justify-content: center;\n"
+        "  width: 30px;\n"
+        "}"
+    ) in css
+    assert (
+        ".operational-stage--completed .operational-stage__number {\n"
+        "  background: var(--operational-cyan);\n"
+        "  border-color: var(--operational-cyan);\n"
+        "  color: var(--operational-navy);\n"
+        "}"
+    ) in css
+    assert ".operational-stage--active {" in css
+    assert (
+        ".operational-stage--active .operational-stage__number {\n"
+        "  background: transparent;\n"
+        "  border: 3px solid var(--operational-rose);\n"
+        "  color: var(--operational-white);\n"
+        "}"
+    ) in css
+    assert (
+        ".operational-stage--future .operational-stage__number {\n"
+        "  background: transparent;\n"
+        "  border-color: var(--operational-violet);\n"
+        "  color: var(--operational-white);\n"
+        "}"
+    ) in css
+
+
+def test_active_stage_row_uses_a_rose_outline_without_a_filled_surface() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert (
+        ".operational-stage {\n"
+        "  align-items: center;\n"
+        "  border: 1px solid transparent;\n"
+        "  border-radius: 6px;\n"
+        "  box-sizing: border-box;\n"
+        "  color: var(--operational-white);\n"
+        "  display: grid;\n"
+        "  gap: 10px;\n"
+        "  grid-template-columns: 32px 1fr;\n"
+        "  padding: 8px;\n"
+        "}"
+    ) in css
+    assert (
+        ".operational-stage--active {\n"
+        "  background: transparent;\n"
+        "  border-color: var(--operational-rose);\n"
+        "  color: var(--operational-white);\n"
+        "}"
+    ) in css
+
+
+def test_mobile_header_contains_bilingual_current_stage_label_and_counter() -> None:
+    markup = operational_ui.stage_shell_markup(3)
+
+    assert '<header class="operational-mobile">' in markup
+    assert '<div class="operational-mobile__current">' in markup
+    current_label = markup.split('<div class="operational-mobile__current">', 1)[1].split(
+        "</div>", 1
+    )[0]
+    assert operational_ui.STAGES[2].english in current_label
+    assert operational_ui.STAGES[2].chinese in current_label
+    assert "03 / 06" in current_label
+
+
+def test_button_hierarchy_keeps_base_buttons_native_and_primary_buttons_rose() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert (
+        ".stButton > button, .stDownloadButton > button {\n"
+        "  border-radius: 6px;\n"
+        "  min-height: 2.75rem;\n"
+        "  white-space: normal;\n"
+        "}"
+    ) in css
+    assert (
+        '.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {\n'
+        "  background: var(--operational-rose);\n"
+        "  border-color: var(--operational-rose);\n"
+        "  color: var(--operational-white);\n"
+        "}"
+    ) in css
+    base_rule = css.split(".stButton > button, .stDownloadButton > button {", 1)[1].split("}", 1)[0]
+    assert "background: var(--operational-rose)" not in base_rule
 
 
 def test_stage_shell_has_no_custom_workspace_wrapper() -> None:

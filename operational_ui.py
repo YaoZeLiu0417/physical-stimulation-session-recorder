@@ -60,15 +60,51 @@ OPERATIONAL_CSS = """<style>
 .operational-brand { margin: 0 0 32px; font-size: 12px; font-weight: 700; letter-spacing: 0; line-height: 1.5; }
 .operational-brand span { display: block; color: var(--operational-cyan); }
 .operational-stages { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.operational-stage { display: grid; grid-template-columns: 32px 1fr; gap: 10px; align-items: center; padding: 8px; border-radius: 6px; color: var(--operational-white); }
-.operational-stage__number { color: var(--operational-violet); font-weight: 700; }
+.operational-stage {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  box-sizing: border-box;
+  color: var(--operational-white);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 32px 1fr;
+  padding: 8px;
+}
+.operational-stage__number {
+  align-items: center;
+  border: 2px solid var(--operational-violet);
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: flex;
+  font-weight: 700;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
 .operational-stage__label { display: block; font-size: 13px; line-height: 1.25; }
 .operational-stage__label small { display: block; color: inherit; font-size: 12px; }
 .operational-stage--completed { color: var(--operational-cyan); }
-.operational-stage--completed .operational-stage__number { color: var(--operational-cyan); }
-.operational-stage--active { background: var(--operational-rose); color: var(--operational-white); }
-.operational-stage--active .operational-stage__number { background: var(--operational-rose); border: 2px solid var(--operational-rose); color: var(--operational-white); outline: 2px solid var(--operational-white); outline-offset: 2px; }
-.operational-stage--future .operational-stage__number { background: var(--operational-violet); border: 2px solid var(--operational-white); color: var(--operational-white); }
+.operational-stage--completed .operational-stage__number {
+  background: var(--operational-cyan);
+  border-color: var(--operational-cyan);
+  color: var(--operational-navy);
+}
+.operational-stage--active {
+  background: transparent;
+  border-color: var(--operational-rose);
+  color: var(--operational-white);
+}
+.operational-stage--active .operational-stage__number {
+  background: transparent;
+  border: 3px solid var(--operational-rose);
+  color: var(--operational-white);
+}
+.operational-stage--future .operational-stage__number {
+  background: transparent;
+  border-color: var(--operational-violet);
+  color: var(--operational-white);
+}
 .operational-heading { display: grid; gap: 8px; max-width: 960px; margin: 0 auto 24px; }
 .operational-heading__counter { color: var(--operational-violet); font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .operational-heading h1 { margin: 0; color: var(--operational-navy); font-size: 28px; letter-spacing: 0; }
@@ -78,14 +114,36 @@ OPERATIONAL_CSS = """<style>
 .operational-status--ready { background: var(--operational-cyan); color: var(--operational-navy); }
 .operational-status--checkpoint { background: var(--operational-peach); color: var(--operational-navy); }
 .operational-status--blocking { background: var(--operational-rose); color: var(--operational-white); }
-.stButton > button { border-radius: 6px; background: var(--operational-rose); color: var(--operational-white); white-space: normal; }
-.stButton > button:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--operational-cyan); outline-offset: 2px; }
+.stButton > button, .stDownloadButton > button {
+  border-radius: 6px;
+  min-height: 2.75rem;
+  white-space: normal;
+}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+  background: var(--operational-rose);
+  border-color: var(--operational-rose);
+  color: var(--operational-white);
+}
+.stButton > button:focus-visible, .stDownloadButton > button:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--operational-cyan); outline-offset: 2px; }
 .stTextInput input, .stTextArea textarea, .stSelectbox select, .stNumberInput input { border-radius: 6px; }
 iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; height: auto !important; max-width: 100%; }
 .operational-mobile, .operational-progress { display: none; }
 @media (max-width: 840px) {
   .operational-rail { display: none; }
-  .operational-mobile { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: var(--operational-navy); color: var(--operational-white); }
+  .operational-mobile {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
+    background: var(--operational-navy);
+    color: var(--operational-white);
+  }
+  .operational-mobile__row { align-items: flex-start; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+  .operational-mobile__brand, .operational-mobile__current { min-width: 0; }
+  .operational-mobile__brand strong { display: block; font-size: 13px; }
+  .operational-mobile__brand span, .operational-mobile__current span { color: var(--operational-cyan); display: block; font-size: 11px; line-height: 1.25; margin-top: 3px; overflow-wrap: anywhere; }
+  .operational-mobile__current { flex: 1 1 45%; max-width: 60%; text-align: right; }
+  .operational-mobile__current strong { display: block; font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; }
   .operational-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; padding: 10px 16px; background: var(--operational-white); }
   .operational-progress__segment { height: 6px; border-radius: 6px; background: var(--operational-violet); }
   .operational-progress__segment--completed { background: var(--operational-cyan); }
@@ -93,7 +151,7 @@ iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; hei
   .block-container { margin-left: 0; width: auto; padding: 1rem 1rem 3rem; }
   [data-testid="stHorizontalBlock"] { flex-direction: column; }
   [data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
-  .stButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }
+  .stButton > button, .stDownloadButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
@@ -146,7 +204,7 @@ def stage_shell_markup(
 <p class="operational-brand">SESSION COMPANION<span>GUIDED LOCAL-FIRST FLOW</span></p>
 <ol class="operational-stages">{rows}</ol>
 </aside>
-<header class="operational-mobile"><span>SESSION COMPANION</span><span>{_escape(f"{active_stage:02d}")} / 06</span></header>
+<header class="operational-mobile"><div class="operational-mobile__row"><div class="operational-mobile__brand"><strong>SESSION COMPANION</strong><span>GUIDED LOCAL-FIRST FLOW</span></div><div class="operational-mobile__current"><strong>{_escape(current_stage.english)}</strong><span>{_escape(current_stage.chinese)}</span><span>{_escape(f"{active_stage:02d}")} / 06</span></div></div></header>
 <div class="operational-progress" aria-label="Session progress">{progress}</div>
 <section class="operational-heading"><span class="operational-heading__counter">{_escape(f"{active_stage:02d}")} / 06</span><h1>{_escape(current_stage.english)}</h1><p>{_escape(current_stage.chinese)}</p>{context}</section>'''
 
