@@ -12,17 +12,15 @@ from questionnaire_specs import (
     QuestionSpec,
 )
 from questionnaire_ui import (
-    ALTO_COLORS,
-    ALTO_CSS,
     QuestionnaireStateKeys,
     build_field_status,
     build_formal_field_status,
     build_flow,
     formal_flow,
-    inject_alto_theme,
     question_context_label,
     questionnaire_state_keys,
     render_question,
+    render_question_context,
     validate_formal_submission,
     validate_submission,
 )
@@ -185,42 +183,43 @@ def test_field_status_distinguishes_answered_missing_and_not_applicable():
     }
 
 
-def test_alto_palette_and_css_follow_visual_constraints():
-    assert ALTO_COLORS == {
-        "black": "#050505",
-        "purple": "#2D2674",
-        "blue": "#33B0E4",
-        "magenta": "#DD1D86",
-        "orange": "#FF8D2A",
-    }
-    assert all(color in ALTO_CSS for color in ALTO_COLORS.values())
-    assert "gradient" not in ALTO_CSS.lower()
-    assert "letter-spacing: 0" in ALTO_CSS
-    assert "overflow-wrap: anywhere" in ALTO_CSS
-    assert "vw" not in ALTO_CSS.lower()
-
-
-def test_unsafe_header_values_are_html_escaped(monkeypatch):
+def test_question_context_is_local_and_html_escaped(monkeypatch):
     rendered = []
 
     def capture(body, **kwargs):
         rendered.append((body, kwargs))
 
     monkeypatch.setattr("questionnaire_ui.st.markdown", capture)
-    inject_alto_theme(
-        '<script id="subject">bad()</script>',
-        7,
+    render_question_context(
         '<img src=x onerror="bad()">',
-        1,
-        5,
+        current=1,
+        total=5,
     )
 
-    body = "".join(item[0] for item in rendered)
-    assert '<script id="subject">' not in body
-    assert "<img src=x" not in body
-    assert "&lt;script id=&quot;subject&quot;&gt;" in body
-    assert "&lt;img src=x onerror=&quot;bad()&quot;&gt;" in body
-    assert all(item[1].get("unsafe_allow_html") for item in rendered)
+    assert rendered == [
+        (
+            '<div class="questionnaire-context">'
+            "&lt;img src=x onerror=&quot;bad()&quot;&gt; · 1 / 5"
+            "</div>",
+            {"unsafe_allow_html": True},
+        )
+    ]
+
+
+def test_questionnaire_source_has_no_competing_global_shell():
+    source = (
+        Path(__file__).resolve().parents[1] / "questionnaire_ui.py"
+    ).read_text(encoding="utf-8")
+
+    for token in (
+        "ALTO_CSS",
+        "ALTO_COLORS",
+        "YMH",
+        "NEUROSCIENCE LAB",
+        "alto-top",
+        "alto-progress",
+    ):
+        assert token not in source
 
 
 def test_question_context_uses_current_question_time_window():
@@ -261,6 +260,8 @@ def test_slider_endpoint_labels_are_html_escaped(monkeypatch):
     assert "<img" not in body
     assert "&lt;script&gt;" in body
     assert "&lt;img" in body
+    assert 'class="questionnaire-endpoints"' in body
+    assert "alto-endpoints" not in body
 
 
 def test_participant_fixture_hides_score_and_risk_labels():

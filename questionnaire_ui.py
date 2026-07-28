@@ -27,15 +27,6 @@ SAVE_ERROR_MESSAGE = "暂时无法保存，请重试。"
 BEHAVIOR_COUNT_ERROR = "至少记录一类 NSSI 行为的实际次数"
 
 
-ALTO_COLORS = {
-    "black": "#050505",
-    "purple": "#2D2674",
-    "blue": "#33B0E4",
-    "magenta": "#DD1D86",
-    "orange": "#FF8D2A",
-}
-
-
 @dataclass(frozen=True)
 class QuestionnaireStateKeys:
     """All Streamlit state keys owned by one record and visit."""
@@ -70,183 +61,6 @@ def questionnaire_state_keys(
         next_button=f"{prefix}::next",
         widget_prefix=f"{prefix}::widget::",
     )
-
-
-ALTO_CSS = """
-<style>
-:root {
-  --alto-black: #050505;
-  --alto-purple: #2D2674;
-  --alto-blue: #33B0E4;
-  --alto-magenta: #DD1D86;
-  --alto-orange: #FF8D2A;
-}
-
-.stApp {
-  background: #FFFFFF;
-  color: #050505;
-  letter-spacing: 0;
-}
-
-[data-testid="stHeader"],
-[data-testid="stDecoration"] {
-  background: #050505;
-}
-
-[data-testid="stAppViewContainer"] > .main {
-  background: #FFFFFF;
-}
-
-.block-container {
-  max-width: 780px;
-  padding-top: 2.5rem;
-  padding-bottom: 3rem;
-}
-
-.alto-top {
-  align-items: center;
-  background: #050505;
-  color: #FFFFFF;
-  display: flex;
-  justify-content: space-between;
-  margin: -1rem -1rem 0;
-  padding: 18px 24px;
-}
-
-.alto-mark {
-  font-size: 1.28rem;
-  font-weight: 750;
-  letter-spacing: 0;
-  line-height: 1.15;
-}
-
-.alto-mark small {
-  display: block;
-  font-size: .66rem;
-  font-weight: 550;
-  letter-spacing: 0;
-  margin-top: 3px;
-}
-
-.alto-context {
-  color: #FFFFFF;
-  font-size: .88rem;
-  font-weight: 550;
-  max-width: 48%;
-  overflow-wrap: anywhere;
-  text-align: right;
-}
-
-.alto-progress {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  height: 8px;
-  margin: 0 -1rem 2rem;
-}
-
-.alto-progress span:nth-child(1) { background: #2D2674; }
-.alto-progress span:nth-child(2) { background: #33B0E4; }
-.alto-progress span:nth-child(3) { background: #DD1D86; }
-.alto-progress span:nth-child(4) { background: #FF8D2A; }
-
-.alto-kicker {
-  color: #DD1D86;
-  font-size: .82rem;
-  font-weight: 750;
-  letter-spacing: 0;
-  margin-bottom: .75rem;
-  text-transform: uppercase;
-}
-
-.alto-endpoints {
-  color: #42424C;
-  display: flex;
-  font-size: .82rem;
-  gap: 1rem;
-  justify-content: space-between;
-  letter-spacing: 0;
-  margin: -.35rem 0 1rem;
-}
-
-.alto-endpoints span {
-  max-width: 48%;
-  overflow-wrap: anywhere;
-}
-
-.alto-endpoints span:last-child {
-  text-align: right;
-}
-
-div[data-testid="stRadio"] div[role="radiogroup"] {
-  gap: .65rem;
-}
-
-div[data-testid="stRadio"] div[role="radiogroup"] label {
-  border: 1px solid #050505;
-  border-radius: 6px;
-  padding: .55rem .85rem;
-}
-
-div[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"] {
-  background-color: #DD1D86 !important;
-  border-color: #DD1D86 !important;
-}
-
-div[data-testid="stSlider"] [data-baseweb="slider"] > div > div:nth-child(2) {
-  background-color: #DD1D86 !important;
-}
-
-div[data-testid="stSlider"] [data-testid="stThumbValue"] {
-  color: #DD1D86 !important;
-}
-
-.stButton > button {
-  border-color: #050505;
-  border-radius: 6px;
-  min-height: 2.75rem;
-  white-space: normal;
-}
-
-.stButton > button[kind="primary"] {
-  background: #050505;
-  border: 0;
-  border-bottom: 4px solid #DD1D86;
-  color: #FFFFFF;
-}
-
-div[data-testid="stNumberInput"] input,
-div[data-testid="stTextArea"] textarea,
-div[data-testid="stMultiSelect"] > div {
-  border-radius: 6px;
-}
-
-@media (max-width: 720px) {
-  .block-container {
-    padding-left: 1rem;
-    padding-right: 1rem;
-    padding-top: 2rem;
-  }
-
-  .alto-top {
-    align-items: flex-start;
-    gap: .75rem;
-    padding: 14px 16px;
-  }
-
-  .alto-mark {
-    font-size: 1.12rem;
-  }
-
-  .alto-context {
-    font-size: .78rem;
-  }
-
-  .alto-endpoints {
-    font-size: .76rem;
-  }
-}
-</style>
-"""
 
 
 def _is_active(question: QuestionSpec, answers: Mapping[str, Any]) -> bool:
@@ -396,30 +210,18 @@ def question_context_label(question: QuestionSpec, visit: str) -> str:
     raise KeyError(f"No questionnaire context for {visit}:{question.id}")
 
 
-def inject_alto_theme(
-    subject_id: str,
-    intervention_day: int,
-    context_label: str,
-    current: int,
-    total: int,
+def render_question_context(
+    context_label: object, *, current: int, total: int
 ) -> None:
-    """Render the static theme and escaped participant context header."""
+    """Render escaped context for the currently visible question."""
 
-    safe_subject = html.escape(str(subject_id), quote=True)
-    safe_day = html.escape(str(intervention_day), quote=True)
     safe_context = html.escape(str(context_label), quote=True)
     safe_current = html.escape(str(current), quote=True)
     safe_total = html.escape(str(total), quote=True)
-    st.markdown(ALTO_CSS, unsafe_allow_html=True)
     st.markdown(
-        '<div class="alto-top">'
-        '<div class="alto-mark">YMH <small>NEUROSCIENCE LAB</small></div>'
-        f'<div class="alto-context">{safe_subject}<br>第 {safe_day} 天</div>'
-        "</div>"
-        '<div class="alto-progress" aria-hidden="true">'
-        "<span></span><span></span><span></span><span></span>"
-        "</div>"
-        f'<div class="alto-kicker">{safe_context} · {safe_current} / {safe_total}</div>',
+        '<div class="questionnaire-context">'
+        f"{safe_context} · {safe_current} / {safe_total}"
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -473,7 +275,7 @@ def render_question(
         low_label = html.escape(question.low_label, quote=True)
         high_label = html.escape(question.high_label, quote=True)
         st.markdown(
-            '<div class="alto-endpoints">'
+            '<div class="questionnaire-endpoints">'
             f"<span>{question.min_value} {low_label}</span>"
             f"<span>{question.max_value} {high_label}</span>"
             "</div>",
@@ -601,12 +403,10 @@ def render_questionnaire(
     step = min(max(requested_step, 0), max(len(flow) - 1, 0))
     st.session_state[state_keys.step] = step
 
-    inject_alto_theme(
-        subject_id,
-        intervention_day,
+    render_question_context(
         question_context_label(flow[step], visit) if flow else "当前",
-        step + 1 if flow else 0,
-        len(flow),
+        current=step + 1 if flow else 0,
+        total=len(flow),
     )
     _show_pending_errors(state_keys)
 

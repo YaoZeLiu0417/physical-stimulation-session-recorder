@@ -70,7 +70,7 @@ OPERATIONAL_CSS = """<style>
 .operational-heading__counter { color: var(--operational-violet); font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .operational-heading h1 { margin: 0; color: var(--operational-navy); font-size: 28px; letter-spacing: 0; }
 .operational-heading p { margin: 0; color: var(--operational-violet); }
-.questionnaire-context, .questionnaire-endpoints { display: flex; flex-wrap: wrap; gap: 8px; color: var(--operational-violet); }
+.questionnaire-context, .questionnaire-endpoints { display: flex; flex-wrap: wrap; gap: 8px; color: var(--operational-violet); overflow-wrap: anywhere; }
 .operational-status { display: inline-block; padding: 8px 12px; border-radius: 6px; background: var(--operational-violet); color: var(--operational-white); }
 .operational-status--ready { background: var(--operational-cyan); color: var(--operational-navy); }
 .operational-status--checkpoint { background: var(--operational-peach); color: var(--operational-navy); }

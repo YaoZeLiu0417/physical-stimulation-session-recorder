@@ -33,7 +33,7 @@ from link_auth import sign_subject_link
 from local_export_bundle import LocalExportBundle, build_local_export_bundle
 from operational_ui import OPERATIONAL_CSS, PALETTE, STAGES
 from questionnaire_specs import FORMAL_INSTRUMENTS, VISIT_INSTRUMENT_IDS
-from questionnaire_ui import ALTO_COLORS, ALTO_CSS, validate_submission
+from questionnaire_ui import validate_submission
 from session_record_workflow import (
     DAILY_CONTEXT_DEFAULTS,
     create_session_record,
@@ -774,6 +774,9 @@ def test_operational_stage_shell_uses_shared_local_style_contract():
         "white": "#FFFFFF",
     }
     assert all(color in OPERATIONAL_CSS for color in PALETTE.values())
+    assert "gradient" not in OPERATIONAL_CSS.casefold()
+    assert "letter-spacing: 0" in OPERATIONAL_CSS
+    assert "overflow-wrap: anywhere" in OPERATIONAL_CSS
     assert "http://" not in OPERATIONAL_CSS
     assert "https://" not in OPERATIONAL_CSS
     assert "ymh" not in OPERATIONAL_CSS.casefold()
@@ -3439,20 +3442,6 @@ def test_daily_weekly_and_formal_persistence_remain_raw_only_and_complete():
             assert payload["label"] == FORMAL_INSTRUMENTS[instrument_id].label
             assert "score" not in payload
             assert "scored_answers" not in payload
-
-
-def test_alto_questionnaire_styling_contract_is_unchanged():
-    assert ALTO_COLORS == {
-        "black": "#050505",
-        "purple": "#2D2674",
-        "blue": "#33B0E4",
-        "magenta": "#DD1D86",
-        "orange": "#FF8D2A",
-    }
-    assert all(color in ALTO_CSS for color in ALTO_COLORS.values())
-    assert "gradient" not in ALTO_CSS.casefold()
-    assert "letter-spacing: 0" in ALTO_CSS
-    assert "overflow-wrap: anywhere" in ALTO_CSS
 
 
 def test_session_runtime_import_graph_has_no_scoring_or_storage_dependency():
