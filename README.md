@@ -13,7 +13,7 @@ Physical Stimulation Intervention Session Companion
 
 </details>
 
-| 阶段 / Stage | 目的 / Purpose | 完成标志 / Completion signal |
+| 阶段 / Stage | 目的 / Purpose | 完成状态 / Completion status |
 | --- | --- | --- |
 | 01 · 受控进入 / Controlled access | 建立受控会话入口 / Open the controlled session | 进入成功 / Access accepted |
 | 02 · 当日状态 / Daily context | 确认当日状态记录 / Confirm the daily context | 必填信息完成 / Required context complete |
