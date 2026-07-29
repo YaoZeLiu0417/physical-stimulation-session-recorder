@@ -315,99 +315,94 @@ def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
 
 
 def _draw_questionnaire(draw: ImageDraw.ImageDraw) -> None:
-    rounded_box(draw, (454, 322, 1346, 682), fill=COLORS["paper"], outline=COLORS["line"])
-    draw.text((494, 354), "ONE-STEP FOCUS / 单步聚焦", font=font(14, True), fill=COLORS["rose"])
-    draw.text((494, 392), "One focused step at a time", font=font(24, True), fill=COLORS["navy"])
-    draw.text((494, 432), "每次只呈现一个结构化步骤", font=font(18), fill=COLORS["violet"])
-    draw.text((494, 483), "Response choices", font=font(15, True), fill=COLORS["muted"])
-    for index in range(3):
-        left = 494 + index * 142
-        rounded_box(draw, (left, 516, left + 122, 568), fill=COLORS["mist"], outline=COLORS["line"], radius=8)
-        draw.ellipse((left + 18, 533, left + 36, 551), outline=COLORS["violet"], width=2)
-        draw.line((left + 50, 542, left + 100, 542), fill="#A7A9B7", width=3)
-    rounded_box(draw, (494, 602, 844, 646), fill="#FCEAF4", radius=8)
-    draw.text((514, 613), "Applicable follow-ups appear when needed", font=font(14), fill=COLORS["violet"])
-    rounded_box(draw, (900, 354, 1306, 646), fill="#F8F7FC", outline=COLORS["line"], radius=12)
-    _status_row(draw, 924, 378, 358, "Completion checks", "Required steps stay visible", COLORS["cyan"])
-    _status_row(draw, 924, 474, 358, "Support copy", "Direct guidance when applicable", COLORS["peach"])
-    draw.text((944, 592), "No participant-facing scores", font=font(17, True), fill=COLORS["navy"])
-    draw.text((944, 620), "参与者页面不显示分数", font=font(14), fill=COLORS["violet"])
+    draw.text((454, 326), "CURRENT PROMPT", font=font(14, True), fill=COLORS["rose"])
+    draw.text((1346, 326), "01 / 08", font=font(14, True), fill=COLORS["muted"], anchor="ra")
+    draw.rectangle((454, 360, 1346, 368), fill=COLORS["line"])
+    draw.rectangle((454, 360, 566, 368), fill=COLORS["rose"])
+
+    draw.rectangle((454, 406, 460, 486), fill=COLORS["cyan"])
+    draw.text(
+        (484, 408),
+        "过去 24 小时，是否出现过不想死但想故意伤害自己的想法？",
+        font=font(24, True),
+        fill=COLORS["navy"],
+    )
+
+    for y, label in ((520, "否"), (590, "是")):
+        rounded_box(
+            draw,
+            (454, y, 1346, y + 54),
+            fill=COLORS["paper"],
+            outline=COLORS["violet"],
+            radius=6,
+            width=2,
+        )
+        draw.ellipse((478, y + 16, 500, y + 38), outline=COLORS["violet"], width=2)
+        draw.text((522, y + 13), label, font=font(18, True), fill=COLORS["violet"])
 
 
 def _draw_export(draw: ImageDraw.ImageDraw) -> None:
-    rounded_box(draw, (454, 324, 824, 664), fill=COLORS["paper"], outline=COLORS["line"], radius=12)
-    draw.text((486, 354), "LOCAL RESPONSE PACKAGE", font=font(14, True), fill=COLORS["violet"])
-    rounded_box(draw, (486, 400, 616, 530), fill=COLORS["violet"], radius=12)
+    draw.line((454, 324, 1346, 324), fill=COLORS["cyan"], width=5)
+    draw.text((454, 350), "LOCAL EXPORT", font=font(14, True), fill=COLORS["violet"])
+    rounded_box(draw, (1240, 344, 1346, 376), fill="#E7F7FD", radius=6)
     _centered_text(
         draw,
-        (486, 400, 616, 530),
-        "ZIP",
-        face=font(30, True),
+        (1240, 344, 1346, 376),
+        "READY",
+        face=font(12, True),
+        fill=COLORS["violet"],
+    )
+    draw.text((454, 394), "问卷资料包已准备", font=font(28, True), fill=COLORS["navy"])
+    draw.text(
+        (454, 442),
+        "session-20260729-103000.zip",
+        font=font(18),
+        fill=COLORS["muted"],
+    )
+
+    draw.text((454, 510), "文件内容", font=font(13, True), fill=COLORS["muted"])
+    draw.text((454, 538), "JSON + Excel", font=font(20, True), fill=COLORS["navy"])
+    draw.line((700, 506, 700, 570), fill=COLORS["line"], width=2)
+    draw.text((746, 510), "存储位置", font=font(13, True), fill=COLORS["muted"])
+    draw.text((746, 538), "仅保存到本机", font=font(20, True), fill=COLORS["navy"])
+
+    rounded_box(draw, (454, 598, 846, 652), fill=COLORS["rose"], radius=6)
+    _centered_text(
+        draw,
+        (454, 598, 846, 652),
+        "下载问卷记录（JSON + Excel）",
+        face=font(16, True),
         fill=COLORS["paper"],
     )
-    draw.text((644, 402), "JSON + Excel", font=font(23, True), fill=COLORS["navy"])
-    draw.text((644, 448), "Two local views of the\nsame response record", font=font(15), fill=COLORS["muted"], spacing=8)
-    rounded_box(draw, (486, 560, 630, 614), fill="#F8F7FC", outline=COLORS["line"], radius=8)
-    _centered_text(draw, (486, 560, 630, 614), "JSON record", face=font(14, True), fill=COLORS["navy"])
-    rounded_box(draw, (646, 560, 790, 614), fill="#E7F7FD", outline=COLORS["line"], radius=8)
-    _centered_text(draw, (646, 560, 790, 614), "Excel record", face=font(14, True), fill=COLORS["navy"])
-
-    _handoff_row(
-        draw,
-        852,
-        306,
-        494,
-        "1",
-        "Save JSON + Excel ZIP / 保存资料包",
-        "Download the package to a local folder",
-        COLORS["cyan"],
-    )
-    _handoff_row(
-        draw,
-        852,
-        400,
-        494,
-        "2",
-        "Locate local ZIP / 找到本地资料包",
-        "Find the saved package in Chrome downloads",
-        COLORS["cyan"],
-    )
-    _handoff_row(
-        draw,
-        852,
-        494,
-        494,
-        "3",
-        "Saved locally / 已保存到本地",
-        "Confirm the archive is saved on this device",
-        COLORS["cyan"],
-    )
-    _handoff_row(
-        draw,
-        852,
-        588,
-        494,
-        "4",
-        "Continue to completion / 进入完成确认",
-        "The completed-session state is now available",
-        COLORS["rose"],
+    draw.rectangle((454, 674, 478, 698), fill=COLORS["paper"], outline=COLORS["violet"], width=2)
+    _check(draw, 456, 677, COLORS["cyan"])
+    draw.text(
+        (494, 672),
+        "我确认问卷 ZIP 已保存到本地",
+        font=font(16, True),
+        fill=COLORS["violet"],
     )
 
 
 def _draw_completion(draw: ImageDraw.ImageDraw) -> None:
-    rounded_box(draw, (454, 324, 1346, 682), fill="#F8F7FC", outline=COLORS["line"])
-    draw.ellipse((550, 404, 750, 604), fill=COLORS["cyan"])
-    _check(draw, 606, 466, COLORS["paper"], scale=4)
-    draw.text((816, 400), "Completion checks confirmed", font=font(28, True), fill=COLORS["navy"])
-    draw.text((816, 448), "完成条件已确认", font=font(21), fill=COLORS["violet"])
-    rounded_box(draw, (816, 500, 1266, 544), fill=COLORS["paper"], outline=COLORS["line"], radius=8)
-    _check(draw, 838, 514, COLORS["cyan"])
-    draw.text((874, 510), "Recording outcome confirmed", font=font(15, True), fill=COLORS["navy"])
-    rounded_box(draw, (816, 558, 1266, 602), fill=COLORS["paper"], outline=COLORS["line"], radius=8)
-    _check(draw, 838, 572, COLORS["cyan"])
-    draw.text((874, 568), "Response ZIP saved locally", font=font(15, True), fill=COLORS["navy"])
-    rounded_box(draw, (816, 620, 1266, 658), fill="#E7F7FD", radius=8)
-    draw.text((840, 629), "Session complete / 会话完成", font=font(15, True), fill=COLORS["navy"])
+    draw.ellipse((454, 332, 516, 394), fill=COLORS["cyan"])
+    _check(draw, 470, 350, COLORS["paper"], scale=2)
+    draw.text((544, 344), "本次会话已完成。", font=font(28, True), fill=COLORS["navy"])
+    draw.line((454, 424, 1346, 424), fill=COLORS["cyan"], width=3)
+
+    completion_rows = (
+        "本地资料包已确认保存",
+        "问卷数据已从当前会话清理",
+        "录制媒体未上传到应用服务器",
+    )
+    for index, label in enumerate(completion_rows):
+        y = 462 + index * 62
+        draw.ellipse((454, y, 480, y + 26), fill="#E7F7FD", outline=COLORS["cyan"], width=2)
+        _check(draw, 459, y + 5, COLORS["cyan"])
+        draw.text((504, y - 1), label, font=font(18, True), fill=COLORS["navy"])
+        draw.line((504, y + 42, 1346, y + 42), fill=COLORS["line"], width=1)
+
+    draw.text((454, 660), "现在可以安全关闭此页面。", font=font(19, True), fill=COLORS["violet"])
 
 
 def draw_scene(stage_index: int) -> Image.Image:
@@ -430,6 +425,96 @@ def draw_scene(stage_index: int) -> Image.Image:
     renderers[stage_index](draw)
     if stage_index not in (2,):
         draw_footer(draw, "Guided, privacy-conscious, and explicit at every handoff")
+    return image
+
+
+def draw_structured_response_closure() -> Image.Image:
+    image = Image.new("RGB", (WIDTH, HEIGHT), COLORS["paper"])
+    draw = ImageDraw.Draw(image)
+    draw.text(
+        (60, 44),
+        "STRUCTURED RESPONSE CLOSURE",
+        font=font(15, True),
+        fill=COLORS["rose"],
+    )
+    draw.text(
+        (60, 80),
+        "结构化作答、本地资料包与完成确认",
+        font=font(28, True),
+        fill=COLORS["navy"],
+    )
+    draw.line((60, 138, 1380, 138), fill=COLORS["cyan"], width=4)
+    draw.line((500, 178, 500, 750), fill=COLORS["line"], width=2)
+    draw.line((940, 178, 940, 750), fill=COLORS["line"], width=2)
+
+    rounded_box(draw, (60, 184, 116, 218), fill=COLORS["rose"], radius=6)
+    _centered_text(draw, (60, 184, 116, 218), "04", face=font(14, True), fill=COLORS["paper"])
+    draw.text((136, 184), "分步结构化作答", font=font(20, True), fill=COLORS["navy"])
+    draw.text((60, 244), "CURRENT PROMPT", font=font(12, True), fill=COLORS["rose"])
+    draw.text((456, 244), "01 / 08", font=font(12, True), fill=COLORS["muted"], anchor="ra")
+    draw.rectangle((60, 274, 456, 280), fill=COLORS["line"])
+    draw.rectangle((60, 274, 110, 280), fill=COLORS["rose"])
+    draw.rectangle((60, 316, 65, 398), fill=COLORS["cyan"])
+    draw.multiline_text(
+        (84, 312),
+        "过去 24 小时，是否出现过不想死但想\n故意伤害自己的想法？",
+        font=font(18, True),
+        fill=COLORS["navy"],
+        spacing=8,
+    )
+    for y, label in ((438, "否"), (500, "是")):
+        rounded_box(
+            draw,
+            (60, y, 456, y + 48),
+            fill=COLORS["paper"],
+            outline=COLORS["violet"],
+            radius=4,
+            width=2,
+        )
+        draw.ellipse((80, y + 14, 100, y + 34), outline=COLORS["violet"], width=2)
+        draw.text((118, y + 11), label, font=font(16, True), fill=COLORS["violet"])
+
+    rounded_box(draw, (524, 184, 580, 218), fill=COLORS["violet"], radius=6)
+    _centered_text(draw, (524, 184, 580, 218), "05", face=font(14, True), fill=COLORS["paper"])
+    draw.text((600, 184), "本地资料包", font=font(20, True), fill=COLORS["navy"])
+    draw.line((524, 244, 916, 244), fill=COLORS["cyan"], width=4)
+    rounded_box(draw, (822, 266, 916, 296), fill="#E7F7FD", radius=6)
+    _centered_text(draw, (822, 266, 916, 296), "READY", face=font(11, True), fill=COLORS["violet"])
+    draw.text((524, 270), "问卷资料包已准备", font=font(20, True), fill=COLORS["navy"])
+    draw.text((524, 316), "session-20260729-103000.zip", font=font(14), fill=COLORS["muted"])
+    draw.text((524, 382), "文件内容", font=font(12, True), fill=COLORS["muted"])
+    draw.text((524, 408), "JSON + Excel", font=font(18, True), fill=COLORS["navy"])
+    draw.line((524, 454, 916, 454), fill=COLORS["line"], width=1)
+    draw.text((524, 480), "存储位置", font=font(12, True), fill=COLORS["muted"])
+    draw.text((524, 506), "仅保存到本机", font=font(18, True), fill=COLORS["navy"])
+    rounded_box(draw, (524, 570, 916, 624), fill=COLORS["rose"], radius=6)
+    _centered_text(
+        draw,
+        (524, 570, 916, 624),
+        "下载问卷记录（JSON + Excel）",
+        face=font(15, True),
+        fill=COLORS["paper"],
+    )
+
+    rounded_box(draw, (964, 184, 1020, 218), fill=COLORS["cyan"], radius=6)
+    _centered_text(draw, (964, 184, 1020, 218), "06", face=font(14, True), fill=COLORS["navy"])
+    draw.text((1040, 184), "完成确认", font=font(20, True), fill=COLORS["navy"])
+    draw.ellipse((964, 262, 1018, 316), fill=COLORS["cyan"])
+    _check(draw, 978, 278, COLORS["paper"], scale=2)
+    draw.text((1038, 272), "本次会话已完成。", font=font(19, True), fill=COLORS["navy"])
+    draw.line((964, 344, 1380, 344), fill=COLORS["cyan"], width=3)
+    closure_rows = (
+        "本地资料包已确认保存",
+        "问卷数据已从当前会话清理",
+        "录制媒体未上传到应用服务器",
+    )
+    for index, label in enumerate(closure_rows):
+        y = 382 + index * 76
+        draw.ellipse((964, y, 988, y + 24), fill="#E7F7FD", outline=COLORS["cyan"], width=2)
+        _check(draw, 968, y + 5, COLORS["cyan"])
+        draw.text((1008, y - 1), label, font=font(15, True), fill=COLORS["navy"])
+        draw.line((1008, y + 42, 1380, y + 42), fill=COLORS["line"], width=1)
+    draw.text((964, 630), "现在可以安全关闭此页面。", font=font(16, True), fill=COLORS["violet"])
     return image
 
 
@@ -475,6 +560,11 @@ def generate_assets() -> None:
     _save_webp(frames[3], ASSET_DIR / "questionnaire-experience.webp")
     _save_webp(frames[2], ASSET_DIR / "local-recording-save.webp")
     _save_webp(frames[4], ASSET_DIR / "local-response-export.webp")
+    _save_webp(frames[5], ASSET_DIR / "completion-confirmation.webp")
+    _save_webp(
+        draw_structured_response_closure(),
+        ASSET_DIR / "structured-response-closure.webp",
+    )
     _save_webp(draw_palette(), ASSET_DIR / "operational-palette.webp")
 
 
