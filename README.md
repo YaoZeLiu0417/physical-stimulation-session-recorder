@@ -3,7 +3,6 @@ Physical Stimulation Intervention Session Companion
 
 这是面向居家物理刺激干预研究的六阶段受控会话工具，将受控进入、当日记录、浏览器本地录制、分步结构化作答、本地资料包和完成确认组织为一条可核验的操作闭环。
 
-**06 阶段流程** · **本地录制与导出** · **无媒体上传路径**
 
 ![六阶段受控会话操作流程 / Six-stage controlled session workflow](assets/readme/operational-workflow.gif)
 
