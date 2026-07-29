@@ -7,7 +7,7 @@ Physical Stimulation Intervention Session Companion
 ![六阶段受控会话操作流程 / Six-stage controlled session workflow](assets/readme/operational-workflow.gif)
 
 <details>
-<summary>流程概览 / Static workflow fallback</summary>
+<summary>流程概览</summary>
 
 ![六阶段操作流程静态图 / Static six-stage operational workflow](assets/readme/operational-workflow-static.webp)
 
