@@ -124,40 +124,78 @@ def _normalize_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
-def _function_string_constants(source: str, function_name: str) -> set[str]:
-    node = _function_node(source, function_name)
-    return {
-        _normalize_whitespace(child.value)
-        for child in ast.walk(node)
-        if isinstance(child, ast.Constant) and isinstance(child.value, str)
-    }
+class _RecordingDraw:
+    def __init__(self) -> None:
+        self.rendered: list[str] = []
+
+    def text(
+        self,
+        xy: object,
+        text: str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        self.rendered.append(text)
+
+    def multiline_text(
+        self,
+        xy: object,
+        text: str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        self.rendered.append(text)
+
+    def textbbox(
+        self,
+        xy: object,
+        text: str,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[int, int, int, int]:
+        lines = text.splitlines() or [""]
+        return (0, 0, max(1, max(map(len, lines))) * 10, len(lines) * 20)
+
+    def rounded_rectangle(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def rectangle(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def line(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def ellipse(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def arc(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def polygon(self, *args: object, **kwargs: object) -> None:
+        pass
 
 
-def _assert_function_draws(source: str, function_name: str) -> None:
-    node = _function_node(source, function_name)
-    drawing_helpers = {
-        "_centered_text",
-        "_check",
-        "_handoff_row",
-        "_status_row",
-        "draw_button",
-        "draw_footer",
-        "rounded_box",
-    }
-    drawing_calls = [
-        child
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call)
-        and (
+def _assert_rendered_copy_in_order(
+    rendered: list[str],
+    expected: tuple[str, ...],
+) -> None:
+    normalized_rendered = [_normalize_whitespace(value) for value in rendered]
+    previous_index = -1
+    for expected_value in expected:
+        normalized_expected = _normalize_whitespace(expected_value)
+        matching_index = next(
             (
-                isinstance(child.func, ast.Attribute)
-                and isinstance(child.func.value, ast.Name)
-                and child.func.value.id == "draw"
-            )
-            or (isinstance(child.func, ast.Name) and child.func.id in drawing_helpers)
+                index
+                for index in range(previous_index + 1, len(normalized_rendered))
+                if normalized_expected in normalized_rendered[index]
+            ),
+            None,
         )
-    ]
-    assert drawing_calls, f"expected drawing calls in {function_name!r}"
+        assert matching_index is not None, (
+            f"expected rendered copy {normalized_expected!r} after index "
+            f"{previous_index}; rendered={normalized_rendered!r}"
+        )
+        previous_index = matching_index
 
 
 def _showcase_asset_root() -> Path | None:
@@ -286,7 +324,7 @@ def test_generator_exists_and_uses_only_original_drawing_primitives() -> None:
     assert imported_roots <= {"__future__", "pathlib", "PIL"}
 
 
-def test_generator_declares_exact_labels_palette_and_surface_copy() -> None:
+def test_generator_declares_exact_labels_and_palette() -> None:
     source = _generator_source()
 
     for english, chinese in EXPECTED_STAGE_LABELS:
@@ -294,34 +332,48 @@ def test_generator_declares_exact_labels_palette_and_surface_copy() -> None:
         assert f'"{chinese}"' in source
     assert all(value in source for value in EXPECTED_PALETTE)
 
-    copy_contracts = (
-        ("_draw_questionnaire", QUESTIONNAIRE_COPY),
-        ("_draw_export", PACKAGE_COPY),
-        ("_draw_completion", COMPLETION_COPY),
+
+@pytest.mark.parametrize(
+    ("renderer_name", "expected_copy"),
+    (
+        pytest.param(
+            "_draw_questionnaire",
+            QUESTIONNAIRE_COPY,
+            id="questionnaire",
+        ),
+        pytest.param("_draw_export", PACKAGE_COPY, id="package"),
+        pytest.param("_draw_completion", COMPLETION_COPY, id="completion"),
+    ),
+)
+def test_generator_renders_surface_copy_in_order(
+    renderer_name: str,
+    expected_copy: tuple[str, ...],
+) -> None:
+    generator = _load_generator()
+    renderer = getattr(generator, renderer_name, None)
+    assert callable(renderer), f"expected callable renderer {renderer_name!r}"
+    recording_draw = _RecordingDraw()
+
+    renderer(recording_draw)
+
+    _assert_rendered_copy_in_order(recording_draw.rendered, expected_copy)
+
+
+def test_generator_draws_structured_response_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _load_generator()
+    closure = getattr(generator, "draw_structured_response_closure", None)
+    assert callable(closure), "expected callable draw_structured_response_closure"
+    recording_draw = _RecordingDraw()
+    monkeypatch.setattr(generator.ImageDraw, "Draw", lambda _: recording_draw)
+
+    closure()
+
+    _assert_rendered_copy_in_order(
+        recording_draw.rendered,
+        ("04", "分步结构化作答", "05", "本地资料包", "06", "完成确认"),
     )
-    missing_copy: dict[str, list[str]] = {}
-    for renderer_name, copy in copy_contracts:
-        _assert_function_draws(source, renderer_name)
-        drawing_strings = _function_string_constants(source, renderer_name)
-        normalized_copy = tuple(_normalize_whitespace(label) for label in copy)
-        missing = [label for label in normalized_copy if label not in drawing_strings]
-        if missing:
-            missing_copy[renderer_name] = missing
-    assert missing_copy == {}
-
-
-def test_generator_draws_structured_response_closure() -> None:
-    source = _generator_source()
-
-    closure_name = "draw_structured_response_closure"
-    closure_strings = _function_string_constants(source, closure_name)
-    expected_titles = {
-        "04 分步结构化作答",
-        "05 本地资料包",
-        "06 完成确认",
-    }
-    _assert_function_draws(source, closure_name)
-    assert expected_titles <= closure_strings
 
 
 def test_generator_wires_structured_response_closure_asset() -> None:
@@ -337,7 +389,11 @@ def test_generator_wires_structured_response_closure_asset() -> None:
         and not node.keywords
         for node in ast.walk(generate_assets_tree)
     )
-    generated_strings = _function_string_constants(source, function_name)
+    generated_strings = {
+        node.value
+        for node in ast.walk(generate_assets_tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
     missing_wiring = []
     if not calls_closure:
         missing_wiring.append("draw_structured_response_closure()")
@@ -443,27 +499,26 @@ def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
         "已确认 ZIP 保存到本地",
         "录制结果与 ZIP 保存均已确认",
     )
-    stage_rows = []
-    for line in first_viewport.splitlines():
-        marker_match = re.match(r"^\|\s*(0[1-6])\b", line)
-        if marker_match:
-            stage_rows.append((marker_match.group(1), line))
-    assert [marker for marker, _ in stage_rows] == [
-        f"{stage_number:02d}" for stage_number in range(1, 7)
-    ]
-    for (_, row), (english, chinese), completion in zip(
-        stage_rows,
-        EXPECTED_STAGE_LABELS,
-        stage_completion_semantics,
-        strict=True,
+    first_viewport_lines = first_viewport.splitlines()
+    previous_row_index = -1
+    for stage_number, (english, chinese), completion in zip(
+        range(1, 7), EXPECTED_STAGE_LABELS, stage_completion_semantics, strict=True
     ):
+        row_prefix = f"| {stage_number:02d} · {chinese} / {english} |"
+        matching_rows = [
+            (index, line)
+            for index, line in enumerate(first_viewport_lines)
+            if line.startswith(row_prefix)
+        ]
+        assert len(matching_rows) == 1, f"expected one row starting {row_prefix!r}"
+        row_index, row = matching_rows[0]
+        assert row_index > previous_row_index
         normalized_cells = {
             _normalize_whitespace(cell)
             for cell in row.strip().strip("|").split("|")
         }
-        assert english in row
-        assert chinese in row
         assert completion in normalized_cells
+        previous_row_index = row_index
 
     streamlit_urls = re.findall(
         r"https://[A-Za-z0-9-]+\.streamlit\.app/?",
