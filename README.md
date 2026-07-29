@@ -22,9 +22,9 @@ Physical Stimulation Intervention Session Companion
 | 05 · 本地资料包 / Local response package | 下载并确认本地资料包 / Download and confirm the local response package | 已确认 ZIP 保存到本地 / ZIP save confirmed locally |
 | 06 · 完成确认 / Completion confirmation | 清理会话并确认流程结束 / Clear the session and confirm completion | 录制结果与 ZIP 保存均已确认 / Recording outcome and ZIP save confirmed |
 
-## 实际界面与操作闭环
+## 实际界面与操作
 
-### 03 本地录制 / Browser-local recording
+### 本地录制 / Browser-local recording
 
 ![Chrome 本地录制、下载、本机回放检查与确认 / Chrome-local recording, download, local playback check, and confirmation](assets/readme/local-recording-save.webp)
 
