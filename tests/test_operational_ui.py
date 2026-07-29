@@ -131,7 +131,6 @@ def test_css_meets_operational_visual_contract() -> None:
         assert selector in css
     assert "@media (max-width: 840px)" in css
     assert "grid-template-columns: repeat(6, minmax(0, 1fr))" in css
-    assert 'iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; height: auto !important;' in css
     assert "iframe {" not in css
     assert ":focus-visible" in css
     assert "letter-spacing: 0" in css
@@ -177,6 +176,17 @@ def test_css_meets_operational_visual_contract() -> None:
     assert "padding: 1rem 1rem 3rem;" in css
     for forbidden in ("gradient", "vw", "https://", "http://", "@import", "url("):
         assert forbidden not in css.lower()
+
+
+def test_recorder_iframe_preserves_streamlit_reported_height() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert (
+        'iframe[title*="browser_local_recorder"] { width: 100%; max-width: 100%; }'
+        in css
+    )
+    assert 'iframe[title*="browser_local_recorder"] { aspect-ratio:' not in css
+    assert "height: auto !important" not in css
 
 
 def test_stage_markers_have_stable_circular_geometry_and_state_surfaces() -> None:

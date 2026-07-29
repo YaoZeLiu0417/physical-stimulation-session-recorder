@@ -126,7 +126,7 @@ OPERATIONAL_CSS = """<style>
 }
 .stButton > button:focus-visible, .stDownloadButton > button:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--operational-cyan); outline-offset: 2px; }
 .stTextInput input, .stTextArea textarea, .stSelectbox select, .stNumberInput input { border-radius: 6px; }
-iframe[title*="browser_local_recorder"] { aspect-ratio: 16 / 9; width: 100%; height: auto !important; max-width: 100%; }
+iframe[title*="browser_local_recorder"] { width: 100%; max-width: 100%; }
 .operational-mobile, .operational-progress { display: none; }
 @media (max-width: 840px) {
   .operational-rail { display: none; }
