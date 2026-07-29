@@ -101,6 +101,21 @@ def _generator_source() -> str:
     return GENERATOR_PATH.read_text(encoding="utf-8")
 
 
+def _function_source(source: str, function_name: str) -> str:
+    tree = ast.parse(source)
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one top-level function named {function_name!r}"
+    )
+    node = matches[0]
+    assert node.end_lineno is not None
+    return "\n".join(source.splitlines()[node.lineno - 1 : node.end_lineno])
+
+
 def _showcase_asset_root() -> Path | None:
     candidates = (
         ROOT.parent / "physical-stimulation-session-recorder-showcase" / "assets",
@@ -235,33 +250,36 @@ def test_generator_declares_exact_labels_palette_and_surface_copy() -> None:
         assert f'"{chinese}"' in source
     assert all(value in source for value in EXPECTED_PALETTE)
 
-    questionnaire_source = source.split("def _draw_questionnaire", 1)[1].split(
-        "def _draw_export", 1
-    )[0]
-    export_source = source.split("def _draw_export", 1)[1].split(
-        "def _draw_completion", 1
-    )[0]
-    completion_source = source.split("def _draw_completion", 1)[1].split(
-        "def draw_scene", 1
-    )[0]
-    for copy, drawing_source in (
-        (QUESTIONNAIRE_COPY, questionnaire_source),
-        (PACKAGE_COPY, export_source),
-        (COMPLETION_COPY, completion_source),
-    ):
+    copy_contracts = (
+        ("_draw_questionnaire", QUESTIONNAIRE_COPY),
+        ("_draw_export", PACKAGE_COPY),
+        ("_draw_completion", COMPLETION_COPY),
+    )
+    missing_copy: dict[str, list[str]] = {}
+    renderer_sources: dict[str, str] = {}
+    for renderer_name, copy in copy_contracts:
+        drawing_source = _function_source(source, renderer_name)
+        renderer_sources[renderer_name] = drawing_source
         quoted_copy = tuple(f'"{label}"' for label in copy)
-        assert all(label in drawing_source for label in quoted_copy)
+        missing = [label for label in quoted_copy if label not in drawing_source]
+        if missing:
+            missing_copy[renderer_name] = missing
+    assert missing_copy == {}
+
+    for renderer_name, copy in copy_contracts:
+        drawing_source = renderer_sources[renderer_name]
+        quoted_copy = tuple(f'"{label}"' for label in copy)
         positions = [drawing_source.index(label) for label in quoted_copy]
-        assert positions == sorted(positions)
+        assert positions == sorted(positions), (
+            f"copy is out of order in {renderer_name!r}"
+        )
 
 
 def test_generator_draws_structured_response_closure() -> None:
     source = _generator_source()
 
     assert "def draw_structured_response_closure" in source
-    closure_source = source.split("def draw_structured_response_closure", 1)[1].split(
-        "def draw_scene", 1
-    )[0]
+    closure_source = _function_source(source, "draw_structured_response_closure")
     assert all(f'"{stage}"' in closure_source for stage in ("04", "05", "06"))
 
 
