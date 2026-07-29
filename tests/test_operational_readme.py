@@ -124,6 +124,22 @@ def _normalize_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
+def _assert_chinese_first_bilingual_cell(
+    value: str,
+    *,
+    expected_chinese: str | None = None,
+) -> None:
+    parts = _normalize_whitespace(value).split(" / ")
+    assert len(parts) == 2, f"expected one Chinese / English separator in {value!r}"
+    chinese, english = parts
+    assert re.match(r"[\u3400-\u9fff]", chinese), (
+        f"expected Chinese-first cell, got {value!r}"
+    )
+    if expected_chinese is not None:
+        assert chinese == expected_chinese
+    assert re.search(r"[A-Za-z]", english), f"expected English translation in {value!r}"
+
+
 class _RecordingDraw:
     def __init__(self) -> None:
         self.rendered: list[str] = []
@@ -501,10 +517,12 @@ def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
     )
     first_viewport_lines = first_viewport.splitlines()
     previous_row_index = -1
+    first_stage_row_index: int | None = None
     for stage_number, (english, chinese), completion in zip(
         range(1, 7), EXPECTED_STAGE_LABELS, stage_completion_semantics, strict=True
     ):
-        row_prefix = f"| {stage_number:02d} · {chinese} / {english} |"
+        expected_stage_cell = f"{stage_number:02d} · {chinese} / {english}"
+        row_prefix = f"| {expected_stage_cell} |"
         matching_rows = [
             (index, line)
             for index, line in enumerate(first_viewport_lines)
@@ -513,16 +531,45 @@ def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
         assert len(matching_rows) == 1, f"expected one row starting {row_prefix!r}"
         row_index, row = matching_rows[0]
         assert row_index > previous_row_index
-        normalized_cells = {
+        if first_stage_row_index is None:
+            first_stage_row_index = row_index
+        row_cells = [
             _normalize_whitespace(cell)
             for cell in row.strip().strip("|").split("|")
-        }
-        assert completion in normalized_cells
+        ]
+        assert len(row_cells) == 3
+        assert row_cells[0] == expected_stage_cell
+        _assert_chinese_first_bilingual_cell(
+            row_cells[2],
+            expected_chinese=completion,
+        )
         previous_row_index = row_index
 
+    assert first_stage_row_index is not None and first_stage_row_index >= 2
+    header_cells = [
+        _normalize_whitespace(cell)
+        for cell in first_viewport_lines[first_stage_row_index - 2]
+        .strip()
+        .strip("|")
+        .split("|")
+    ]
+    separator_cells = [
+        _normalize_whitespace(cell)
+        for cell in first_viewport_lines[first_stage_row_index - 1]
+        .strip()
+        .strip("|")
+        .split("|")
+    ]
+    assert len(header_cells) == 3
+    assert all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells)
+    assert len(separator_cells) == len(header_cells)
+    for header_cell in header_cells:
+        _assert_chinese_first_bilingual_cell(header_cell)
+
     streamlit_urls = re.findall(
-        r"https://[A-Za-z0-9-]+\.streamlit\.app/?",
+        r"https?://[A-Za-z0-9-]+\.streamlit\.app/?",
         readme,
+        flags=re.IGNORECASE,
     )
     normalized_streamlit_urls = [
         url if url.endswith("/") else f"{url}/" for url in streamlit_urls
