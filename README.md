@@ -31,9 +31,9 @@ Physical Stimulation Intervention Session Companion
 
 ![Chrome 本地录制、回放、下载与确认 / Chrome-local recording, playback, download, and confirmation](assets/readme/local-recording-save.webp)
 
-当前桌面版 Chrome 在浏览器内完成摄像头和麦克风预览、录制与回放，并由操作人员下载 WebM 后检查画面和声音。完成检查时明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
+当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，操作人员回放 WebM 检查画面和声音，再下载文件并明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
 
-Current desktop Chrome creates a browser-local **WebM with audio** for preview, recording, playback, download, and review. Recording-outcome confirmation distinguishes a checked local file from an explicit no-save path.
+Current desktop Chrome shows a muted camera preview and microphone readiness, then creates a browser-local **WebM with audio** for post-recording playback, download, and review. Recording-outcome confirmation distinguishes a checked local file from an explicit no-save path.
 
 ![结构化作答至完成确认的操作闭环 / Structured response-to-completion overview](assets/readme/structured-response-closure.webp)
 
@@ -63,8 +63,8 @@ Completion confirms the local response package, clears questionnaire data from t
 
 ## 方法与数据边界 / Method and data boundary
 
-- 摄像头和麦克风只进入 Chrome 本地 recorder，由操作人员自行保存 WebM；应用没有媒体上传路径。
-- 当日状态和问卷值只在活动会话的临时内存中用于生成本地 ZIP，不将服务器作为持久档案。
+- 摄像头和麦克风只进入 Chrome 本地录制器，由操作人员自行保存 WebM；应用没有媒体上传路径。
+- 当日状态和问卷值在整个活动流程中保留于 Streamlit 临时会话内存，以生成本地 ZIP，并在完成时清理；不将服务器作为持久档案。
 
 ```mermaid
 flowchart LR
@@ -93,14 +93,14 @@ flowchart LR
     MEMORY -. cleared with session lifecycle; no durable response store .-> END[Session ends]
 ```
 
-Audiovisual bytes remain inside Chrome until the user saves the WebM. Context and questionnaire values use transient Streamlit session memory only while generating the local response package; the server is not treated as a durable recording or response archive.
+Audiovisual bytes remain inside Chrome until the user saves the WebM. Context and questionnaire values remain in transient Streamlit session memory throughout the active flow so the local response package can be generated, and are cleared at completion; the server is not treated as a durable recording or response archive.
 
 ## 验证证据 / Verification
 
 - 六阶段门禁与清理：验证各阶段只能按顺序进入，完成页触发活动会话数据清理。
 - 问卷交互：验证适用分支、必答校验、进度更新和支持信息呈现。
 - 本地资料包：验证 ZIP bytes、filename、MIME、本地下载行为与人工保存确认。
-- 浏览器录制：验证本地 recorder 状态机、媒体轨道清理和媒体无网络传输边界。
+- 浏览器录制：验证本地录制器状态机、媒体轨道清理和媒体无网络传输边界。
 - 公开展示合同：验证 README 素材库存、尺寸、链接、可复现生成、metadata 与公开安全约束。
 
 <details>
@@ -153,6 +153,8 @@ SAFETY_CONTACT = "<configured support copy>"
 
 <details>
 <summary>验证命令 / Verification commands</summary>
+
+运行 JavaScript 检查需要可运行 Node 内置 test runner 的 Node.js。
 
 ```powershell
 python -m pytest -q
