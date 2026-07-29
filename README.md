@@ -162,3 +162,12 @@ python -m py_compile app.py browser_recorder.py local_recording_workflow.py tool
 README 聚焦合同可用 `python -m pytest tests/test_operational_readme.py -q` 运行。
 
 </details>
+
+## 项目状态与后续方向 / Project Status & Next Steps
+
+目前，本研究的干预过程仍需要研究人员对参与者进行现场或同步监督，因此暂未将本工具作为正式的居家干预实施方式。我们保留并持续完善这一项目，希望它能够为后续居家干预研究提供可复用的会话引导、本地录制、结构化作答与资料整理工具。
+
+本项目仍在持续开发中。后续将结合实际研究流程、参与者体验与数据安全要求，继续优化功能设计、操作流程和使用边界。
+
+> **Project status:** Active development  
+> This tool is not currently used as the formal intervention method because participant sessions still require researcher supervision. It is being developed as reusable infrastructure for future home-based intervention studies.
