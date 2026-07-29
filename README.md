@@ -162,7 +162,3 @@ python -m py_compile app.py browser_recorder.py local_recording_workflow.py tool
 README 聚焦合同可用 `python -m pytest tests/test_operational_readme.py -q` 运行。
 
 </details>
-
-## Presentation Reference / 展示参考
-
-另见仅使用合成展示内容的 [public showcase repository](https://github.com/YaoZeLiu0417/physical-stimulation-session-recorder-showcase).
