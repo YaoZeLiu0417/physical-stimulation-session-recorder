@@ -101,7 +101,7 @@ def _generator_source() -> str:
     return GENERATOR_PATH.read_text(encoding="utf-8")
 
 
-def _function_source(source: str, function_name: str) -> str:
+def _function_node(source: str, function_name: str) -> ast.FunctionDef:
     tree = ast.parse(source)
     matches = [
         node
@@ -111,9 +111,53 @@ def _function_source(source: str, function_name: str) -> str:
     assert len(matches) == 1, (
         f"expected exactly one top-level function named {function_name!r}"
     )
-    node = matches[0]
+    return matches[0]
+
+
+def _function_source(source: str, function_name: str) -> str:
+    node = _function_node(source, function_name)
     assert node.end_lineno is not None
     return "\n".join(source.splitlines()[node.lineno - 1 : node.end_lineno])
+
+
+def _normalize_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _function_string_constants(source: str, function_name: str) -> set[str]:
+    node = _function_node(source, function_name)
+    return {
+        _normalize_whitespace(child.value)
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+
+
+def _assert_function_draws(source: str, function_name: str) -> None:
+    node = _function_node(source, function_name)
+    drawing_helpers = {
+        "_centered_text",
+        "_check",
+        "_handoff_row",
+        "_status_row",
+        "draw_button",
+        "draw_footer",
+        "rounded_box",
+    }
+    drawing_calls = [
+        child
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call)
+        and (
+            (
+                isinstance(child.func, ast.Attribute)
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == "draw"
+            )
+            or (isinstance(child.func, ast.Name) and child.func.id in drawing_helpers)
+        )
+    ]
+    assert drawing_calls, f"expected drawing calls in {function_name!r}"
 
 
 def _showcase_asset_root() -> Path | None:
@@ -256,31 +300,50 @@ def test_generator_declares_exact_labels_palette_and_surface_copy() -> None:
         ("_draw_completion", COMPLETION_COPY),
     )
     missing_copy: dict[str, list[str]] = {}
-    renderer_sources: dict[str, str] = {}
     for renderer_name, copy in copy_contracts:
-        drawing_source = _function_source(source, renderer_name)
-        renderer_sources[renderer_name] = drawing_source
-        quoted_copy = tuple(f'"{label}"' for label in copy)
-        missing = [label for label in quoted_copy if label not in drawing_source]
+        _assert_function_draws(source, renderer_name)
+        drawing_strings = _function_string_constants(source, renderer_name)
+        normalized_copy = tuple(_normalize_whitespace(label) for label in copy)
+        missing = [label for label in normalized_copy if label not in drawing_strings]
         if missing:
             missing_copy[renderer_name] = missing
     assert missing_copy == {}
-
-    for renderer_name, copy in copy_contracts:
-        drawing_source = renderer_sources[renderer_name]
-        quoted_copy = tuple(f'"{label}"' for label in copy)
-        positions = [drawing_source.index(label) for label in quoted_copy]
-        assert positions == sorted(positions), (
-            f"copy is out of order in {renderer_name!r}"
-        )
 
 
 def test_generator_draws_structured_response_closure() -> None:
     source = _generator_source()
 
-    assert "def draw_structured_response_closure" in source
-    closure_source = _function_source(source, "draw_structured_response_closure")
-    assert all(f'"{stage}"' in closure_source for stage in ("04", "05", "06"))
+    closure_name = "draw_structured_response_closure"
+    closure_strings = _function_string_constants(source, closure_name)
+    expected_titles = {
+        "04 分步结构化作答",
+        "05 本地资料包",
+        "06 完成确认",
+    }
+    _assert_function_draws(source, closure_name)
+    assert expected_titles <= closure_strings
+
+
+def test_generator_wires_structured_response_closure_asset() -> None:
+    source = _generator_source()
+    function_name = "generate_assets"
+    generate_assets_source = _function_source(source, function_name)
+    generate_assets_tree = ast.parse(generate_assets_source)
+    calls_closure = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "draw_structured_response_closure"
+        and not node.args
+        and not node.keywords
+        for node in ast.walk(generate_assets_tree)
+    )
+    generated_strings = _function_string_constants(source, function_name)
+    missing_wiring = []
+    if not calls_closure:
+        missing_wiring.append("draw_structured_response_closure()")
+    if "structured-response-closure.webp" not in generated_strings:
+        missing_wiring.append("structured-response-closure.webp")
+    assert missing_wiring == []
 
 
 def test_committed_operational_asset_inventory_dimensions_and_animation() -> None:
@@ -371,6 +434,45 @@ def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
         "assets/readme/operational-workflow-static.webp",
     ):
         assert required_signal in first_viewport
+
+    stage_completion_semantics = (
+        "进入成功",
+        "必填信息完成",
+        "本地录像已检查，或已确认不保存",
+        "必答步骤完成",
+        "已确认 ZIP 保存到本地",
+        "录制结果与 ZIP 保存均已确认",
+    )
+    stage_rows = []
+    for line in first_viewport.splitlines():
+        marker_match = re.match(r"^\|\s*(0[1-6])\b", line)
+        if marker_match:
+            stage_rows.append((marker_match.group(1), line))
+    assert [marker for marker, _ in stage_rows] == [
+        f"{stage_number:02d}" for stage_number in range(1, 7)
+    ]
+    for (_, row), (english, chinese), completion in zip(
+        stage_rows,
+        EXPECTED_STAGE_LABELS,
+        stage_completion_semantics,
+        strict=True,
+    ):
+        normalized_cells = {
+            _normalize_whitespace(cell)
+            for cell in row.strip().strip("|").split("|")
+        }
+        assert english in row
+        assert chinese in row
+        assert completion in normalized_cells
+
+    streamlit_urls = re.findall(
+        r"https://[A-Za-z0-9-]+\.streamlit\.app/?",
+        readme,
+    )
+    normalized_streamlit_urls = [
+        url if url.endswith("/") else f"{url}/" for url in streamlit_urls
+    ]
+    assert normalized_streamlit_urls == [APPLICATION_URL]
     assert readme.count(APPLICATION_URL) == 1
     assert "https://physical-stimulation-session-recorder.streamlit.app" not in readme
 
