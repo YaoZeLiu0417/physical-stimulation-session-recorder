@@ -176,7 +176,7 @@ def test_operations_guide_contains_no_sensitive_or_study_specific_examples() -> 
 
 def test_production_requirements_are_exact_browser_local_runtime() -> None:
     assert _requirement_specs(REQUIREMENTS) == (
-        "streamlit==1.37.1",
+        "streamlit==1.45.1",
         "numpy>=1.24,<2.0",
         "XlsxWriter>=3.2,<4",
         "protobuf<5",
