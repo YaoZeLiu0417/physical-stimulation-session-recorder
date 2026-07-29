@@ -539,6 +539,7 @@ def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
         ]
         assert len(row_cells) == 3
         assert row_cells[0] == expected_stage_cell
+        _assert_chinese_first_bilingual_cell(row_cells[1])
         _assert_chinese_first_bilingual_cell(
             row_cells[2],
             expected_chinese=completion,
