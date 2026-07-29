@@ -31,9 +31,9 @@ Physical Stimulation Intervention Session Companion
 
 ![Chrome 本地录制、回放、下载与确认 / Chrome-local recording, playback, download, and confirmation](assets/readme/local-recording-save.webp)
 
-当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，操作人员回放 WebM 检查画面和声音，再下载文件并明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
+当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，操作人员先下载 WebM，再在本机打开已保存文件，回放检查画面和声音，最后明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
 
-Current desktop Chrome shows a muted camera preview and microphone readiness, then creates a browser-local **WebM with audio** for post-recording playback, download, and review. Recording-outcome confirmation distinguishes a checked local file from an explicit no-save path.
+Current desktop Chrome shows a muted camera preview and microphone readiness, then creates a browser-local **WebM with audio**. After recording, the operator first downloads the WebM, opens the saved file locally to play it back and check picture and sound, and only then provides Recording-outcome confirmation. This distinguishes a checked local file from an explicit no-save path.
 
 ![结构化作答至完成确认的操作闭环 / Structured response-to-completion overview](assets/readme/structured-response-closure.webp)
 
