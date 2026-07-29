@@ -28,7 +28,7 @@ Physical Stimulation Intervention Session Companion
 
 ![Chrome 本地录制、下载、本机回放检查与确认 / Chrome-local recording, download, local playback check, and confirmation](assets/readme/local-recording-save.webp)
 
-当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，操作人员先下载 WebM，再在本机打开已保存文件，回放检查画面和声音，最后明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
+当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，被试先下载 WebM，再在本机打开已保存文件，回放检查画面和声音，最后明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
 
 Current desktop Chrome shows a muted camera preview and microphone readiness, then creates a browser-local **WebM with audio**. After recording, the operator first downloads the WebM, opens the saved file locally to play it back and check picture and sound, and only then provides Recording-outcome confirmation. This distinguishes a checked local file from an explicit no-save path.
 
@@ -42,25 +42,25 @@ Current desktop Chrome shows a muted camera preview and microphone readiness, th
 
 The questionnaire presents one required step at a time, opens applicable branches only when needed, and provides direct support information without participant-facing scores or interpretations.
 
-### 05 本地资料包 / Local response package
+### 本地资料包下载 / Download local response package
 
 ![本地 JSON 与 Excel 资料包及保存确认 / Local JSON and Excel package with save confirmation](assets/readme/local-response-export.webp)
 
-作答记录生成本地 **JSON + Excel** ZIP：JSON 保留结构化副本，Excel 提供可阅读的工作簿副本。操作人员下载资料包、在 Chrome 下载记录中定位文件，并确认“我确认问卷 ZIP 已保存到本地”后，才解锁完成阶段。
+作答记录生成本地 **JSON + Excel** ZIP：JSON 保留结构化副本，Excel 提供可阅读的工作簿副本。被试下载资料包、在 Chrome 下载记录中定位文件，并确认“我确认问卷 ZIP 已保存到本地”后，才解锁完成阶段。
 
 The user downloads the package and explicitly confirms the package was saved locally. Recording-outcome confirmation remains separate from response-package confirmation, so a no-save recording path is never mistaken for saved media.
 
-### 06 完成确认 / Completion confirmation
+### 完成确认 / Completion confirmation
 
 ![本地保存、会话清理与完成确认 / Local save, session cleanup, and completion confirmation](assets/readme/completion-confirmation.webp)
 
-完成页确认本地资料已保存、问卷会话数据已清理，并明确说明录制媒体**未上传到应用服务器**；此时可以结束本次会话。媒体不进入应用上传路径，本地文件仍由操作人员自行保管。
+完成页确认本地资料已保存、问卷会话数据已清理，并明确说明录制媒体**未上传到应用服务器**；此时可以结束本次会话。媒体不进入应用上传路径，本地文件仍由被试自行保管。
 
 Completion confirms the local response package, clears questionnaire data from the active session, and reiterates that recording media remains local.
 
 ## 方法与数据边界 / Method and data boundary
 
-- 摄像头和麦克风只进入 Chrome 本地录制器，由操作人员自行保存 WebM；应用没有媒体上传路径。
+- 摄像头和麦克风只进入 Chrome 本地录制器，由被试自行保存 WebM；应用没有媒体上传路径。
 - 当日状态和问卷值在整个活动流程中保留于 Streamlit 临时会话内存，以生成本地 ZIP，并在完成时清理；不将服务器作为持久档案。
 
 ```mermaid
