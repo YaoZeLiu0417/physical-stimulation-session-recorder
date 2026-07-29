@@ -14,12 +14,18 @@ README_PATH = ROOT / "README.md"
 GENERATOR_PATH = ROOT / "tools" / "generate_operational_readme_assets.py"
 ASSET_ROOT = ROOT / "assets" / "readme"
 TEST_PATH = Path(__file__).resolve()
+APPLICATION_URL = (
+    "https://physical-stimulation-session-recorder-"
+    "lqtdzyddneawgtmkzviryt.streamlit.app/"
+)
 EXPECTED_ASSETS = {
     "operational-workflow.gif": (1440, 810),
     "operational-workflow-static.webp": (1440, 810),
     "questionnaire-experience.webp": (1440, 810),
     "local-recording-save.webp": (1440, 810),
     "local-response-export.webp": (1440, 810),
+    "completion-confirmation.webp": (1440, 810),
+    "structured-response-closure.webp": (1440, 810),
     "operational-palette.webp": (1440, 160),
 }
 EXPECTED_README_IMAGE_TARGETS = {
@@ -42,22 +48,26 @@ REFERENCE_WINDOWS_FONTS = (
     Path("C:/Windows/Fonts/msyh.ttc"),
     Path("C:/Windows/Fonts/msyhbd.ttc"),
 )
-RECORDING_HANDOFF_COPY = (
-    "Playback / 回放",
-    "Download WebM + audio / 下载含音频录像",
-    "Downloaded and checked / 已下载并检查",
+QUESTIONNAIRE_COPY = (
+    "CURRENT PROMPT",
+    "过去 24 小时，是否出现过不想死但想故意伤害自己的想法？",
+    "否",
+    "是",
 )
-EXPORT_HANDOFF_COPY = (
-    "Save JSON + Excel ZIP / 保存资料包",
-    "Locate local ZIP / 找到本地资料包",
-    "Saved locally / 已保存到本地",
-    "Continue to completion / 进入完成确认",
+PACKAGE_COPY = (
+    "LOCAL EXPORT",
+    "问卷资料包已准备",
+    "session-20260729-103000.zip",
+    "JSON + Excel",
+    "仅保存到本机",
+    "我确认问卷 ZIP 已保存到本地",
 )
 COMPLETION_COPY = (
-    "Completion checks confirmed",
-    "完成条件已确认",
-    "Recording outcome confirmed",
-    "Response ZIP saved locally",
+    "本次会话已完成。",
+    "本地资料包已确认保存",
+    "问卷数据已从当前会话清理",
+    "录制媒体未上传到应用服务器",
+    "现在可以安全关闭此页面。",
 )
 SHOWCASE_URL = (
     "https://github.com/YaoZeLiu0417/"
@@ -217,7 +227,7 @@ def test_generator_exists_and_uses_only_original_drawing_primitives() -> None:
     assert imported_roots <= {"__future__", "pathlib", "PIL"}
 
 
-def test_generator_declares_exact_labels_palette_and_handoff_copy() -> None:
+def test_generator_declares_exact_labels_palette_and_surface_copy() -> None:
     source = _generator_source()
 
     for english, chinese in EXPECTED_STAGE_LABELS:
@@ -225,8 +235,8 @@ def test_generator_declares_exact_labels_palette_and_handoff_copy() -> None:
         assert f'"{chinese}"' in source
     assert all(value in source for value in EXPECTED_PALETTE)
 
-    recording_source = source.split("def _draw_recording", 1)[1].split(
-        "def _draw_questionnaire", 1
+    questionnaire_source = source.split("def _draw_questionnaire", 1)[1].split(
+        "def _draw_export", 1
     )[0]
     export_source = source.split("def _draw_export", 1)[1].split(
         "def _draw_completion", 1
@@ -234,14 +244,25 @@ def test_generator_declares_exact_labels_palette_and_handoff_copy() -> None:
     completion_source = source.split("def _draw_completion", 1)[1].split(
         "def draw_scene", 1
     )[0]
-    for handoff, drawing_source in (
-        (RECORDING_HANDOFF_COPY, recording_source),
-        (EXPORT_HANDOFF_COPY, export_source),
+    for copy, drawing_source in (
+        (QUESTIONNAIRE_COPY, questionnaire_source),
+        (PACKAGE_COPY, export_source),
+        (COMPLETION_COPY, completion_source),
     ):
-        assert all(label in drawing_source for label in handoff)
-        positions = [drawing_source.index(label) for label in handoff]
+        quoted_copy = tuple(f'"{label}"' for label in copy)
+        assert all(label in drawing_source for label in quoted_copy)
+        positions = [drawing_source.index(label) for label in quoted_copy]
         assert positions == sorted(positions)
-    assert all(label in completion_source for label in COMPLETION_COPY)
+
+
+def test_generator_draws_structured_response_closure() -> None:
+    source = _generator_source()
+
+    assert "def draw_structured_response_closure" in source
+    closure_source = source.split("def draw_structured_response_closure", 1)[1].split(
+        "def draw_scene", 1
+    )[0]
+    assert all(f'"{stage}"' in closure_source for stage in ("04", "05", "06"))
 
 
 def test_committed_operational_asset_inventory_dimensions_and_animation() -> None:
@@ -316,24 +337,67 @@ def test_readme_uses_exact_presentation_inventory_and_showcase_is_final_text_onl
     assert readme.rstrip().endswith(").")
 
 
-def test_readme_leads_with_stage_overview_and_prioritizes_questionnaire() -> None:
+def test_readme_leads_with_chinese_teacher_facing_contract() -> None:
     readme = _readme()
-    first_viewport = readme.split("## Questionnaire Experience", 1)[0]
+    surface_heading = "## 实际界面与操作闭环"
 
-    assert "# Physical Stimulation Intervention Session Companion" in first_viewport
-    assert "assets/readme/operational-workflow.gif" in first_viewport
-    assert "assets/readme/operational-workflow-static.webp" in first_viewport
-    for english, _ in EXPECTED_STAGE_LABELS:
-        assert english in first_viewport
-    assert "Local WebM checked or no-save path confirmed" in first_viewport
-    assert "Recording outcome and ZIP save confirmed" in first_viewport
-    assert readme.index("## Questionnaire Experience") < readme.index(
-        "## Local-First Recording"
+    assert readme.startswith("# 物理刺激干预会话伴侣")
+    assert surface_heading in readme
+    first_viewport = readme.split(surface_heading, 1)[0]
+    assert "Physical Stimulation Intervention Session Companion" in first_viewport
+    for required_signal in (
+        "六阶段",
+        "本地录制与导出",
+        "无媒体上传路径",
+        "assets/readme/operational-workflow.gif",
+        "assets/readme/operational-workflow-static.webp",
+    ):
+        assert required_signal in first_viewport
+    assert readme.count(APPLICATION_URL) == 1
+    assert "https://physical-stimulation-session-recorder.streamlit.app" not in readme
+
+
+def test_readme_current_surfaces_follow_the_operational_sequence() -> None:
+    readme = _readme()
+    surface_heading = "## 实际界面与操作闭环"
+    boundary_heading = "## 方法与数据边界"
+
+    assert surface_heading in readme
+    assert boundary_heading in readme
+    surface_start = readme.index(surface_heading)
+    boundary_start = readme.index(boundary_heading)
+    assert surface_start < boundary_start
+    surface_section = readme[surface_start + len(surface_heading) : boundary_start]
+    ordered_surfaces = (
+        "03 本地录制",
+        "04 分步结构化作答",
+        "05 本地资料包",
+        "06 完成确认",
     )
-    assert "No participant-facing scores" in readme
-    assert "browser-local" in readme.casefold()
-    assert "JSON + Excel" in readme
-    assert "## Operational Palette" not in readme
+    assert all(surface in surface_section for surface in ordered_surfaces)
+    positions = [surface_section.index(surface) for surface in ordered_surfaces]
+    assert positions == sorted(positions)
+
+    required_image_targets = (
+        "assets/readme/local-recording-save.webp",
+        "assets/readme/structured-response-closure.webp",
+        "assets/readme/questionnaire-experience.webp",
+        "assets/readme/local-response-export.webp",
+        "assets/readme/completion-confirmation.webp",
+    )
+    assert all(target in surface_section for target in required_image_targets)
+    assert QUESTIONNAIRE_COPY[1] in surface_section
+    assert "JSON + Excel" in surface_section
+    assert "未上传到应用服务器" in surface_section
+
+
+def test_readme_exposes_one_representative_question_without_identity_data() -> None:
+    readme = _readme()
+
+    assert readme.count(QUESTIONNAIRE_COPY[1]) == 1
+    assert "全部题目" not in readme
+    assert "完整题库" not in readme
+    assert re.search(r"\bsub-\d{3,}\b", readme, flags=re.IGNORECASE) is None
 
 
 def test_readme_documents_recording_export_and_privacy_handoffs() -> None:
