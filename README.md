@@ -7,7 +7,7 @@ Physical Stimulation Intervention Session Companion
 ![六阶段受控会话操作流程 / Six-stage controlled session workflow](assets/readme/operational-workflow.gif)
 
 <details>
-<summary>静态流程图 / Static workflow fallback</summary>
+<summary>流程概览 / Static workflow fallback</summary>
 
 ![六阶段操作流程静态图 / Static six-stage operational workflow](assets/readme/operational-workflow-static.webp)
 
@@ -34,7 +34,7 @@ Current desktop Chrome shows a muted camera preview and microphone readiness, th
 
 ![结构化作答至完成确认的操作闭环 / Structured response-to-completion overview](assets/readme/structured-response-closure.webp)
 
-### 04 分步结构化作答 / Stepwise questionnaire
+### 分步结构化作答 / Stepwise questionnaire
 
 ![逐题作答、进度与必答检查 / Stepwise questionnaire, progress, and required checks](assets/readme/questionnaire-experience.webp)
 
