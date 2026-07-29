@@ -279,7 +279,7 @@ def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
     draw.text((494, 595), "Camera + microphone ready", font=font(13), fill=COLORS["paper"])
     rounded_box(draw, (696, 580, 908, 630), fill="#17134F", outline="#4D4A78", radius=8)
     draw.polygon(((718, 594), (718, 616), (738, 605)), fill=COLORS["cyan"])
-    draw.text((750, 595), "Ready to review", font=font(13, True), fill=COLORS["paper"])
+    draw.text((750, 595), "Ready to download", font=font(13, True), fill=COLORS["paper"])
 
     _handoff_row(
         draw,
@@ -287,8 +287,8 @@ def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
         324,
         390,
         "1",
-        "Playback / 回放",
-        "Review picture and sound",
+        "Download WebM / 下载 WebM",
+        "Save the browser-local recording",
         COLORS["cyan"],
     )
     _handoff_row(
@@ -297,8 +297,8 @@ def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
         430,
         390,
         "2",
-        "Download WebM + audio / 下载含音频录像",
-        "Save the browser-local recording",
+        "Open saved file / 打开本机已保存文件",
+        "Check picture and sound / 检查画面和声音",
         COLORS["cyan"],
     )
     _handoff_row(
@@ -307,11 +307,11 @@ def _draw_recording(draw: ImageDraw.ImageDraw) -> None:
         536,
         390,
         "3",
-        "Downloaded and checked / 已下载并检查",
-        "Host confirmation unlocks the questionnaire",
+        "Confirm checked file / 确认已检查",
+        "Confirmation unlocks the questionnaire",
         COLORS["rose"],
     )
-    draw_footer(draw, "WebM stays browser-local through review and confirmed download")
+    draw_footer(draw, "WebM stays local through download, file review, and confirmation")
 
 
 def _draw_questionnaire(draw: ImageDraw.ImageDraw) -> None:

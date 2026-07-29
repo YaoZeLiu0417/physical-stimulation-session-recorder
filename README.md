@@ -29,7 +29,7 @@ Physical Stimulation Intervention Session Companion
 
 ### 03 本地录制 / Browser-local recording
 
-![Chrome 本地录制、回放、下载与确认 / Chrome-local recording, playback, download, and confirmation](assets/readme/local-recording-save.webp)
+![Chrome 本地录制、下载、本机回放检查与确认 / Chrome-local recording, download, local playback check, and confirmation](assets/readme/local-recording-save.webp)
 
 当前桌面版 Chrome 在浏览器内提供摄像头预览与麦克风状态确认，视频预览保持静音。录制结束后，操作人员先下载 WebM，再在本机打开已保存文件，回放检查画面和声音，最后明确确认“我已下载并检查录像，继续填写问卷”；如果录制被跳过或不可用，则走清晰的不保存路径，并确认“我确认继续填写问卷，不保存本次录制”。
 
@@ -107,7 +107,7 @@ Audiovisual bytes remain inside Chrome until the user saves the WebM. Context an
 <summary>Chrome 操作与故障排查 / Chrome guide and troubleshooting</summary>
 
 1. 使用当前桌面版 Chrome 打开受控应用，并在浏览器询问时允许摄像头和麦克风权限。
-2. 确认当日记录后预览并录制；录制完成时停止、回放、下载并检查带声音的 WebM，跳过或不可用时明确确认不保存路径。
+2. 确认当日记录后预览并录制；录制完成时停止，下载 WebM，打开本机已保存文件，检查画面和声音并确认；跳过或不可用时明确确认不保存路径。
 3. 逐题完成当前必答项及适用分支，下载 JSON + Excel ZIP，在 Chrome 下载记录中定位并确认本地保存，最后完成会话。
 
 | 现象 / Symptom | 检查 / Check |

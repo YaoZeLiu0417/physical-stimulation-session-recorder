@@ -48,6 +48,12 @@ REFERENCE_WINDOWS_FONTS = (
     Path("C:/Windows/Fonts/msyh.ttc"),
     Path("C:/Windows/Fonts/msyhbd.ttc"),
 )
+RECORDING_HANDOFF_COPY = (
+    "下载 WebM",
+    "打开本机已保存文件",
+    "检查画面和声音",
+    "确认",
+)
 QUESTIONNAIRE_COPY = (
     "CURRENT PROMPT",
     "过去 24 小时，是否出现过不想死但想故意伤害自己的想法？",
@@ -214,6 +220,19 @@ def _assert_rendered_copy_in_order(
         previous_index = matching_index
 
 
+def _assert_copy_in_order(value: str, expected: tuple[str, ...]) -> None:
+    normalized_value = _normalize_whitespace(value)
+    previous_index = -1
+    for expected_value in expected:
+        normalized_expected = _normalize_whitespace(expected_value)
+        matching_index = normalized_value.find(normalized_expected, previous_index + 1)
+        assert matching_index > previous_index, (
+            f"expected copy {normalized_expected!r} after index {previous_index}; "
+            f"value={normalized_value!r}"
+        )
+        previous_index = matching_index
+
+
 def _showcase_asset_root() -> Path | None:
     candidates = (
         ROOT.parent / "physical-stimulation-session-recorder-showcase" / "assets",
@@ -373,6 +392,32 @@ def test_generator_renders_surface_copy_in_order(
     renderer(recording_draw)
 
     _assert_rendered_copy_in_order(recording_draw.rendered, expected_copy)
+
+
+def test_recording_surface_downloads_before_local_file_review_and_confirmation() -> None:
+    generator = _load_generator()
+    renderer = getattr(generator, "_draw_recording", None)
+    assert callable(renderer), "expected callable renderer '_draw_recording'"
+    recording_draw = _RecordingDraw()
+
+    renderer(recording_draw)
+
+    _assert_rendered_copy_in_order(
+        recording_draw.rendered,
+        RECORDING_HANDOFF_COPY,
+    )
+
+
+def test_chrome_guide_downloads_before_local_file_review_and_confirmation() -> None:
+    chrome_guide = _readme().split(
+        "<summary>Chrome 操作与故障排查 / Chrome guide and troubleshooting</summary>",
+        1,
+    )[1].split("</details>", 1)[0]
+    recording_step = next(
+        line for line in chrome_guide.splitlines() if line.startswith("2. ")
+    )
+
+    _assert_copy_in_order(recording_step, RECORDING_HANDOFF_COPY)
 
 
 def test_generator_draws_structured_response_closure(
