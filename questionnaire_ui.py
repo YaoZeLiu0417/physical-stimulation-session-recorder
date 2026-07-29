@@ -210,18 +210,46 @@ def question_context_label(question: QuestionSpec, visit: str) -> str:
     raise KeyError(f"No questionnaire context for {visit}:{question.id}")
 
 
+def questionnaire_progress_markup(
+    context_label: object, *, current: int, total: int
+) -> str:
+    """Build escaped progress markup for one active questionnaire step."""
+
+    if (
+        type(current) is not int
+        or type(total) is not int
+        or total < 1
+        or not 1 <= current <= total
+    ):
+        raise ValueError("questionnaire progress must be within the active flow")
+    safe_context = html.escape(str(context_label), quote=True)
+    percentage = f"{current / total * 100:.4f}".rstrip("0").rstrip(".")
+    return (
+        '<section class="questionnaire-progress">'
+        '<div class="questionnaire-progress__meta">'
+        '<div class="questionnaire-progress__context">'
+        '<span class="questionnaire-progress__eyebrow">CURRENT PROMPT</span>'
+        f"<strong>{safe_context}</strong></div>"
+        f'<div class="questionnaire-progress__counter">{current:02d} '
+        f"<span>/ {total:02d}</span></div></div>"
+        '<div class="questionnaire-progress__track" role="progressbar" '
+        f'aria-valuemin="1" aria-valuemax="{total}" aria-valuenow="{current}">'
+        '<span class="questionnaire-progress__fill" '
+        f'style="width: {percentage}%"></span></div></section>'
+    )
+
+
 def render_question_context(
     context_label: object, *, current: int, total: int
 ) -> None:
     """Render escaped context for the currently visible question."""
 
-    safe_context = html.escape(str(context_label), quote=True)
-    safe_current = html.escape(str(current), quote=True)
-    safe_total = html.escape(str(total), quote=True)
     st.markdown(
-        '<div class="questionnaire-context">'
-        f"{safe_context} · {safe_current} / {safe_total}"
-        "</div>",
+        questionnaire_progress_markup(
+            context_label,
+            current=current,
+            total=total,
+        ),
         unsafe_allow_html=True,
     )
 

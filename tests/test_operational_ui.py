@@ -189,6 +189,27 @@ def test_recorder_iframe_preserves_streamlit_reported_height() -> None:
     assert "height: auto !important" not in css
 
 
+def test_questionnaire_canvas_is_open_aligned_and_responsive() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert ".st-key-operational_questionnaire_canvas" in css
+    assert ".questionnaire-progress__meta" in css
+    assert ".questionnaire-progress__track" in css
+    assert ".questionnaire-progress__fill" in css
+    assert "background: var(--operational-rose)" in css
+    assert '[data-testid="stWidgetLabel"]' in css
+    assert "border-left: 4px solid var(--operational-cyan)" in css
+    assert ".questionnaire-endpoints" in css
+    assert "justify-content: space-between" in css
+    assert (
+        ".st-key-operational_questionnaire_canvas {\n"
+        "  margin: 0 auto;\n"
+        "  max-width: 960px;\n"
+        "  width: 100%;\n"
+        "}"
+    ) in css
+
+
 def test_stage_markers_have_stable_circular_geometry_and_state_surfaces() -> None:
     css = operational_ui.OPERATIONAL_CSS
 

@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
+import questionnaire_ui
 from questionnaire_scoring import COUNT_FIELDS
 from questionnaire_specs import (
     DAILY_CONDITIONAL,
@@ -183,48 +185,50 @@ def test_field_status_distinguishes_answered_missing_and_not_applicable():
     }
 
 
-def test_question_context_is_local_and_html_escaped(monkeypatch):
-    rendered = []
-
-    def capture(body, **kwargs):
-        rendered.append((body, kwargs))
-
-    monkeypatch.setattr("questionnaire_ui.st.markdown", capture)
-    render_question_context(
+def test_questionnaire_progress_markup_is_escaped_and_accessible():
+    markup = questionnaire_ui.questionnaire_progress_markup(
         '<img src=x onerror="bad()">',
-        current=1,
-        total=5,
+        current=3,
+        total=8,
     )
 
-    assert rendered == [
-        (
-            '<div class="questionnaire-context">'
-            "&lt;img src=x onerror=&quot;bad()&quot;&gt; · 1 / 5"
-            "</div>",
-            {"unsafe_allow_html": True},
+    assert "<img" not in markup
+    assert "&lt;img src=x onerror=&quot;bad()&quot;&gt;" in markup
+    assert 'class="questionnaire-progress"' in markup
+    assert 'role="progressbar"' in markup
+    assert 'aria-valuemin="1"' in markup
+    assert 'aria-valuemax="8"' in markup
+    assert 'aria-valuenow="3"' in markup
+    assert 'style="width: 37.5%"' in markup
+    assert "03" in markup
+    assert "08" in markup
+
+
+@pytest.mark.parametrize(
+    ("current", "total"),
+    ((0, 1), (2, 1), (1, 0), (-1, 3), (True, 3), (1, False)),
+)
+def test_questionnaire_progress_markup_rejects_invalid_bounds(current, total):
+    with pytest.raises(ValueError):
+        questionnaire_ui.questionnaire_progress_markup(
+            "context", current=current, total=total
         )
-    ]
 
 
-def test_question_context_html_escapes_runtime_counter_values(monkeypatch):
+def test_question_context_renders_only_the_validated_progress_markup(monkeypatch):
     rendered = []
-
-    def capture(body, **kwargs):
-        rendered.append((body, kwargs))
-
-    monkeypatch.setattr("questionnaire_ui.st.markdown", capture)
-    render_question_context(
-        "当前",
-        current='<img src=x onerror="bad()">',
-        total='<script id="total">bad()</script>',
+    monkeypatch.setattr(
+        "questionnaire_ui.st.markdown",
+        lambda body, **kwargs: rendered.append((body, kwargs)),
     )
+
+    render_question_context("过去 24 小时", current=1, total=5)
 
     assert rendered == [
         (
-            '<div class="questionnaire-context">'
-            "当前 · &lt;img src=x onerror=&quot;bad()&quot;&gt; / "
-            "&lt;script id=&quot;total&quot;&gt;bad()&lt;/script&gt;"
-            "</div>",
+            questionnaire_ui.questionnaire_progress_markup(
+                "过去 24 小时", current=1, total=5
+            ),
             {"unsafe_allow_html": True},
         )
     ]
@@ -303,14 +307,17 @@ def test_daily_now_and_weekly_steps_render_accurate_context_titles():
     app.session_state["fixture_initial_step"] = 3
     app = app.run()
     markup = "\n".join(item.value for item in app.markdown)
-    assert "此时此刻 · 4 /" in markup
-    assert "过去 24 小时 · 4 /" not in markup
+    total = len(build_flow(_negative_daily_answers(), 7))
+    assert "此时此刻" in markup
+    assert "过去 24 小时" not in markup
+    assert f'>04 <span>/ {total:02d}</span>' in markup
 
     app.session_state[_fixture_keys().step] = 5
     app = app.run()
     weekly = WEEKLY_INSTRUMENTS[0]
     markup = "\n".join(item.value for item in app.markdown)
-    assert f"{weekly.label} · {weekly.time_window} · 6 /" in markup
+    assert f"{weekly.label} · {weekly.time_window}" in markup
+    assert f'>06 <span>/ {total:02d}</span>' in markup
 
 
 def test_formal_first_item_renders_instrument_context_and_crf_endpoints():
@@ -319,8 +326,10 @@ def test_formal_first_item_renders_instrument_context_and_crf_endpoints():
     app = app.run()
     markup = "\n".join(item.value for item in app.markdown)
     formal = FORMAL_INSTRUMENTS["dshi_lifetime"]
+    total = len(formal_flow("V1", {}))
 
-    assert f"{formal.label} · {formal.time_window} · 1 /" in markup
+    assert f"{formal.label} · {formal.time_window}" in markup
+    assert f'>01 <span>/ {total:02d}</span>' in markup
     assert "过去 24 小时" not in markup
     assert "1 我从未这样做过" in markup
     assert "5 做过超过10次" in markup
@@ -480,7 +489,7 @@ def test_unanswered_preloaded_controller_restores_its_conditional_flow():
     assert not app.session_state[keys_a.answered]
     assert DAILY_CONDITIONAL[0].id not in app.session_state[keys_a.values]
     markup = "\n".join(item.value for item in app.markdown)
-    assert "2 / 7" in markup
+    assert '>02 <span>/ 07</span>' in markup
 
     app.session_state["fixture_namespace"] = "record-B"
     app.session_state["fixture_answers"] = {}
@@ -497,7 +506,7 @@ def test_unanswered_preloaded_controller_restores_its_conditional_flow():
         "nssi_thought_present_24h": True
     }
     markup = "\n".join(item.value for item in app.markdown)
-    assert "2 / 7" in markup
+    assert '>02 <span>/ 07</span>' in markup
 
     app = _button(app, "←").click().run()
     assert app.radio[0].value is True
