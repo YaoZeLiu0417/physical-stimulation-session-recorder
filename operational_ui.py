@@ -109,6 +109,13 @@ OPERATIONAL_CSS = """<style>
 .operational-heading__counter { color: var(--operational-violet); font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .operational-heading h1 { margin: 0; color: var(--operational-navy); font-size: 28px; letter-spacing: 0; }
 .operational-heading p { margin: 0; color: var(--operational-violet); }
+.questionnaire-context {
+  color: var(--operational-violet);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
 .st-key-operational_questionnaire_canvas {
   margin: 0 auto;
   max-width: 960px;
@@ -194,6 +201,129 @@ OPERATIONAL_CSS = """<style>
   margin-top: 24px;
   padding-top: 18px;
 }
+.st-key-operational_package_canvas,
+.st-key-operational_completion_canvas {
+  margin: 0 auto;
+  max-width: 960px;
+  width: 100%;
+}
+.operational-package { margin: 28px 0 22px; }
+.operational-package__header {
+  align-items: flex-start;
+  border-bottom: 1px solid #D9DAE2;
+  border-top: 4px solid var(--operational-cyan);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 18px 0 16px;
+}
+.operational-package__header span {
+  color: var(--operational-rose);
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+.operational-package__header h2 {
+  color: var(--operational-navy);
+  font-size: 22px;
+  letter-spacing: 0;
+  line-height: 1.25;
+  margin: 5px 0 0;
+}
+.operational-package__header > strong {
+  background: var(--operational-cyan);
+  border-radius: 4px;
+  color: var(--operational-navy);
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 7px 9px;
+}
+.operational-package__filename {
+  border-bottom: 1px solid #D9DAE2;
+  color: var(--operational-violet);
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 15px 0;
+}
+.operational-package__facts {
+  border-bottom: 1px solid #D9DAE2;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.operational-package__fact { min-width: 0; padding: 16px 14px 16px 0; }
+.operational-package__fact + .operational-package__fact {
+  border-left: 1px solid #D9DAE2;
+  padding-left: 14px;
+}
+.operational-package__fact span {
+  color: #777786;
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  margin-bottom: 5px;
+}
+.operational-package__fact strong {
+  color: var(--operational-navy);
+  display: block;
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.operational-completion { padding-top: 8px; }
+.operational-completion__mark {
+  align-items: center;
+  background: var(--operational-cyan);
+  border-radius: 50%;
+  color: var(--operational-navy);
+  display: flex;
+  font-size: 28px;
+  font-weight: 800;
+  height: 56px;
+  justify-content: center;
+  margin: 6px 0 22px;
+  width: 56px;
+}
+.operational-completion h2 {
+  color: var(--operational-navy);
+  font-size: 30px;
+  letter-spacing: 0;
+  line-height: 1.25;
+  margin: 0;
+}
+.operational-completion > p {
+  color: var(--operational-violet);
+  line-height: 1.55;
+  margin: 12px 0 30px;
+  max-width: 680px;
+}
+.operational-completion__list { border-top: 4px solid var(--operational-cyan); }
+.operational-completion__row {
+  align-items: center;
+  border-bottom: 1px solid #D9DAE2;
+  color: var(--operational-navy);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 10px minmax(0, 1fr);
+  padding: 16px 2px;
+}
+.operational-completion__row > span {
+  background: var(--operational-cyan);
+  border-radius: 50%;
+  height: 8px;
+  width: 8px;
+}
+.operational-completion__row strong { font-size: 14px; line-height: 1.4; }
+.operational-completion .operational-completion__close {
+  border-top: 1px solid var(--operational-violet);
+  color: var(--operational-violet);
+  font-weight: 700;
+  margin-top: 28px;
+  max-width: none;
+  padding-top: 14px;
+}
 .operational-status { display: inline-block; padding: 8px 12px; border-radius: 6px; background: var(--operational-violet); color: var(--operational-white); }
 .operational-status--ready { background: var(--operational-cyan); color: var(--operational-navy); }
 .operational-status--checkpoint { background: var(--operational-peach); color: var(--operational-navy); }
@@ -254,6 +384,14 @@ iframe[title*="browser_local_recorder"] { width: 100%; max-width: 100%; }
   .questionnaire-progress__meta { align-items: flex-start; flex-direction: column; }
   .questionnaire-progress__counter { align-self: flex-end; }
   .st-key-operational_questionnaire_canvas [data-testid="stWidgetLabel"] p { font-size: 18px; }
+  .operational-package__header { flex-wrap: wrap; }
+  .operational-package__facts { grid-template-columns: 1fr; }
+  .operational-package__fact + .operational-package__fact {
+    border-left: 0;
+    border-top: 1px solid #D9DAE2;
+    padding-left: 0;
+  }
+  .operational-completion h2 { font-size: 26px; }
   .stButton > button, .stDownloadButton > button, .stTextInput, .stTextArea, .stSelectbox, .stNumberInput { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -316,6 +454,51 @@ def operational_status_markup(kind: str, message: object) -> str:
     if type(kind) is not str or kind not in {"neutral", "ready", "checkpoint", "blocking"}:
         raise ValueError("status kind must be neutral, ready, checkpoint, or blocking")
     return f'<div class="operational-status operational-status--{_escape(kind)}" role="status">{_escape(message)}</div>'
+
+
+def local_package_summary_markup(filename: object) -> str:
+    safe_filename = _escape(filename)
+    return (
+        '<section class="operational-package">'
+        '<div class="operational-package__header">'
+        '<div><span>LOCAL EXPORT</span><h2>问卷资料包已准备</h2></div>'
+        '<strong>READY</strong></div>'
+        f'<p class="operational-package__filename">{safe_filename}</p>'
+        '<div class="operational-package__facts">'
+        '<div class="operational-package__fact"><span>FORMAT</span>'
+        '<strong>ZIP</strong></div>'
+        '<div class="operational-package__fact"><span>CONTENTS</span>'
+        '<strong>JSON + Excel</strong></div>'
+        '<div class="operational-package__fact"><span>STORAGE</span>'
+        '<strong>仅保存到本机</strong></div>'
+        '</div></section>'
+    )
+
+
+def completion_confirmation_markup() -> str:
+    return (
+        '<section class="operational-completion">'
+        '<div class="operational-completion__mark" aria-hidden="true">&#10003;</div>'
+        '<h2>本次会话已完成。</h2>'
+        '<p>本地资料包已由您确认保存，本页面中的本次会话数据已完成清理。</p>'
+        '<div class="operational-completion__list">'
+        '<div class="operational-completion__row"><span></span>'
+        '<strong>本地资料包已确认保存</strong></div>'
+        '<div class="operational-completion__row"><span></span>'
+        '<strong>问卷数据已从当前会话清理</strong></div>'
+        '<div class="operational-completion__row"><span></span>'
+        '<strong>录制媒体未上传到应用服务器</strong></div>'
+        '</div><p class="operational-completion__close">'
+        '现在可以安全关闭此页面。</p></section>'
+    )
+
+
+def render_local_package_summary(filename: object) -> None:
+    st.markdown(local_package_summary_markup(filename), unsafe_allow_html=True)
+
+
+def render_completion_confirmation() -> None:
+    st.markdown(completion_confirmation_markup(), unsafe_allow_html=True)
 
 
 def render_operational_stage(

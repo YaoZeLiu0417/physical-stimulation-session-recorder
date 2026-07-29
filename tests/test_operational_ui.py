@@ -106,6 +106,52 @@ def test_status_markup_rejects_non_string_kind(kind: object) -> None:
         operational_ui.operational_status_markup(kind, "message")  # type: ignore[arg-type]
 
 
+def test_local_package_summary_is_escaped_and_local_only() -> None:
+    markup = operational_ui.local_package_summary_markup(
+        '<script>alert("x")</script>.zip'
+    )
+
+    assert "<script>" not in markup
+    assert "&lt;script&gt;" in markup
+    assert "LOCAL EXPORT" in markup
+    assert "JSON + Excel" in markup
+    assert "仅保存到本机" in markup
+    assert 'class="operational-package"' in markup
+    assert "upload" not in markup.casefold()
+
+
+def test_completion_confirmation_has_only_approved_outcomes() -> None:
+    markup = operational_ui.completion_confirmation_markup()
+
+    assert "本次会话已完成。" in markup
+    assert "本地资料包已确认保存" in markup
+    assert "问卷数据已从当前会话清理" in markup
+    assert "未上传到应用服务器" in markup
+    assert "现在可以安全关闭此页面。" in markup
+    assert 'class="operational-completion"' in markup
+    assert "subject" not in markup.casefold()
+    assert "filename" not in markup.casefold()
+
+
+def test_package_and_completion_renderers_emit_only_their_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        operational_ui.st,
+        "markdown",
+        lambda markup, unsafe_allow_html: calls.append((markup, unsafe_allow_html)),
+    )
+
+    operational_ui.render_local_package_summary("session.zip")
+    operational_ui.render_completion_confirmation()
+
+    assert calls == [
+        (operational_ui.local_package_summary_markup("session.zip"), True),
+        (operational_ui.completion_confirmation_markup(), True),
+    ]
+
+
 class IntSubclass(int):
     pass
 
@@ -208,6 +254,40 @@ def test_questionnaire_canvas_is_open_aligned_and_responsive() -> None:
         "  width: 100%;\n"
         "}"
     ) in css
+
+
+def test_package_and_completion_canvases_share_open_responsive_structure() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+
+    assert ".st-key-operational_package_canvas" in css
+    assert ".st-key-operational_completion_canvas" in css
+    assert ".operational-package__header" in css
+    assert ".operational-package__facts" in css
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in css
+    assert ".operational-package__filename" in css
+    assert ".operational-completion__mark" in css
+    assert ".operational-completion__row" in css
+    assert ".operational-completion__close" in css
+    assert (
+        ".st-key-operational_package_canvas,\n"
+        ".st-key-operational_completion_canvas {\n"
+        "  margin: 0 auto;\n"
+        "  max-width: 960px;\n"
+        "  width: 100%;\n"
+        "}"
+    ) in css
+    scope_rule = css.split(
+        ".st-key-operational_package_canvas,\n"
+        ".st-key-operational_completion_canvas {",
+        1,
+    )[1].split("}", 1)[0]
+    assert "border:" not in scope_rule
+    assert "background:" not in scope_rule
+    mobile_css = css.split("@media (max-width: 840px)", 1)[1]
+    assert (
+        ".operational-package__facts { grid-template-columns: 1fr; }"
+        in mobile_css
+    )
 
 
 def test_stage_markers_have_stable_circular_geometry_and_state_surfaces() -> None:
