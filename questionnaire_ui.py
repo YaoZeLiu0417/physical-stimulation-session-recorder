@@ -233,6 +233,7 @@ def questionnaire_progress_markup(
         f'<div class="questionnaire-progress__counter">{current:02d} '
         f"<span>/ {total:02d}</span></div></div>"
         '<div class="questionnaire-progress__track" role="progressbar" '
+        f'aria-label="问卷进度：{safe_context}，{current} / {total}" '
         f'aria-valuemin="1" aria-valuemax="{total}" aria-valuenow="{current}">'
         '<span class="questionnaire-progress__fill" '
         f'style="width: {percentage}%"></span></div></section>'
@@ -431,15 +432,16 @@ def render_questionnaire(
     step = min(max(requested_step, 0), max(len(flow) - 1, 0))
     st.session_state[state_keys.step] = step
 
+    if not flow:
+        _show_pending_errors(state_keys)
+        return answers, True
+
     render_question_context(
-        question_context_label(flow[step], visit) if flow else "当前",
-        current=step + 1 if flow else 0,
+        question_context_label(flow[step], visit),
+        current=step + 1,
         total=len(flow),
     )
     _show_pending_errors(state_keys)
-
-    if not flow:
-        return answers, True
 
     question = flow[step]
     widget_key = state_keys.widget(question.id)

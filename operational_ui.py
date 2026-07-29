@@ -176,14 +176,14 @@ OPERATIONAL_CSS = """<style>
   font-weight: 700;
   line-height: 1.4;
 }
-.st-key-operational_questionnaire_canvas [data-testid="stRadio"] label {
+.st-key-operational_questionnaire_canvas [data-testid="stRadio"] [role="radiogroup"] > label {
   background: var(--operational-white);
   border: 1px solid var(--operational-violet);
   border-radius: 4px;
   min-height: 48px;
   padding: 10px 14px;
 }
-.st-key-operational_questionnaire_canvas [data-testid="stRadio"] label:has(input:checked) {
+.st-key-operational_questionnaire_canvas [data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {
   background: #FFF8FC;
   border: 2px solid var(--operational-rose);
 }

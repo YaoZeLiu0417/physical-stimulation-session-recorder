@@ -199,6 +199,11 @@ def test_questionnaire_progress_markup_is_escaped_and_accessible():
     assert 'aria-valuemin="1"' in markup
     assert 'aria-valuemax="8"' in markup
     assert 'aria-valuenow="3"' in markup
+    assert (
+        'aria-label="问卷进度：&lt;img src=x '
+        'onerror=&quot;bad()&quot;&gt;，3 / 8"'
+        in markup
+    )
     assert 'style="width: 37.5%"' in markup
     assert "03" in markup
     assert "08" in markup
@@ -232,6 +237,41 @@ def test_question_context_renders_only_the_validated_progress_markup(monkeypatch
             {"unsafe_allow_html": True},
         )
     ]
+
+
+def test_empty_questionnaire_flow_returns_complete_without_progress(monkeypatch):
+    namespace = "empty-flow"
+    state_keys = questionnaire_state_keys(namespace, "daily")
+    session_state = {state_keys.error: ["pending error"]}
+    context_calls = []
+    rendered_errors = []
+    real_render_question_context = questionnaire_ui.render_question_context
+
+    def tracked_render_question_context(*args, **kwargs):
+        context_calls.append((args, kwargs))
+        return real_render_question_context(*args, **kwargs)
+
+    monkeypatch.setattr(questionnaire_ui.st, "session_state", session_state)
+    monkeypatch.setattr(questionnaire_ui, "build_flow", lambda *args: ())
+    monkeypatch.setattr(
+        questionnaire_ui,
+        "render_question_context",
+        tracked_render_question_context,
+    )
+    monkeypatch.setattr(questionnaire_ui.st, "error", rendered_errors.append)
+
+    answers = {}
+    result = questionnaire_ui.render_questionnaire(
+        subject_id="subject",
+        intervention_day=1,
+        answers=answers,
+        save_draft=lambda *_: pytest.fail("empty flow must not save"),
+        state_namespace=namespace,
+    )
+
+    assert result == ({}, True)
+    assert context_calls == []
+    assert rendered_errors == ["pending error"]
 
 
 def test_questionnaire_source_has_no_competing_global_shell():

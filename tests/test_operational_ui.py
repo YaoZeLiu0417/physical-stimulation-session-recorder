@@ -256,6 +256,23 @@ def test_questionnaire_canvas_is_open_aligned_and_responsive() -> None:
     ) in css
 
 
+def test_radio_answer_cards_are_scoped_to_radiogroup_options() -> None:
+    css = operational_ui.OPERATIONAL_CSS
+    broad_selector = (
+        '.st-key-operational_questionnaire_canvas '
+        '[data-testid="stRadio"] label'
+    )
+    option_selector = (
+        '.st-key-operational_questionnaire_canvas '
+        '[data-testid="stRadio"] [role="radiogroup"] > label'
+    )
+
+    assert f"{broad_selector} {{" not in css
+    assert f"{broad_selector}:has(input:checked) {{" not in css
+    assert f"{option_selector} {{" in css
+    assert f"{option_selector}:has(input:checked) {{" in css
+
+
 def test_package_and_completion_canvases_share_open_responsive_structure() -> None:
     css = operational_ui.OPERATIONAL_CSS
 
