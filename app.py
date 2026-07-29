@@ -40,7 +40,12 @@ from local_recording_workflow import (
     local_recording_metadata,
     recording_gate_satisfied,
 )
-from operational_ui import render_operational_stage, render_operational_status
+from operational_ui import (
+    render_completion_confirmation,
+    render_local_package_summary,
+    render_operational_stage,
+    render_operational_status,
+)
 from participant_identity import validate_subject_id
 from questionnaire_export import build_participant_export
 from questionnaire_specs import VISIT_INSTRUMENT_IDS
@@ -390,27 +395,33 @@ def _finish_current_session() -> None:
 
 
 def _render_export_finalization(bundle: LocalExportBundle) -> None:
-    render_operational_status(
-        "checkpoint",
-        "下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。",
-    )
-    st.download_button(
-        label="下载问卷记录（JSON + Excel）",
-        data=bundle.data,
-        file_name=bundle.filename,
-        mime="application/zip",
-    )
-    saved_locally = st.checkbox(
-        "我确认问卷 ZIP 已保存到本地",
-        key=_SAVED_LOCALLY_KEY,
-    )
-    st.button(
-        "完成本次会话",
-        type="primary",
-        disabled=not saved_locally,
-        on_click=_finish_current_session,
-        key="operational_finish",
-    )
+    with st.container(key="operational_package_canvas"):
+        render_operational_status(
+            "checkpoint",
+            "下载前请勿刷新或关闭页面，否则当前问卷内容将丢失。",
+        )
+        render_local_package_summary(bundle.filename)
+        st.download_button(
+            label="下载问卷记录（JSON + Excel）",
+            data=bundle.data,
+            file_name=bundle.filename,
+            mime="application/zip",
+            type="primary",
+            icon=":material/download:",
+            use_container_width=True,
+        )
+        saved_locally = st.checkbox(
+            "我确认问卷 ZIP 已保存到本地",
+            key=_SAVED_LOCALLY_KEY,
+        )
+        st.button(
+            "完成本次会话",
+            type="secondary",
+            disabled=not saved_locally,
+            on_click=_finish_current_session,
+            key="operational_finish",
+            use_container_width=True,
+        )
 
 
 def _show_support_message() -> None:
@@ -456,7 +467,8 @@ require_app_password()
 
 if st.session_state.get(_COMPLETE_KEY) is True:
     render_operational_stage(6)
-    st.success("本次会话已完成。")
+    with st.container(key="operational_completion_canvas"):
+        render_completion_confirmation()
     st.stop()
 
 record_date = _utc_now().date()
@@ -835,10 +847,11 @@ if active_stage == 3:
 if active_stage == 5:
     bundle = cached_bundle if cached_bundle_is_valid else None
     if bundle is None and st.session_state.get(_EXPORT_ERROR_KEY) is True:
-        st.error("下载文件暂时无法生成，请重试。")
-        if st.button("重试生成下载文件", key="operational_export_retry"):
-            st.session_state.pop(_EXPORT_ERROR_KEY, None)
-            st.rerun()
+        with st.container(key="operational_package_canvas"):
+            st.error("下载文件暂时无法生成，请重试。")
+            if st.button("重试生成下载文件", key="operational_export_retry"):
+                st.session_state.pop(_EXPORT_ERROR_KEY, None)
+                st.rerun()
         st.stop()
 
     if bundle is None:
@@ -853,10 +866,11 @@ if active_stage == 5:
                 raise TypeError("export builder returned an invalid bundle")
         except Exception:
             st.session_state[_EXPORT_ERROR_KEY] = True
-            st.error("下载文件暂时无法生成，请重试。")
-            if st.button("重试生成下载文件", key="operational_export_retry"):
-                st.session_state.pop(_EXPORT_ERROR_KEY, None)
-                st.rerun()
+            with st.container(key="operational_package_canvas"):
+                st.error("下载文件暂时无法生成，请重试。")
+                if st.button("重试生成下载文件", key="operational_export_retry"):
+                    st.session_state.pop(_EXPORT_ERROR_KEY, None)
+                    st.rerun()
             st.stop()
         st.session_state[_EXPORT_KEY] = bundle
         st.session_state.pop(_EXPORT_ERROR_KEY, None)
@@ -902,16 +916,17 @@ def save_questionnaire_draft(
         )
 
 
-answers, questionnaire_complete = render_questionnaire(
-    subject_id=safe_subject_id,
-    intervention_day=int(record["intervention_day"]),
-    answers=answers,
-    save_draft=save_questionnaire_draft,
-    visit=visit,
-    state_namespace=state_namespace,
-    initial_answered_field_ids=answered_by_visit.get(visit, []),
-    initial_step=step_by_visit.get(visit, 0),
-)
+with st.container(key="operational_questionnaire_canvas"):
+    answers, questionnaire_complete = render_questionnaire(
+        subject_id=safe_subject_id,
+        intervention_day=int(record["intervention_day"]),
+        answers=answers,
+        save_draft=save_questionnaire_draft,
+        visit=visit,
+        state_namespace=state_namespace,
+        initial_answered_field_ids=answered_by_visit.get(visit, []),
+        initial_step=step_by_visit.get(visit, 0),
+    )
 current_answered = set(st.session_state.get(state_keys.answered, []))
 persisted_answered = record.get("completion", {}).get(
     "answered_field_ids", {}

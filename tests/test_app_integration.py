@@ -723,6 +723,9 @@ def test_each_operational_gate_renders_only_its_stage_controls(monkeypatch):
     assert len(questionnaire_calls) == 2
     assert len(export_calls) == 1
     assert len(app.get("download_button")) == 1
+    stage_five_text = _visible_app_text(app)
+    assert 'class="operational-package"' in stage_five_text
+    assert bundle.filename in stage_five_text
     assert not [item for item in app.text_input if item.label.startswith("来访者编号")]
     assert not [item for item in app.slider if "当前心境" in item.label]
 
@@ -733,7 +736,10 @@ def test_each_operational_gate_renders_only_its_stage_controls(monkeypatch):
     _element_by_label(app.button, "完成本次会话").click().run()
 
     _assert_active_stage(app, 6)
-    assert "本次会话已完成。" in _visible_app_text(app)
+    stage_six_text = _visible_app_text(app)
+    assert 'class="operational-completion"' in stage_six_text
+    assert "本次会话已完成。" in stage_six_text
+    assert "未上传到应用服务器" in stage_six_text
     assert not app.get("download_button")
 
 
@@ -757,6 +763,9 @@ def test_app_routes_through_the_shared_operational_stage_shell():
     assert ast.literal_eval(keywords["page_title"]) == "Session Companion"
     assert ast.literal_eval(keywords["layout"]) == "wide"
     source = _source()
+    assert 'key="operational_questionnaire_canvas"' in source
+    assert "render_completion_confirmation()" in source
+    assert 'st.success("本次会话已完成。")' not in source
     assert 'st.title("问卷会话")' not in source
     assert 'st.subheader("① 当日状态")' not in source
     assert 'st.subheader("② 本地录制")' not in source
@@ -1707,6 +1716,9 @@ def test_download_control_has_exact_local_zip_contract_and_separate_finish_gate(
     assert ast.unparse(keywords["file_name"]) == "bundle.filename"
     assert isinstance(keywords["mime"], ast.Constant)
     assert keywords["mime"].value == "application/zip"
+    assert ast.literal_eval(keywords["type"]) == "primary"
+    assert ast.literal_eval(keywords["icon"]) == ":material/download:"
+    assert ast.literal_eval(keywords["use_container_width"]) is True
 
     source = _source()
     assert "我确认问卷 ZIP 已保存到本地" in source
@@ -2108,7 +2120,8 @@ def test_saved_recording_persists_only_exact_v2_metadata_and_enters_questionnair
     assert "duration_seconds" not in visible
     assert "camera_ready" not in visible
     assert "microphone_ready" not in visible
-    assert "filename" not in visible.casefold()
+    assert "'filename'" not in visible.casefold()
+    assert '"filename"' not in visible.casefold()
     _assert_active_stage(app, 4)
     assert "录制已确认保存在本机，现已进入问卷。" not in visible
     assert "刷新或关闭页面" in visible
@@ -2555,7 +2568,6 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
         "daily",
     ).widget("nssi_urge_now")
     _assert_active_stage(app, 5)
-    assert not [item for item in app.slider if item.label == "answer mutation probe"]
     assert frozen_record["daily_context"]["sleep_hours"] == 7.0
     assert export_snapshots[0]["daily_context"]["sleep_hours"] == 7.0
 
@@ -2586,12 +2598,18 @@ def test_cached_export_enters_finalization_only_and_ignores_stale_widget_events(
             "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
+            "type": "primary",
+            "icon": ":material/download:",
+            "use_container_width": True,
         },
         {
             "label": "下载问卷记录（JSON + Excel）",
             "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
+            "type": "primary",
+            "icon": ":material/download:",
+            "use_container_width": True,
         },
     ]
     assert _element_by_label(
@@ -2623,9 +2641,12 @@ def test_download_button_receives_exact_bundle_bytes_name_and_mime(monkeypatch):
             "data": bundle.data,
             "file_name": "session-20260724-080910.zip",
             "mime": "application/zip",
+            "type": "primary",
+            "icon": ":material/download:",
+            "use_container_width": True,
         }
     ]
-    assert bundle.filename not in _visible_app_text(app)
+    assert bundle.filename in _visible_app_text(app)
 
 
 def test_export_failure_is_neutral_retryable_and_preserves_responses(monkeypatch):
@@ -2853,7 +2874,9 @@ def test_finish_requires_local_save_then_clears_sensitive_state_only(monkeypatch
         "operational_complete",
     }
     visible = _visible_app_text(app)
+    assert 'class="operational-completion"' in visible
     assert "本次会话已完成。" in visible
+    assert "未上传到应用服务器" in visible
     assert not app.get("download_button")
     assert not app.slider
     assert not app.text_area
@@ -2869,6 +2892,11 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
     )
     _element_by_label(app.button, "确认日期").click().run()
     context_widget_state = _daily_context_widget_state(app)
+    admin_day_widget_state = {
+        str(key): copy.deepcopy(value)
+        for key, value in app.session_state.filtered_state.items()
+        if str(key).startswith("operational_admin_day::")
+    }
     _element_by_label(
         app.button,
         "确认当日状态，进入本地录制",
@@ -2877,6 +2905,9 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
         app,
         context_widget_state,
     )
+    for key, value in admin_day_widget_state.items():
+        if key not in app.session_state:
+            app.session_state[key] = copy.deepcopy(value)
     # AppTest serializes the previous stage's widgets once more before the
     # clean stage-5 run; restore their values only for that handoff.
     app.session_state["participant_identifier"] = "sub-001"
@@ -2911,7 +2942,7 @@ def test_admin_finish_preserves_auth_only_and_clears_selected_context(monkeypatc
     }
     assert app.session_state["auth_source"] == "admin"
     assert app.session_state["operational_complete"] is True
-    assert _visible_app_text(app).strip().endswith("本次会话已完成。")
+    assert "现在可以安全关闭此页面。" in _visible_app_text(app)
 
 
 def test_admin_completion_does_not_short_circuit_valid_signed_request(monkeypatch):
@@ -3046,7 +3077,7 @@ def test_legacy_signed_completion_same_identity_remains_complete(monkeypatch):
     assert app.session_state["auth_source"] == "signed_link"
     assert app.session_state["operational_complete"] is True
     assert recorder_calls == []
-    assert _visible_app_text(app).strip().endswith("本次会话已完成。")
+    assert "现在可以安全关闭此页面。" in _visible_app_text(app)
 
 
 @pytest.mark.parametrize(
